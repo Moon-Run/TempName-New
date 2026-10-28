@@ -45,6 +45,15 @@ git submodule status
 
 ## 新服务器的环境
 
+全新 Ubuntu22.04 CUDA12.8 容器可直接使用 [env 一键配置脚本](env/README.md)：
+
+```bash
+cd /workspace/TempName-New
+bash env/setup_h100.sh
+```
+
+默认创建 `/workspace/conda-envs/tempname-h100`，复用并核验同级 `Megatron-LM`，补齐固定依赖和 Apex，生成测试入口自动读取的环境文件。脚本不启动正式训练。
+
 代码复制不包含软件环境。按 [H100 TP8 部署文档](docs/design/design-h100/deploy-tp8.md) 准备 Python、PyTorch、Apex、CUDA 和编译器；历史测试使用 Python 3.10、PyTorch 2.6.0+cu124、CUDA 12.8 编译自定义 Flux，运行时／Apex 的要求见部署文档。不要复制旧服务器的 Conda 路径配置。
 
 Megatron-LM 仍为仓库外的独立依赖，默认放在同级 `../Megatron-LM`，固定提交为 `3ea68ad6042cc1204386ae9364358f7c4de1bc37`（`core_v0.12.3`）；可以通过测试入口的 `--megatron` 指定其他路径。仅有本仓库还不能替代 Megatron 或已安装的软件环境。
