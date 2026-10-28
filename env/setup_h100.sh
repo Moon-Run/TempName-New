@@ -38,13 +38,16 @@ export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 # The CUDA development image need not contain Python or Git. Bootstrap only
 # these OS utilities; the Python controller checks all CUDA/compiler installs.
 setup_missing=()
-for setup_package in python3 curl git bzip2 ca-certificates; do
+# ZoneInfo('Asia/Shanghai') is used before Conda exists. Minimal CUDA images
+# need the OS timezone database as well as the bootstrap Python interpreter.
+for setup_package in python3 curl git bzip2 ca-certificates tzdata; do
     if [[ $(dpkg-query -W -f='${Status}' "$setup_package" 2>/dev/null || true) != 'install ok installed' ]]; then
         setup_missing+=("$setup_package")
     fi
 done
 if (( ${#setup_missing[@]} )); then
     export DEBIAN_FRONTEND=noninteractive
+    export TZ=Asia/Shanghai
     apt-get -o Dpkg::Lock::Timeout=120 -o Acquire::Retries=3 update
     apt-get -o Dpkg::Lock::Timeout=120 -o Acquire::Retries=3 install -y --no-install-recommends "${setup_missing[@]}"
 fi

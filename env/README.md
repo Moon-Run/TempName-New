@@ -19,6 +19,8 @@ bash env/setup_h100.sh
 
 ## 安装的内容
 
+引导阶段先安装系统 Python 和 `tzdata`，以支持生成 `Asia/Shanghai` 时区的日志时间。若旧版脚本报 `ZoneInfoNotFoundError`，在容器中执行 `apt-get update && DEBIAN_FRONTEND=noninteractive TZ=Asia/Shanghai apt-get install -y tzdata` 后重跑即可；该报错发生在训练环境安装之前，不能据此执行激活或开始训练。
+
 | 项目 | 版本／路径 |
 | --- | --- |
 | Miniforge 引导程序 | 固定 `25.3.1-0`，下载后检查固定 SHA256；放在 `/workspace/.h100-env/miniforge` |
