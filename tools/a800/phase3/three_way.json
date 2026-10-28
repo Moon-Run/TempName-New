@@ -1,0 +1,19 @@
+{
+  "policies": ["original", "remote_first", "interleaved"],
+  "orders": [
+    ["original", "remote_first", "interleaved"],
+    ["original", "interleaved", "remote_first"],
+    ["remote_first", "original", "interleaved"],
+    ["remote_first", "interleaved", "original"],
+    ["interleaved", "original", "remote_first"],
+    ["interleaved", "remote_first", "original"]
+  ],
+  "shapes": [[1024,4096,2048], [4096,4096,2048], [8192,4096,2048], [1024,4096,8192], [4096,4096,8192], [8192,4096,8192], [4096,4160,8192]],
+  "world_sizes": [4],
+  "seeds": [17,29,43],
+  "warmup_initial": 500,
+  "warmup_per_trial": 30,
+  "iters": 100,
+  "trial_count": 12,
+  "scope": "Two job repetitions, seven shapes, six permutations of three unchanged CUDA policies; same fixed IPC wrapper. Interleaved cycles rank, rank+1, rank+2, rank+3 and traverses each partition row-major. No padded cohort slots; N edge tiles permitted. All samples retained, diagnostics after timing."
+}

@@ -1,0 +1,77 @@
+{
+  "megatron_commit": "3ea68ad6042cc1204386ae9364358f7c4de1bc37",
+  "policies": [
+    "native",
+    "original",
+    "remote_first",
+    "interleaved"
+  ],
+  "orders": [
+    [
+      "native",
+      "original",
+      "interleaved",
+      "remote_first"
+    ],
+    [
+      "original",
+      "remote_first",
+      "native",
+      "interleaved"
+    ],
+    [
+      "remote_first",
+      "interleaved",
+      "original",
+      "native"
+    ],
+    [
+      "interleaved",
+      "native",
+      "remote_first",
+      "original"
+    ]
+  ],
+  "cases": [
+    {
+      "name": "l12-h2048-s2048-tp4",
+      "hidden": 2048,
+      "ffn": 8192,
+      "heads": 32,
+      "sequence": 2048,
+      "tp": 4
+    },
+    {
+      "name": "l12-h2048-s2048-tp8",
+      "hidden": 2048,
+      "ffn": 8192,
+      "heads": 32,
+      "sequence": 2048,
+      "tp": 8
+    },
+    {
+      "name": "l12-h4096-s4096-tp8",
+      "hidden": 4096,
+      "ffn": 16384,
+      "heads": 64,
+      "sequence": 4096,
+      "tp": 8
+    }
+  ],
+  "common": {
+    "layers": 12,
+    "micro_batch": 1,
+    "global_batch": 4,
+    "seed": 1234,
+    "token_seed": 4321,
+    "vocab": 8192
+  },
+  "warmup_steps": 10,
+  "timed_steps": 20,
+  "smoke_warmup_steps": 2,
+  "smoke_steps": 3,
+  "profile_steps": 1,
+  "repetitions": 2,
+  "ring_reduction": true,
+  "scope": "12-layer GPT full GPU-resident optimizer steps, BF16 and TP only. Native Megatron, original Flux, remote-first and interleaved. Four position-balanced blocks per independent job, two job repetitions per case. Record loss, wall time, throughput, gradients and peak memory. No prior small-model error thresholds applied."
+}

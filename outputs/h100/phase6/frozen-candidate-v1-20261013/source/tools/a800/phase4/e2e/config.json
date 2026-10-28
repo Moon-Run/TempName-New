@@ -1,0 +1,103 @@
+{
+  "megatron_commit": "3ea68ad6042cc1204386ae9364358f7c4de1bc37",
+  "policies": [
+    "original",
+    "original_matched",
+    "taco_separate",
+    "taco_fused"
+  ],
+  "orders": [
+    [
+      "original",
+      "original_matched",
+      "taco_separate",
+      "taco_fused"
+    ],
+    [
+      "original_matched",
+      "taco_separate",
+      "taco_fused",
+      "original"
+    ],
+    [
+      "taco_separate",
+      "taco_fused",
+      "original",
+      "original_matched"
+    ],
+    [
+      "taco_fused",
+      "original",
+      "original_matched",
+      "taco_separate"
+    ],
+    [
+      "original",
+      "original_matched",
+      "taco_separate",
+      "taco_fused"
+    ],
+    [
+      "original_matched",
+      "taco_separate",
+      "taco_fused",
+      "original"
+    ],
+    [
+      "taco_separate",
+      "taco_fused",
+      "original",
+      "original_matched"
+    ],
+    [
+      "taco_fused",
+      "original",
+      "original_matched",
+      "taco_separate"
+    ]
+  ],
+  "cases": [
+    {
+      "name": "l12-h2048-s2048-tp4",
+      "hidden": 2048,
+      "ffn": 8192,
+      "heads": 32,
+      "sequence": 2048,
+      "tp": 4
+    }
+  ],
+  "common": {
+    "layers": 12,
+    "micro_batch": 1,
+    "global_batch": 4,
+    "seed": 1234,
+    "token_seed": 4321,
+    "vocab": 8192
+  },
+  "warmup_steps": 10,
+  "timed_steps": 20,
+  "smoke_warmup_steps": 2,
+  "smoke_steps": 3,
+  "profile_steps": 1,
+  "repetitions": 2,
+  "ring_reduction": true,
+  "scope": "MLP-only all-remote TACO forward compression, original tile order, attention BF16 Flux. BF16 AllGather/dgrad/wgrad backward (straight-through treatment of codec), fixed synthetic full optimizer steps; not convergence or exact codec-gradient evidence.",
+  "module_policies": {
+    "original": {
+      "attention": "original",
+      "mlp": "original"
+    },
+    "original_matched": {
+      "attention": "original",
+      "mlp": "original"
+    },
+    "taco_separate": {
+      "attention": "original",
+      "mlp": "taco_separate"
+    },
+    "taco_fused": {
+      "attention": "original",
+      "mlp": "taco_fused"
+    }
+  }
+}

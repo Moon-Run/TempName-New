@@ -1,0 +1,82 @@
+{
+  "shapes": [
+    [
+      8192,
+      4096,
+      2048
+    ],
+    [
+      4096,
+      4096,
+      8192
+    ],
+    [
+      2048,
+      2048,
+      2048
+    ],
+    [
+      2048,
+      2048,
+      8192
+    ]
+  ],
+  "world_size": 4,
+  "policies": [
+    "original",
+    "remote_first",
+    "interleaved",
+    "remote_arrival",
+    "interleaved_arrival"
+  ],
+  "window": 16,
+  "calibration_passes": 3,
+  "ring_reduction": true,
+  "fp32_policy": "diagnostic_only_user_authorized",
+  "seeds": [
+    17,
+    29,
+    43
+  ],
+  "warmup_initial": 500,
+  "warmup_per_trial": 30,
+  "iters": 100,
+  "trial_count": 12,
+  "orders": [
+    [
+      "original",
+      "remote_first",
+      "interleaved",
+      "remote_arrival",
+      "interleaved_arrival"
+    ],
+    [
+      "remote_first",
+      "interleaved",
+      "remote_arrival",
+      "interleaved_arrival",
+      "original"
+    ],
+    [
+      "interleaved",
+      "remote_arrival",
+      "interleaved_arrival",
+      "original",
+      "remote_first"
+    ],
+    [
+      "remote_arrival",
+      "interleaved_arrival",
+      "original",
+      "remote_first",
+      "interleaved"
+    ],
+    [
+      "interleaved_arrival",
+      "original",
+      "remote_first",
+      "interleaved",
+      "remote_arrival"
+    ]
+  ]
+}

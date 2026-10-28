@@ -1,0 +1,141 @@
+{
+  "megatron_commit": "3ea68ad6042cc1204386ae9364358f7c4de1bc37",
+  "policies": [
+    "native",
+    "original",
+    "taco_separate",
+    "remote_bf16",
+    "interleaved_bf16",
+    "remote_all",
+    "interleaved_all",
+    "remote_selective",
+    "interleaved_selective"
+  ],
+  "orders": [
+    [
+      "native",
+      "original",
+      "taco_separate",
+      "remote_bf16",
+      "interleaved_bf16",
+      "remote_all",
+      "interleaved_all",
+      "remote_selective",
+      "interleaved_selective"
+    ],
+    [
+      "original",
+      "taco_separate",
+      "remote_bf16",
+      "interleaved_bf16",
+      "remote_all",
+      "interleaved_all",
+      "remote_selective",
+      "interleaved_selective",
+      "native"
+    ],
+    [
+      "taco_separate",
+      "remote_bf16",
+      "interleaved_bf16",
+      "remote_all",
+      "interleaved_all",
+      "remote_selective",
+      "interleaved_selective",
+      "native",
+      "original"
+    ],
+    [
+      "remote_bf16",
+      "interleaved_bf16",
+      "remote_all",
+      "interleaved_all",
+      "remote_selective",
+      "interleaved_selective",
+      "native",
+      "original",
+      "taco_separate"
+    ],
+    [
+      "interleaved_bf16",
+      "remote_all",
+      "interleaved_all",
+      "remote_selective",
+      "interleaved_selective",
+      "native",
+      "original",
+      "taco_separate",
+      "remote_bf16"
+    ],
+    [
+      "remote_all",
+      "interleaved_all",
+      "remote_selective",
+      "interleaved_selective",
+      "native",
+      "original",
+      "taco_separate",
+      "remote_bf16",
+      "interleaved_bf16"
+    ],
+    [
+      "interleaved_all",
+      "remote_selective",
+      "interleaved_selective",
+      "native",
+      "original",
+      "taco_separate",
+      "remote_bf16",
+      "interleaved_bf16",
+      "remote_all"
+    ],
+    [
+      "remote_selective",
+      "interleaved_selective",
+      "native",
+      "original",
+      "taco_separate",
+      "remote_bf16",
+      "interleaved_bf16",
+      "remote_all",
+      "interleaved_all"
+    ],
+    [
+      "interleaved_selective",
+      "native",
+      "original",
+      "taco_separate",
+      "remote_bf16",
+      "interleaved_bf16",
+      "remote_all",
+      "interleaved_all",
+      "remote_selective"
+    ]
+  ],
+  "cases": [
+    {
+      "name": "l12-h2048-s2048-tp4",
+      "hidden": 2048,
+      "ffn": 8192,
+      "heads": 32,
+      "sequence": 2048,
+      "tp": 4
+    }
+  ],
+  "common": {
+    "layers": 12,
+    "micro_batch": 1,
+    "global_batch": 4,
+    "seed": 1234,
+    "token_seed": 4321,
+    "vocab": 8192
+  },
+  "warmup_steps": 10,
+  "timed_steps": 20,
+  "smoke_warmup_steps": 2,
+  "smoke_steps": 3,
+  "profile_steps": 1,
+  "repetitions": 2,
+  "ring_reduction": true,
+  "scope": "MLP-only joint static ordering and all/selective TACO; attention original BF16 Flux; native Megatron control. Fixed synthetic full optimizer steps, BF16 straight-through codec backward, no convergence claim."
+}

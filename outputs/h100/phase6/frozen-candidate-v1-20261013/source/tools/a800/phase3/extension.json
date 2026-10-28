@@ -1,0 +1,12 @@
+{
+  "policies": ["original", "remote_first"],
+  "orders": [["original", "remote_first"], ["remote_first", "original"], ["original", "remote_first"], ["remote_first", "original"], ["original", "remote_first"], ["remote_first", "original"]],
+  "shapes": [[1024,4096,2048], [4096,4096,2048], [8192,4096,2048], [1024,4096,8192], [4096,4096,8192], [8192,4096,8192], [4096,4160,8192]],
+  "world_sizes": [2,4],
+  "seeds": [17,29,43],
+  "warmup_initial": 500,
+  "warmup_per_trial": 30,
+  "iters": 100,
+  "trial_count": 12,
+  "scope": "Uninstrumented original versus unchanged rank+1 rotation; M partition aligned, N tail included. Six paired blocks per shape. No early stop or removal of slow trials."
+}

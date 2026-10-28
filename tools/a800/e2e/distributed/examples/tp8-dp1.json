@@ -1,0 +1,6 @@
+{
+  "nodes": 2,
+  "gpus_per_node": 4,
+  "tp": 8,
+  "flux_transport": "hierarchical"
+}

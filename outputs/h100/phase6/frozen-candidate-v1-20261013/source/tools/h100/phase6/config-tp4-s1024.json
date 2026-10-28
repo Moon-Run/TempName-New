@@ -1,0 +1,23 @@
+{
+  "tp": 4,
+  "sm_count": 132,
+  "layers": 32,
+  "hidden": 4096,
+  "ffn": 16384,
+  "heads": 32,
+  "sequence": 1024,
+  "micro_batch": 1,
+  "global_batch": 8,
+  "seed": 1234,
+  "token_seed": 4321,
+  "vocab": 32768,
+  "warmup_steps": 10,
+  "timed_steps": 20,
+  "window": 64,
+  "fraction": 0.015625,
+  "bases": [
+    "remote_first",
+    "interleaved"
+  ],
+  "target_percent": 4.0
+}

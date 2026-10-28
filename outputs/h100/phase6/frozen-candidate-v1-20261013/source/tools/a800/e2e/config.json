@@ -1,0 +1,819 @@
+{
+  "megatron_commit": "3ea68ad6042cc1204386ae9364358f7c4de1bc37",
+  "policies": [
+    "native",
+    "original",
+    "remote_first",
+    "interleaved"
+  ],
+  "orders": [
+    [
+      "native",
+      "original",
+      "interleaved",
+      "remote_first"
+    ],
+    [
+      "original",
+      "remote_first",
+      "native",
+      "interleaved"
+    ],
+    [
+      "remote_first",
+      "interleaved",
+      "original",
+      "native"
+    ],
+    [
+      "interleaved",
+      "native",
+      "remote_first",
+      "original"
+    ],
+    [
+      "interleaved",
+      "native",
+      "remote_first",
+      "original"
+    ],
+    [
+      "remote_first",
+      "interleaved",
+      "original",
+      "native"
+    ],
+    [
+      "original",
+      "remote_first",
+      "native",
+      "interleaved"
+    ],
+    [
+      "native",
+      "original",
+      "interleaved",
+      "remote_first"
+    ]
+  ],
+  "model": {
+    "layers": 4,
+    "hidden": 1024,
+    "ffn": 4096,
+    "heads": 16,
+    "sequence": 1024,
+    "micro_batch": 1,
+    "global_batch": 4,
+    "tp": 4,
+    "seed": 1234,
+    "token_seed": 4321,
+    "vocab": 8192
+  },
+  "shapes": [
+    [
+      1024,
+      1024,
+      1024
+    ],
+    [
+      1024,
+      1024,
+      4096
+    ]
+  ],
+  "validation_steps": 10,
+  "pilot_warmup_steps": 5,
+  "pilot_timed_steps": 10,
+  "warmup_steps": 20,
+  "timed_steps": 30,
+  "practical_latency_reduction_percent": 1.0,
+  "budgets": {
+    "layer_fp32": {
+      "relative_l2": 0.01,
+      "atol": 0.005,
+      "rtol": 0.03
+    },
+    "layer_output": {
+      "relative_l2": 0.015,
+      "atol": 0.005,
+      "rtol": 0.03
+    },
+    "logits": {
+      "relative_l2": 0.015,
+      "atol": 0.02,
+      "rtol": 0.03
+    },
+    "input_gradient": {
+      "relative_l2": 0.05,
+      "atol": 2e-05,
+      "rtol": 0.08
+    },
+    "parameter_gradient": {
+      "relative_l2": 0.05,
+      "atol": 2e-05,
+      "rtol": 0.08
+    },
+    "parameter_after_step": {
+      "relative_l2": 0.002,
+      "atol": 0.0005,
+      "rtol": 0.01
+    },
+    "loss_absolute": 0.07114410400390625,
+    "near_zero_rms_floor": 1e-06
+  },
+  "scope": "Full Megatron GPT, four accumulated microsteps plus native gradient finalization, FP32-master Apex Adam and gradient clearing. Fixed GPU-resident synthetic tokens; exclude initialization, data preparation/H2D, validation/profiling and checkpoint IO. Native is the framework reference; sorting comparisons use the common IPC-fixed original Flux. Fresh deterministic model/optimizer/RNG/data state per process and window.",
+  "ring_reduction": true,
+  "revision_note": "User authorized independent native calibration after v1 admission failures 178699/178700. v2 gates use no candidate error; prospective candidate validation uses held-out model seed 1234.",
+  "v1_budgets": {
+    "layer_fp32": {
+      "relative_l2": 0.01,
+      "atol": 0.005,
+      "rtol": 0.03
+    },
+    "layer_output": {
+      "relative_l2": 0.015,
+      "atol": 0.005,
+      "rtol": 0.03
+    },
+    "logits": {
+      "relative_l2": 0.015,
+      "atol": 0.02,
+      "rtol": 0.03
+    },
+    "input_gradient": {
+      "relative_l2": 0.05,
+      "atol": 2e-05,
+      "rtol": 0.08
+    },
+    "parameter_gradient": {
+      "relative_l2": 0.05,
+      "atol": 2e-05,
+      "rtol": 0.08
+    },
+    "parameter_after_step": {
+      "relative_l2": 0.002,
+      "atol": 0.0005,
+      "rtol": 0.01
+    },
+    "loss_absolute": 0.01,
+    "near_zero_rms_floor": 1e-06
+  },
+  "tensor_budgets": {
+    "layer_output/decoder.layers.0.self_attention.linear_proj": {
+      "atol": 0.005108833312988281,
+      "rtol": 0.0,
+      "relative_l2": 0.010665441511374824
+    },
+    "layer_output/decoder.layers.0.mlp.linear_fc2": {
+      "atol": 0.013617277145385742,
+      "rtol": 0.0,
+      "relative_l2": 0.011743342851722044
+    },
+    "layer_output/decoder.layers.1.self_attention.linear_proj": {
+      "atol": 0.007421612739562988,
+      "rtol": 0.0,
+      "relative_l2": 0.009308519943686974
+    },
+    "layer_output/decoder.layers.1.mlp.linear_fc2": {
+      "atol": 0.015455007553100586,
+      "rtol": 0.0,
+      "relative_l2": 0.01554096491447886
+    },
+    "layer_output/decoder.layers.2.self_attention.linear_proj": {
+      "atol": 0.009417295455932617,
+      "rtol": 0.0,
+      "relative_l2": 0.010142123717438035
+    },
+    "layer_output/decoder.layers.2.mlp.linear_fc2": {
+      "atol": 0.016093730926513672,
+      "rtol": 0.0,
+      "relative_l2": 0.017386131260642843
+    },
+    "layer_output/decoder.layers.3.self_attention.linear_proj": {
+      "atol": 0.010801732540130615,
+      "rtol": 0.0,
+      "relative_l2": 0.009712268015410816
+    },
+    "layer_output/decoder.layers.3.mlp.linear_fc2": {
+      "atol": 0.020552992820739746,
+      "rtol": 0.0,
+      "relative_l2": 0.018401728226599343
+    },
+    "logits/output_head": {
+      "atol": 0.06449995934963226,
+      "rtol": 0.0,
+      "relative_l2": 0.017033695593053316
+    },
+    "input_gradient/decoder.layers.3.mlp.linear_fc2": {
+      "atol": 1.412411165802041e-07,
+      "rtol": 0.0,
+      "relative_l2": 0.00768068114453616
+    },
+    "input_gradient/decoder.layers.3.self_attention.linear_proj": {
+      "atol": 1.9799517758656293e-07,
+      "rtol": 0.0,
+      "relative_l2": 0.010596951297795506
+    },
+    "input_gradient/decoder.layers.2.mlp.linear_fc2": {
+      "atol": 2.150291038560681e-07,
+      "rtol": 0.0,
+      "relative_l2": 0.011112689715750806
+    },
+    "input_gradient/decoder.layers.2.self_attention.linear_proj": {
+      "atol": 3.0865248845657334e-07,
+      "rtol": 0.0,
+      "relative_l2": 0.013605396087017519
+    },
+    "input_gradient/decoder.layers.1.mlp.linear_fc2": {
+      "atol": 3.291679604444653e-07,
+      "rtol": 0.0,
+      "relative_l2": 0.01402906705119621
+    },
+    "input_gradient/decoder.layers.1.self_attention.linear_proj": {
+      "atol": 4.912690201308578e-07,
+      "rtol": 0.0,
+      "relative_l2": 0.016584585478383422
+    },
+    "input_gradient/decoder.layers.0.mlp.linear_fc2": {
+      "atol": 5.810361471958458e-07,
+      "rtol": 0.0,
+      "relative_l2": 0.01691327512773415
+    },
+    "input_gradient/decoder.layers.0.self_attention.linear_proj": {
+      "atol": 3.6503479350358248e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.019729050869339584
+    },
+    "parameter_gradient/embedding.word_embeddings.weight": {
+      "atol": 5.721277557313442e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01998590514732627
+    },
+    "parameter_gradient/embedding.position_embeddings.weight": {
+      "atol": 9.115971624851227e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.019945659822861117
+    },
+    "parameter_gradient/decoder.layers.0.input_layernorm.weight": {
+      "atol": 1.4899385860189795e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.02043553140069704
+    },
+    "parameter_gradient/decoder.layers.0.input_layernorm.bias": {
+      "atol": 0.00011623464524745941,
+      "rtol": 0.0,
+      "relative_l2": 0.01872145110901805
+    },
+    "parameter_gradient/decoder.layers.0.self_attention.linear_proj.weight": {
+      "atol": 0.00010977685451507568,
+      "rtol": 0.0,
+      "relative_l2": 0.019119775001885178
+    },
+    "parameter_gradient/decoder.layers.0.self_attention.linear_proj.bias": {
+      "atol": 0.0007770545780658722,
+      "rtol": 0.0,
+      "relative_l2": 0.017993141801759354
+    },
+    "parameter_gradient/decoder.layers.0.self_attention.linear_qkv.weight": {
+      "atol": 3.281561657786369e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.019941841497969955
+    },
+    "parameter_gradient/decoder.layers.0.self_attention.linear_qkv.bias": {
+      "atol": 0.00021164385543670505,
+      "rtol": 0.0,
+      "relative_l2": 0.019197308228262
+    },
+    "parameter_gradient/decoder.layers.0.pre_mlp_layernorm.weight": {
+      "atol": 2.1815591026097536e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.020106919583363508
+    },
+    "parameter_gradient/decoder.layers.0.pre_mlp_layernorm.bias": {
+      "atol": 2.3195258108898997e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01747109343484675
+    },
+    "parameter_gradient/decoder.layers.0.mlp.linear_fc1.weight": {
+      "atol": 2.818289794959128e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01908735322446721
+    },
+    "parameter_gradient/decoder.layers.0.mlp.linear_fc1.bias": {
+      "atol": 1.9631872419267893e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.017139996952878128
+    },
+    "parameter_gradient/decoder.layers.0.mlp.linear_fc2.weight": {
+      "atol": 0.00010294746607542038,
+      "rtol": 0.0,
+      "relative_l2": 0.018334199533185557
+    },
+    "parameter_gradient/decoder.layers.0.mlp.linear_fc2.bias": {
+      "atol": 0.00012780027464032173,
+      "rtol": 0.0,
+      "relative_l2": 0.01566489718015104
+    },
+    "parameter_gradient/decoder.layers.1.input_layernorm.weight": {
+      "atol": 1.2649827112909406e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.017056861630716118
+    },
+    "parameter_gradient/decoder.layers.1.input_layernorm.bias": {
+      "atol": 1.6824837075546384e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.0160054888799845
+    },
+    "parameter_gradient/decoder.layers.1.self_attention.linear_proj.weight": {
+      "atol": 0.00011379620991647243,
+      "rtol": 0.0,
+      "relative_l2": 0.01630655979055266
+    },
+    "parameter_gradient/decoder.layers.1.self_attention.linear_proj.bias": {
+      "atol": 0.00011724373325705528,
+      "rtol": 0.0,
+      "relative_l2": 0.015182315993359988
+    },
+    "parameter_gradient/decoder.layers.1.self_attention.linear_qkv.weight": {
+      "atol": 3.351947816554457e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01647244617755898
+    },
+    "parameter_gradient/decoder.layers.1.self_attention.linear_qkv.bias": {
+      "atol": 2.2689961042487994e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01591306678617716
+    },
+    "parameter_gradient/decoder.layers.1.pre_mlp_layernorm.weight": {
+      "atol": 1.9782775780186057e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.021221295616719284
+    },
+    "parameter_gradient/decoder.layers.1.pre_mlp_layernorm.bias": {
+      "atol": 1.3681958080269396e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01733689481688572
+    },
+    "parameter_gradient/decoder.layers.1.mlp.linear_fc1.weight": {
+      "atol": 3.173435106873512e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.020002917763868405
+    },
+    "parameter_gradient/decoder.layers.1.mlp.linear_fc1.bias": {
+      "atol": 1.6016419976949692e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.0162179589468578
+    },
+    "parameter_gradient/decoder.layers.1.mlp.linear_fc2.weight": {
+      "atol": 8.957550744526088e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.018452980683002468
+    },
+    "parameter_gradient/decoder.layers.1.mlp.linear_fc2.bias": {
+      "atol": 6.722169928252697e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.013380783062820195
+    },
+    "parameter_gradient/decoder.layers.2.input_layernorm.weight": {
+      "atol": 1.0431220289319754e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.013809627256543328
+    },
+    "parameter_gradient/decoder.layers.2.input_layernorm.bias": {
+      "atol": 9.820301784202456e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.01323209445258402
+    },
+    "parameter_gradient/decoder.layers.2.self_attention.linear_proj.weight": {
+      "atol": 6.921857129782438e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.014323078177089218
+    },
+    "parameter_gradient/decoder.layers.2.self_attention.linear_proj.bias": {
+      "atol": 5.977746332064271e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.013225180114530843
+    },
+    "parameter_gradient/decoder.layers.2.self_attention.linear_qkv.weight": {
+      "atol": 2.8264708817005157e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01546465247748588
+    },
+    "parameter_gradient/decoder.layers.2.self_attention.linear_qkv.bias": {
+      "atol": 1.3803597539663315e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.015326754796919978
+    },
+    "parameter_gradient/decoder.layers.2.pre_mlp_layernorm.weight": {
+      "atol": 1.5405646990984678e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.02077053421871737
+    },
+    "parameter_gradient/decoder.layers.2.pre_mlp_layernorm.bias": {
+      "atol": 9.999785106629133e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.015382015014996852
+    },
+    "parameter_gradient/decoder.layers.2.mlp.linear_fc1.weight": {
+      "atol": 2.3241504095494747e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.02049649420130618
+    },
+    "parameter_gradient/decoder.layers.2.mlp.linear_fc1.bias": {
+      "atol": 1.0519142961129546e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01519638214122023
+    },
+    "parameter_gradient/decoder.layers.2.mlp.linear_fc2.weight": {
+      "atol": 7.497798651456833e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.018657423829735183
+    },
+    "parameter_gradient/decoder.layers.2.mlp.linear_fc2.bias": {
+      "atol": 3.782182466238737e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.010541515527080209
+    },
+    "parameter_gradient/decoder.layers.3.input_layernorm.weight": {
+      "atol": 5.252455594018102e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.01234485909767624
+    },
+    "parameter_gradient/decoder.layers.3.input_layernorm.bias": {
+      "atol": 5.954439984634519e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.01082342885387561
+    },
+    "parameter_gradient/decoder.layers.3.self_attention.linear_proj.weight": {
+      "atol": 4.427647218108177e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.012052236043656224
+    },
+    "parameter_gradient/decoder.layers.3.self_attention.linear_proj.bias": {
+      "atol": 3.118719905614853e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01032490501763677
+    },
+    "parameter_gradient/decoder.layers.3.self_attention.linear_qkv.weight": {
+      "atol": 1.4567573089152575e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.013077186963291503
+    },
+    "parameter_gradient/decoder.layers.3.self_attention.linear_qkv.bias": {
+      "atol": 9.463925380259752e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.012459992716984043
+    },
+    "parameter_gradient/decoder.layers.3.pre_mlp_layernorm.weight": {
+      "atol": 1.3671291526407003e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.022085205557774996
+    },
+    "parameter_gradient/decoder.layers.3.pre_mlp_layernorm.bias": {
+      "atol": 8.193281246349216e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.01573413914902257
+    },
+    "parameter_gradient/decoder.layers.3.mlp.linear_fc1.weight": {
+      "atol": 2.1692889276891947e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.021029967745242868
+    },
+    "parameter_gradient/decoder.layers.3.mlp.linear_fc1.bias": {
+      "atol": 7.087161066010594e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.01463440775966473
+    },
+    "parameter_gradient/decoder.layers.3.mlp.linear_fc2.weight": {
+      "atol": 5.376699846237898e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.01880088017281805
+    },
+    "parameter_gradient/decoder.layers.3.mlp.linear_fc2.bias": {
+      "atol": 2.1508894860744476e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.007627818983405835
+    },
+    "parameter_gradient/decoder.final_layernorm.weight": {
+      "atol": 2.1725893020629883e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.010067928216119557
+    },
+    "parameter_gradient/decoder.final_layernorm.bias": {
+      "atol": 8.192029781639576e-06,
+      "rtol": 0.0,
+      "relative_l2": 0.005809544556966772
+    },
+    "parameter_gradient/output_layer.weight": {
+      "atol": 4.518893547356129e-05,
+      "rtol": 0.0,
+      "relative_l2": 0.016792778769942868
+    },
+    "parameter_after_step/embedding.word_embeddings.weight": {
+      "atol": 0.0004437491297721863,
+      "rtol": 0.0,
+      "relative_l2": 0.002505873023236297
+    },
+    "parameter_after_step/embedding.position_embeddings.weight": {
+      "atol": 0.0004438646137714386,
+      "rtol": 0.0,
+      "relative_l2": 0.003988070187351221
+    },
+    "parameter_after_step/decoder.layers.0.input_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019979591888841242
+    },
+    "parameter_after_step/decoder.layers.0.input_layernorm.bias": {
+      "atol": 0.00039988578646443784,
+      "rtol": 0.0,
+      "relative_l2": 0.32583850929871455
+    },
+    "parameter_after_step/decoder.layers.0.self_attention.linear_proj.weight": {
+      "atol": 0.00044402480125427246,
+      "rtol": 0.0,
+      "relative_l2": 0.004790149108704838
+    },
+    "parameter_after_step/decoder.layers.0.self_attention.linear_proj.bias": {
+      "atol": 0.0004002280766144395,
+      "rtol": 0.0,
+      "relative_l2": 0.17665385291689917
+    },
+    "parameter_after_step/decoder.layers.0.self_attention.linear_qkv.weight": {
+      "atol": 0.00044371001422405243,
+      "rtol": 0.0,
+      "relative_l2": 0.003990313307263021
+    },
+    "parameter_after_step/decoder.layers.0.self_attention.linear_qkv.bias": {
+      "atol": 0.00040011253440752625,
+      "rtol": 0.0,
+      "relative_l2": 0.9963300443183712
+    },
+    "parameter_after_step/decoder.layers.0.pre_mlp_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019993814930785447
+    },
+    "parameter_after_step/decoder.layers.0.pre_mlp_layernorm.bias": {
+      "atol": 0.00038910313742235303,
+      "rtol": 0.0,
+      "relative_l2": 0.12150814129264238
+    },
+    "parameter_after_step/decoder.layers.0.mlp.linear_fc1.weight": {
+      "atol": 0.0004436466842889786,
+      "rtol": 0.0,
+      "relative_l2": 0.00398628730425502
+    },
+    "parameter_after_step/decoder.layers.0.mlp.linear_fc1.bias": {
+      "atol": 0.0003968449600506574,
+      "rtol": 0.0,
+      "relative_l2": 0.2750760058623793
+    },
+    "parameter_after_step/decoder.layers.0.mlp.linear_fc2.weight": {
+      "atol": 0.0004439800977706909,
+      "rtol": 0.0,
+      "relative_l2": 0.0047289223814084395
+    },
+    "parameter_after_step/decoder.layers.0.mlp.linear_fc2.bias": {
+      "atol": 0.0003991512639913708,
+      "rtol": 0.0,
+      "relative_l2": 0.24349610652189282
+    },
+    "parameter_after_step/decoder.layers.1.input_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019977131159976125
+    },
+    "parameter_after_step/decoder.layers.1.input_layernorm.bias": {
+      "atol": 0.0003958161687478423,
+      "rtol": 0.0,
+      "relative_l2": 0.27189997515549263
+    },
+    "parameter_after_step/decoder.layers.1.self_attention.linear_proj.weight": {
+      "atol": 0.00044391676783561707,
+      "rtol": 0.0,
+      "relative_l2": 0.004651709585768114
+    },
+    "parameter_after_step/decoder.layers.1.self_attention.linear_proj.bias": {
+      "atol": 0.00039880198892205954,
+      "rtol": 0.0,
+      "relative_l2": 0.2478481614497845
+    },
+    "parameter_after_step/decoder.layers.1.self_attention.linear_qkv.weight": {
+      "atol": 0.0004434622824192047,
+      "rtol": 0.0,
+      "relative_l2": 0.003953257680976873
+    },
+    "parameter_after_step/decoder.layers.1.self_attention.linear_qkv.bias": {
+      "atol": 0.0003966637887060642,
+      "rtol": 0.0,
+      "relative_l2": 0.642671713448571
+    },
+    "parameter_after_step/decoder.layers.1.pre_mlp_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.0001999049709411338
+    },
+    "parameter_after_step/decoder.layers.1.pre_mlp_layernorm.bias": {
+      "atol": 0.0003917499561794102,
+      "rtol": 0.0,
+      "relative_l2": 0.19556457389352955
+    },
+    "parameter_after_step/decoder.layers.1.mlp.linear_fc1.weight": {
+      "atol": 0.00044349953532218933,
+      "rtol": 0.0,
+      "relative_l2": 0.003994892314424649
+    },
+    "parameter_after_step/decoder.layers.1.mlp.linear_fc1.bias": {
+      "atol": 0.0003953148261643946,
+      "rtol": 0.0,
+      "relative_l2": 0.3175562201301675
+    },
+    "parameter_after_step/decoder.layers.1.mlp.linear_fc2.weight": {
+      "atol": 0.00044387951493263245,
+      "rtol": 0.0,
+      "relative_l2": 0.004773107416566971
+    },
+    "parameter_after_step/decoder.layers.1.mlp.linear_fc2.bias": {
+      "atol": 0.0003981994232162833,
+      "rtol": 0.0,
+      "relative_l2": 0.12445173279323866
+    },
+    "parameter_after_step/decoder.layers.2.input_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019961856014560908
+    },
+    "parameter_after_step/decoder.layers.2.input_layernorm.bias": {
+      "atol": 0.0003927157958969474,
+      "rtol": 0.0,
+      "relative_l2": 0.2276705243577556
+    },
+    "parameter_after_step/decoder.layers.2.self_attention.linear_proj.weight": {
+      "atol": 0.00044380873441696167,
+      "rtol": 0.0,
+      "relative_l2": 0.0045522754365340335
+    },
+    "parameter_after_step/decoder.layers.2.self_attention.linear_proj.bias": {
+      "atol": 0.0003946630167774856,
+      "rtol": 0.0,
+      "relative_l2": 0.17314783984229037
+    },
+    "parameter_after_step/decoder.layers.2.self_attention.linear_qkv.weight": {
+      "atol": 0.00044305622577667236,
+      "rtol": 0.0,
+      "relative_l2": 0.003941471656431323
+    },
+    "parameter_after_step/decoder.layers.2.self_attention.linear_qkv.bias": {
+      "atol": 0.00038287643110379577,
+      "rtol": 0.0,
+      "relative_l2": 0.5598567476560642
+    },
+    "parameter_after_step/decoder.layers.2.pre_mlp_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019974875613115728
+    },
+    "parameter_after_step/decoder.layers.2.pre_mlp_layernorm.bias": {
+      "atol": 0.00039352267049252987,
+      "rtol": 0.0,
+      "relative_l2": 0.22584847704679223
+    },
+    "parameter_after_step/decoder.layers.2.mlp.linear_fc1.weight": {
+      "atol": 0.00044344738125801086,
+      "rtol": 0.0,
+      "relative_l2": 0.003990841117676456
+    },
+    "parameter_after_step/decoder.layers.2.mlp.linear_fc1.bias": {
+      "atol": 0.0003931233659386635,
+      "rtol": 0.0,
+      "relative_l2": 0.25278787092969973
+    },
+    "parameter_after_step/decoder.layers.2.mlp.linear_fc2.weight": {
+      "atol": 0.00044391117990016937,
+      "rtol": 0.0,
+      "relative_l2": 0.004782052600164105
+    },
+    "parameter_after_step/decoder.layers.2.mlp.linear_fc2.bias": {
+      "atol": 0.0003941620234400034,
+      "rtol": 0.0,
+      "relative_l2": 0.16164084825058925
+    },
+    "parameter_after_step/decoder.layers.3.input_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019959801284130663
+    },
+    "parameter_after_step/decoder.layers.3.input_layernorm.bias": {
+      "atol": 0.0003805075539276004,
+      "rtol": 0.0,
+      "relative_l2": 0.15858292008662375
+    },
+    "parameter_after_step/decoder.layers.3.self_attention.linear_proj.weight": {
+      "atol": 0.0004435759037733078,
+      "rtol": 0.0,
+      "relative_l2": 0.004388191668163764
+    },
+    "parameter_after_step/decoder.layers.3.self_attention.linear_proj.bias": {
+      "atol": 0.00039420812390744686,
+      "rtol": 0.0,
+      "relative_l2": 0.12308254931381683
+    },
+    "parameter_after_step/decoder.layers.3.self_attention.linear_qkv.weight": {
+      "atol": 0.0004425905644893646,
+      "rtol": 0.0,
+      "relative_l2": 0.003928409592450134
+    },
+    "parameter_after_step/decoder.layers.3.self_attention.linear_qkv.bias": {
+      "atol": 0.00038888477138243616,
+      "rtol": 0.0,
+      "relative_l2": 0.49131454243319383
+    },
+    "parameter_after_step/decoder.layers.3.pre_mlp_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019982116646133363
+    },
+    "parameter_after_step/decoder.layers.3.pre_mlp_layernorm.bias": {
+      "atol": 0.000389199674827978,
+      "rtol": 0.0,
+      "relative_l2": 0.19240824925085392
+    },
+    "parameter_after_step/decoder.layers.3.mlp.linear_fc1.weight": {
+      "atol": 0.00044309720396995544,
+      "rtol": 0.0,
+      "relative_l2": 0.003997755488611136
+    },
+    "parameter_after_step/decoder.layers.3.mlp.linear_fc1.bias": {
+      "atol": 0.0003854591050185263,
+      "rtol": 0.0,
+      "relative_l2": 0.23568033401267235
+    },
+    "parameter_after_step/decoder.layers.3.mlp.linear_fc2.weight": {
+      "atol": 0.00044372305274009705,
+      "rtol": 0.0,
+      "relative_l2": 0.004807420891881078
+    },
+    "parameter_after_step/decoder.layers.3.mlp.linear_fc2.bias": {
+      "atol": 0.00039565720362588763,
+      "rtol": 0.0,
+      "relative_l2": 0.21266392376547824
+    },
+    "parameter_after_step/decoder.final_layernorm.weight": {
+      "atol": 0.00020003318786621094,
+      "rtol": 0.0,
+      "relative_l2": 0.00019997039635200053
+    },
+    "parameter_after_step/decoder.final_layernorm.bias": {
+      "atol": 0.00038432562723755836,
+      "rtol": 0.0,
+      "relative_l2": 0.1640382277062242
+    },
+    "parameter_after_step/output_layer.weight": {
+      "atol": 0.0004436112940311432,
+      "rtol": 0.0,
+      "relative_l2": 0.003894101145414611
+    }
+  },
+  "shape_budgets": {
+    "1024,1024,1024": {
+      "atol": 0.05753183364868164,
+      "rtol": 0.0,
+      "relative_l2": 0.0063186115471265515
+    },
+    "1024,1024,4096": {
+      "atol": 0.05979728698730469,
+      "rtol": 0.0,
+      "relative_l2": 0.006329162871399675
+    }
+  },
+  "calibration": {
+    "source": "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704",
+    "seeds": [
+      101,
+      202
+    ],
+    "holdout_model_seed": 1234,
+    "factor": 2,
+    "inputs": {
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-bf16/rank0.json": "55b9a7867a1e265b782a4c7e8c82d28419c4919ab76e3fdb5ac48ac6fbd4810d",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-bf16/rank1.json": "649d199d91ba6ff06aba55c1dbdfcc647c622028d3b54f047d77400a27856b1c",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-bf16/rank2.json": "d1a9396ef6b2dbb3caf3a9d213669ae96c5d1446c5a427509b9fa8f512798695",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-bf16/rank3.json": "4babc0daccaffb0bdb769059aa6046b4a1d92b96e5afd835ab6a492ac1ad9626",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-fp32/rank0.json": "cfcf579f061694316d9c8aeeb0ce1846906262995f18638a39456d0759e25094",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-fp32/rank1.json": "57c34a47d4dbb51df6a039c85d573f27f66bfe923a5b7bab6f8601a0e38d3fa7",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-fp32/rank2.json": "e97f3db6a979af5c950c111ceb7184fb5472a902f80a31d4a16a6b5bc5576d6d",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-101-fp32/rank3.json": "2e800ef0ca8e78169f58af3bb60237089a458e12cca1ae2124700f6f83a4ed55",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-bf16/rank0.json": "027f09e99df77be6306b3072c41d52c880b34b380c4dc76a1c2ef2239bd53a33",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-bf16/rank1.json": "04cc96c49b187ea3a63147e69b16de81f7af65aa0318a8e94e3fd96e62152292",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-bf16/rank2.json": "0471836fc656bb4a2b217ebb3c0f1314e3f040fc24c9b85128091eb5a10ef628",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-bf16/rank3.json": "d6a1fa73436508241c84ed74a571194337c29975eeb95741f066b7346f645575",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-fp32/rank0.json": "df10b221d2b3b05696aff2efc28bdc311ae672f08ddc550d6d39b74842578c51",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-fp32/rank1.json": "b44198305f4a0b2077deae1e99e869401aaf893a7647d8bbc947f0ccba666dc1",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-fp32/rank2.json": "0b2c4cbb66c5f9de57461399ba15df8d5bc4dc9392ae86508b01421b1866dcd7",
+      "/data/run01/scyb672/hjr/TempName/logs/a800/e2e/comparison/178704/calibration-202-fp32/rank3.json": "f4d8b8a49d0c245f2d8ff272ac5c8b567ea802827022579c5a94042264dda161"
+    },
+    "rule": "Per tensor max across 2 native BF16/FP32 seeds and 4 ranks; double both max-abs and relative-L2 bounds. Original v1 failure stays failed. Near-zero parameters require absolute and empirical relative gates; no bitwise or convergence claim.",
+    "backward_control": "Native forward with adapter backward exactly reproduces native outputs, gradients and first update."
+  }
+}

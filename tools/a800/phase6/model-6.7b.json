@@ -1,0 +1,12 @@
+{
+  "layers": 32,
+  "hidden": 4096,
+  "ffn": 16384,
+  "heads": 32,
+  "sequence": 2048,
+  "micro_batch": 1,
+  "global_batch": 4,
+  "seed": 1234,
+  "token_seed": 4321,
+  "vocab": 32768
+}

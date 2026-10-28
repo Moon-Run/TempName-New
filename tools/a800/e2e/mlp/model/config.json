@@ -1,0 +1,117 @@
+{
+  "megatron_commit": "3ea68ad6042cc1204386ae9364358f7c4de1bc37",
+  "policies": [
+    "native",
+    "original",
+    "mlp_remote",
+    "mlp_remote_arrival"
+  ],
+  "orders": [
+    [
+      "native",
+      "original",
+      "mlp_remote",
+      "mlp_remote_arrival"
+    ],
+    [
+      "original",
+      "mlp_remote",
+      "mlp_remote_arrival",
+      "native"
+    ],
+    [
+      "mlp_remote",
+      "mlp_remote_arrival",
+      "native",
+      "original"
+    ],
+    [
+      "mlp_remote_arrival",
+      "native",
+      "original",
+      "mlp_remote"
+    ],
+    [
+      "native",
+      "original",
+      "mlp_remote",
+      "mlp_remote_arrival"
+    ],
+    [
+      "original",
+      "mlp_remote",
+      "mlp_remote_arrival",
+      "native"
+    ],
+    [
+      "mlp_remote",
+      "mlp_remote_arrival",
+      "native",
+      "original"
+    ],
+    [
+      "mlp_remote_arrival",
+      "native",
+      "original",
+      "mlp_remote"
+    ]
+  ],
+  "cases": [
+    {
+      "name": "l12-h2048-s2048-tp4",
+      "hidden": 2048,
+      "ffn": 8192,
+      "heads": 32,
+      "sequence": 2048,
+      "tp": 4
+    }
+  ],
+  "common": {
+    "layers": 12,
+    "micro_batch": 1,
+    "global_batch": 4,
+    "seed": 1234,
+    "token_seed": 4321,
+    "vocab": 8192
+  },
+  "warmup_steps": 10,
+  "timed_steps": 20,
+  "smoke_warmup_steps": 2,
+  "smoke_steps": 3,
+  "profile_steps": 1,
+  "repetitions": 2,
+  "ring_reduction": true,
+  "scope": "MLP-only rank+1 and rank+1+tail mapping; attention remains original Flux mapping. TP4 full optimizer steps, eight paired blocks per round; synthetic tokens, not convergence evidence.",
+  "module_policies": {
+    "native": {
+      "attention": "native",
+      "mlp": "native"
+    },
+    "original": {
+      "attention": "original",
+      "mlp": "original"
+    },
+    "mlp_remote": {
+      "attention": "original",
+      "mlp": "remote_first"
+    },
+    "mlp_remote_arrival": {
+      "attention": "original",
+      "mlp": "remote_arrival"
+    }
+  },
+  "mapping_policy_ids": {
+    "original": {
+      "2048": 0,
+      "8192": 0
+    },
+    "mlp_remote": {
+      "2048": 0,
+      "8192": 1
+    },
+    "mlp_remote_arrival": {
+      "2048": 0,
+      "8192": 3
+    }
+  }
+}
