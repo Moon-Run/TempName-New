@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/liuman1125-ops/COCCL_TACO",
+  "commit": "ca717e05b6dd6d21fff4d2617d209c95be63f3ef",
+  "files": {
+    "taco_RS.config": "c5bef55bf028d4e9e4b11b3b580f0214b7d724105e385c9d1f0bb2f47b51f24d",
+    "LICENSE.txt": "36e053d82c9ff1384a1045bb4cda1f5b569aa6a0e2faa1f9a42e16eb4c13ac78",
+    "taco.cu": "15a9fa3b41f59333c03170a886d1c5d596415cebbc3642447cfcfdd93dffad8e"
+  },
+  "extraction": "safe_divide through fused_ash_decompress_kernel, unchanged; COCCL host API excluded",
+  "configuration": "BF16, E4M3, SATFINITE, H128, target_range=448, lambda=1e-6; full groups only"
+}

@@ -1,0 +1,44 @@
+{
+  "flux-basic": {
+    "root": "/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/workers/flux-basic/scripts",
+    "files": {
+      "ablation4_protocol.py": "49096ce304742939908eb7ada80b37f75179b59478e14ddb4119b4055833e473",
+      "adapter.py": "44509f6aca62cd67afc5a3f0a84ed4df47ca751eddd1d6b0e8539ec744e0b5db",
+      "baseline_codec_validation.py": "6b263cd75d6d1154e7434aba0b0857b14a2b834badce407457c0bdaeb370d47e",
+      "basic_quant_validation.py": "a477fa813276bc77789ffc977056751cc2ec4f4667305cf329a2d8b34e0850ad",
+      "common.py": "771470ca6047ea7b84814e6cc23c2357b927e95ad29ed2fbd7b34f2969c68de4",
+      "communication.py": "b9fa09b17f66fe89fbe7d894959a90ccff9dc4a9e04eb1364f35509d069ab330",
+      "config.json": "f12cbb15a08812eb183968ffd3e69c4e42c1a6ce01be96efbe60803964e70682",
+      "flux_tensor_taco.py": "13c60ba8459eff6a98d411b5f5df78574b900345240819cb8ab1676de7ace4fb",
+      "ma0_layer_worker.py": "2578e6a3e24ae1ecd8340ac00cdccc139355960e0f4841148ba697626b494ba1",
+      "megatron_taco.py": "d51f82006f0bcb6bfbab71eb289d680cc097227048669e1cdc17c0d65a324546",
+      "reference.py": "1a6f8e4ef7a7a20b1709d2a91eeed55832c0cf7d73f351b4dc6e8f152be60b5b",
+      "routing.py": "fee849a24503b78d0ba668139763e51c58e9884b4f5a0ba02c1128e62aece723",
+      "runtime.py": "88dae92616bb4689f979e0ff3414abe7ea37ae28c9203fe5e4e80a85d33766d2",
+      "selection-plan.json": "49f9723f20493b5adb7dcce84b9ccf41a9589204eb2a4a042c8706ff0bfe72a4",
+      "taco_support.py": "30c5c162045dc96d3e6673de58f5383673cd844c1bdaf0dc5a32a3cc16103127",
+      "worker.py": "c9df86184a3dfb0543e4160c9bcd7b9a76c3b32aadc04d45f8dcb649bc8b867f"
+    }
+  },
+  "ma11": {
+    "root": "/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/workers/ma11/scripts",
+    "files": {
+      "ablation4_protocol.py": "49096ce304742939908eb7ada80b37f75179b59478e14ddb4119b4055833e473",
+      "adapter.py": "a66c0124e514bc222a6b48eb2cd3da47263205ce393fb0ca6d1a0625073597c9",
+      "common.py": "771470ca6047ea7b84814e6cc23c2357b927e95ad29ed2fbd7b34f2969c68de4",
+      "communication.py": "b9fa09b17f66fe89fbe7d894959a90ccff9dc4a9e04eb1364f35509d069ab330",
+      "config.json": "aff47f82806c8546627f8c563368b963a249505eef6c55a59c1d53ed46b98801",
+      "ma0_layer_worker.py": "2578e6a3e24ae1ecd8340ac00cdccc139355960e0f4841148ba697626b494ba1",
+      "ma11_adapter.py": "dee6c61c6fdd99a74c4ba6e55ea9369fc4ff539f96dd3a26e15484778587ccca",
+      "ma8_adapter.py": "de4486ec321176383a1fa84cb59aad6401402e8a824e2a89e28e9138d78ca40e",
+      "ma9_adapter.py": "ab89d89761dde299a024d8da5956345723fab8fdcbcac725b1ec0419a293bb14",
+      "megatron_taco.py": "7e6499c25618ec7b5c2265a25e7b353f2f1581cd9f4e8ee0595bb09c1f7b8fd0",
+      "reference.py": "1a6f8e4ef7a7a20b1709d2a91eeed55832c0cf7d73f351b4dc6e8f152be60b5b",
+      "routing.py": "49096ce304742939908eb7ada80b37f75179b59478e14ddb4119b4055833e473",
+      "runtime.py": "88dae92616bb4689f979e0ff3414abe7ea37ae28c9203fe5e4e80a85d33766d2",
+      "selection-plan.json": "2d8f0dc9a77a037282e8ff9355f0b40cc3354b973b1a8c677bb7d6872af5c57c",
+      "taco_support.py": "d994d174d2a367d2171f45f5c6dd977c84f697e20ee0728fb018b07728f66755",
+      "worker.py": "25d49a59f80687c83e3785abedd526824abea05e43434df2504e1ee87abbe3e9"
+    }
+  }
+}

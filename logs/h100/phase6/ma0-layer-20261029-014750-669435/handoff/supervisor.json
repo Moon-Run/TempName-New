@@ -1,0 +1,10 @@
+{
+  "ready": true,
+  "pid": 350745,
+  "ppid": 1,
+  "sid": 350744,
+  "pgid": 350744,
+  "cgroup": "0::/\n",
+  "repo": "/workspace/TempName-New",
+  "batch": "/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435"
+}

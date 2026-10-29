@@ -1,0 +1,35 @@
+Prepare exact MA11 native sources
+Prepare Flux GemmOnly and standalone codec sources
+Archive pinned dependency sources (no Git history)
+{'folder': '/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/source-package', 'archive': '/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/source-package.tar.gz', 'bytes': 11531386, 'files': 3218, 'package_id': '30c4cb452e36ff341de7b7edf930da322238838109b251f6513224e2ac049ee8', 'archive_sha256': 'c7731028b8081b4f5c669a8ee3fc740935b5b42f5becb3457a2b7fc9c8d804a6'}
+BUILD make -C /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/megatron/megatron/core/datasets
+BUILD make -j2 src.build NVCC_GENCODE=-gencode=arch=compute_90,code=sm_90
+BUILD cmake -S /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/ma11 -B /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/ma11/build -DCUDAARCHS=90 -DGPU_SM_CORES=132 -DENABLE_NVSHMEM=OFF -DWITH_PROTOBUF=OFF -DBUILD_TEST=OFF -DCMAKE_BUILD_TYPE=Release -DPYTHON_EXECUTABLE=/workspace/conda-envs/tempname-h100/bin/python -DPython_EXECUTABLE=/workspace/conda-envs/tempname-h100/bin/python -DCMAKE_CXX_FLAGS=-I/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/nccl/build/include -DCMAKE_CUDA_FLAGS=-I/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/nccl/build/include -DCMAKE_INSTALL_PREFIX=/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/ma11/python/flux
+BUILD cmake --build /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/ma11/build --parallel 2
+BUILD cmake --install /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/ma11/build
+BUILD /workspace/conda-envs/tempname-h100/bin/python setup.py build_ext --inplace
+BUILD cmake -S /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/flux-basic -B /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/flux-basic/build -DCUDAARCHS=90 -DGPU_SM_CORES=132 -DENABLE_NVSHMEM=OFF -DWITH_PROTOBUF=OFF -DBUILD_TEST=OFF -DCMAKE_BUILD_TYPE=Release -DPYTHON_EXECUTABLE=/workspace/conda-envs/tempname-h100/bin/python -DPython_EXECUTABLE=/workspace/conda-envs/tempname-h100/bin/python -DCMAKE_CXX_FLAGS=-I/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/nccl/build/include -DCMAKE_CUDA_FLAGS=-I/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/nccl/build/include -DCMAKE_INSTALL_PREFIX=/workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/flux-basic/python/flux
+BUILD cmake --build /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/flux-basic/build --parallel 2
+BUILD cmake --install /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/flux-basic/build
+BUILD /workspace/conda-envs/tempname-h100/bin/python setup.py build_ext --inplace
+BUILD /usr/local/cuda-12.8/bin/nvcc -std=c++17 -O3 -shared -Xcompiler=-fPIC -lineinfo -gencode=arch=compute_90,code=sm_90 --cudart=shared /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/codec-basic/basic_quant.cu -o /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/codec-basic/libbasic_quant.so -ccbin /usr/bin/g++-11
+BUILD /usr/local/cuda-12.8/bin/nvcc -std=c++17 -O3 -shared -Xcompiler=-fPIC -lineinfo -gencode=arch=compute_90,code=sm_90 --cudart=shared /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/codec-cuda/baseline_codec.cu -o /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/build/codec-cuda/libbaseline_taco.so -ccbin /usr/bin/g++-11
+START smoke-flux-basic
+START smoke-ma11
+START block00-flux-basic
+START block00-ma11
+START block01-ma11
+START block01-flux-basic
+START block02-flux-basic
+START block02-ma11
+START block03-ma11
+START block03-flux-basic
+START block04-flux-basic
+START block04-ma11
+START block05-ma11
+START block05-flux-basic
+START block06-flux-basic
+START block06-ma11
+START block07-ma11
+START block07-flux-basic
+COMPLETED /workspace/TempName-New/logs/h100/phase6/ma0-layer-20261029-014750-669435/report.md
