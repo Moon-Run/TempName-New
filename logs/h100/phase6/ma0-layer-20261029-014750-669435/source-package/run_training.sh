@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-bench_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-exec python3 "$bench_root/app/tp8_dp2_train.py" "$@"
