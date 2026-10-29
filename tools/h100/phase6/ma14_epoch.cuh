@@ -34,7 +34,7 @@ __global__ void taco_ma14_epoch_barrier_kernel(const __grid_constant__ Ma14Epoch
   }
 }
 
-extern "C" int taco_ma14_epoch_protocol() { return 14; }
+extern "C" int taco_ma14_epoch_protocol() { return 1402; }
 
 extern "C" int taco_ma14_epoch_barrier(Ma14EpochConfig c, cudaStream_t stream) {
   if (c.rank < 0 || c.rank >= 8 || c.epoch == 0 ||

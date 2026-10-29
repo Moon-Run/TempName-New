@@ -27,7 +27,7 @@ def fake_slot(candidate=False):
                    ma11_softmax_forward_cuda=NativeFunction(0),
                    ma11_softmax_backward_cuda=NativeFunction(0))
     if candidate:
-        exports.update(taco_ma14_epoch_protocol=NativeFunction(14),
+        exports.update(taco_ma14_epoch_protocol=NativeFunction(1402),
                        taco_ma14_epoch_barrier=NativeFunction(0))
     return types.SimpleNamespace(lib=types.SimpleNamespace(**exports),
                                  cr2_submission_state=lambda: dict(bound_k=512))
@@ -55,17 +55,19 @@ class BenchTests(unittest.TestCase):
         op = types.SimpleNamespace(slots=[fake_slot(True), fake_slot(True)])
         with self.assertRaisesRegex(ValueError, 'MA11 control'):
             bench.native_tuning(op, bench.ARMS[0], plan)
-        op.slots[0].lib.taco_ma14_epoch_protocol.result = 12
+        # Version 1 exports the same symbol names; its ABI identity must still
+        # be rejected before it can enter a version 2 worker.
+        op.slots[0].lib.taco_ma14_epoch_protocol.result = 14
         with self.assertRaisesRegex(ValueError, 'Wrong MA14'):
             bench.native_tuning(op, bench.ARMS[1], plan)
 
     def test_epoch_evidence_rejects_reset_alias_and_lost_generation(self):
         import copy
-        states = [dict(protocol_version=14, initializations=1, epoch=32,
+        states = [dict(protocol_version=1402, initializations=1, epoch=32,
                        local_ready_ptr=128+64*i, failed=False, slot=i) for i in range(2)]
         submissions = [dict(successful_calls=32, slot=i) for i in range(2)]
         bench.validate_epoch_state(states, submissions, bench.ARMS[1])
-        for field, bad in [('initializations', 2), ('epoch', 31), ('failed', True),
+        for field, bad in [('protocol_version', 14), ('initializations', 2), ('epoch', 31), ('failed', True),
                            ('local_ready_ptr', 192)]:
             changed = copy.deepcopy(states)
             changed[0][field] = bad

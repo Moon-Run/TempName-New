@@ -357,12 +357,15 @@ _trace_source=registered_replace(_trace_source,'(events,arm,mechanism=None)', '(
 _trace_source=registered_replace(_trace_source,'bench.validate_mechanism(mechanism)','bench.validate_tuning(tuning)')
 _trace_source=registered_replace(_trace_source,'        gemm,barrier,decoder=path',
     "        gemm,barrier,decoder=path\n        role=scope['name'].split('.')[1]\n"
-    "        launch=bench.validate_launch(gemm,decoder,arm,role,tuning)")
+    "        launch=bench.validate_launch(gemm,decoder,arm,role,tuning)\n"
+    "        submission=ma14_profile.submission_intervals(call,path,inside)")
 _trace_source=registered_replace(_trace_source,"0 if arm=='F4' else 2", '0',2)
 _trace_source=registered_replace(_trace_source,"fused_consumer=arm=='F4'", 'fused_consumer=True')
 _trace_source=registered_replace(_trace_source,".append(dict(cpu_us=call['dur']", ".append(dict(launch=launch,cpu_us=call['dur']")
 _trace_source=registered_replace(_trace_source,'layernorm_successors=128,fused_consumer=True,',
-                                    "layernorm_successors=128,fused_consumer=True,launch=values[0]['launch'],")
+    "layernorm_successors=128,fused_consumer=True,launch=values[0]['launch'],"
+    "submission_attribution=ma14_profile.SUBMISSION_LIMITATION,"
+    "sum_us={k:sum(row[k] for row in values) for k in ma14_profile.SUBMISSION_FIELDS},")
 _trace_source=registered_replace(_trace_source,
     "'CudaIpcBarrierAllKernel' in barrier['name']", "bench.barrier_name(arm) in barrier['name']")
 _trace_source=registered_replace(_trace_source,
@@ -370,10 +373,11 @@ _trace_source=registered_replace(_trace_source,
     "        ma14_profile.validate_projection_work(list(associated.values()),arm)\n"
     "        path=sorted((e for e in associated.values() if e.get('cat')=='kernel'),key=lambda e:e['ts'])")
 _trace_source=registered_replace(_trace_source, "launch=launch,cpu_us=call['dur']",
-    "launch=launch,barrier_us=barrier['dur'],cpu_us=call['dur']")
+    "launch=launch,**submission,barrier_us=barrier['dur'],cpu_us=call['dur']")
 _trace_source=registered_replace(_trace_source,
     "('cpu_us','decoder_us','decoder_start_to_layernorm_end_us','gemm_end_to_layernorm_end_us')",
-    "('cpu_us','barrier_us','decoder_us','decoder_start_to_layernorm_end_us','gemm_end_to_layernorm_end_us')")
+    "('cpu_us','barrier_us','decoder_us','decoder_start_to_layernorm_end_us','gemm_end_to_layernorm_end_us',"
+    "*ma14_profile.SUBMISSION_FIELDS)")
 exec(compile(_trace_source,str(_F4_PATH),'exec'),globals())
 _trace_forward=trace_projection_records
 

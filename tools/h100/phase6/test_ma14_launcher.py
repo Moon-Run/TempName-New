@@ -15,7 +15,7 @@ class MA14LaunchTests(unittest.TestCase):
         hashes = launch.controller_hashes()
         for name in ('ma4_f_bench.py', 'ma4_f_fullstep.py', 'ma5_fullstep.py',
                      'ma2_cr2_bench.py', 'ma9_bench.py', 'ma8_adapter.py', 'ma9_adapter.py',
-                     'ma11_adapter.py', 'ma11_softmax.cuh', 'ma14_sources.py', 'ma14_epoch.cuh'):
+                     'ma11_adapter.py', 'ma11_softmax.cuh', 'ma14_sources.py', 'ma14_epoch.cuh', 'ma14_pair.h'):
             path = launch.HERE / name
             self.assertEqual(hashes[str(path)], launch.sha(path))
 

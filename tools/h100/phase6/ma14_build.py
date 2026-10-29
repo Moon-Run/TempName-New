@@ -13,12 +13,12 @@ from native_exports import verify_native_exports
 from common import HERE, read, require, sha, verify_files, write
 from scope_plan import model_config
 
-PROTOCOL = 'h100-ma14-epoch-reuse-v1'
+PROTOCOL = 'h100-ma14-epoch-reuse-v2'
 MANIFEST = 'ma14-manifest.json'
 VARIANTS = ma14_sources.VARIANTS
 RUNTIME = baseline.RUNTIME
 C_POLICY = baseline.C_POLICY
-INPUTS = tuple(dict.fromkeys(('ma14_build.py', 'ma14_sources.py', 'ma14_epoch.cuh', 'ma11_pytorch_LICENSE.txt', 'ma11_sources.py', 'ma11_adapter.py', 'ma11_softmax.cuh', 'ma8_adapter.py', 'ma9_adapter.py', 'ma9_sources.py', 'ma9_bench.py',
+INPUTS = tuple(dict.fromkeys(('ma14_build.py', 'ma14_sources.py', 'ma14_epoch.cuh', 'ma14_pair.h', 'ma11_pytorch_LICENSE.txt', 'ma11_sources.py', 'ma11_adapter.py', 'ma11_softmax.cuh', 'ma8_adapter.py', 'ma9_adapter.py', 'ma9_sources.py', 'ma9_bench.py',
                              'ma9_zero_count.cuh', 'native_exports.py', *baseline.INPUTS)))
 canonical = baseline.canonical
 
@@ -61,7 +61,7 @@ def prepare(out, tuning=None):
                   control_native_reference='registered_ma11_native',
                   baseline_arm='F4-cache-zcount-csoftmax', candidate_arm='F4-cache-zcount-csoftmax-epoch',
                   control_native_sources_unchanged=True, projection_arithmetic_unchanged=True,
-                  candidate_native_addition='epoch_publication_barrier', baseline_source_only=False, gpu_validated=False,
+                  candidate_native_addition='epoch_publication_barrier_native_pair', native_protocol=1402, baseline_source_only=False, gpu_validated=False,
                   reference_protocol=baseline.PROTOCOL, baseline_variants={'F4': frozen},
                   variants={arm: item['source_sha256'] for arm, item in variants.items()},
                   build_manifest_sha256=sha(out / 'manifest.json'))
@@ -83,7 +83,8 @@ def verify(root, built=False):
             'MA14 requires the complete MA11 baseline in both arms')
     require(record.get('control_native_sources_unchanged') is True and
             record.get('projection_arithmetic_unchanged') is True and
-            record.get('candidate_native_addition') == 'epoch_publication_barrier',
+            record.get('candidate_native_addition') == 'epoch_publication_barrier_native_pair' and
+            record.get('native_protocol') == 1402,
             'MA14 must retain the exact MA11 control and original projection arithmetic')
     verify_files('/', record['inputs'])
     verify_files(root, record['files'])

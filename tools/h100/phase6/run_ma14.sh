@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# MA14-v1: complete MA11 versus MA11 plus epoch-based payload buffer reuse.
-# Both arms retain MA8-v2, MA9 and original MA11 backward. Preview unless --execute.
+# MA14-v2: complete MA11 versus MA11 plus epoch publication with native pair ownership.
+# Both arms retain MA8-v2, MA9 and original MA11 forward/backward. Preview unless --execute.
 ma14_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 ma14_runtime=/usr/local/cuda-12.4
 if [[ -f "$ma14_repo/outputs/h100/container-recovery/env.sh" ]]; then

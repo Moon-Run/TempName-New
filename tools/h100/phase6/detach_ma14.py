@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import detach_ablation5_run_two as launcher
 from common import HERE, REPO, read, write, require, sha, verify_files
 
-PROTOCOL = 'h100-ma14-epoch-reuse-detached-v1'
+PROTOCOL = 'h100-ma14-epoch-reuse-detached-v2'
 ARMS = ('F4-cache-zcount-csoftmax', 'F4-cache-zcount-csoftmax-epoch')
 BLOCKS = 8
 STEPS = 50
@@ -36,7 +36,7 @@ def arguments(argv=None):
     parser.add_argument('--build-cuda-home', type=Path, default=Path('/usr/local/cuda-12.8'))
     parser.add_argument('--cuda-home', type=Path, default=Path('/usr/local/cuda-12.4'))
     parser.add_argument('--nccl-root', type=Path)
-    parser.add_argument('--ma14-build', type=Path, help='Reuse a verified MA14-v1 two-arm build; older MA8/MA9/MA11 builds are not accepted')
+    parser.add_argument('--ma14-build', type=Path, help='Reuse a verified MA14-v2 two-arm build; MA14-v1 and older experiment builds are not accepted')
     parser.add_argument('--jobs', type=int, default=2)
     parser.add_argument('--worker-timeout', type=int, default=1800)
     parser.add_argument('--execute', action='store_true')
@@ -46,7 +46,7 @@ def arguments(argv=None):
     tuning(args)
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO/'logs/h100/phase6'/f'ma14-v1-epoch-reuse-{args.trials}x-50steps-{stamp}'
+        args.out = REPO/'logs/h100/phase6'/f'ma14-v2-epoch-reuse-{args.trials}x-50steps-{stamp}'
     for key, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, key, value.expanduser().absolute() if key == 'python' else value.expanduser().resolve())
@@ -145,7 +145,7 @@ def supervise(args):
     state = dict(protocol=PROTOCOL, status='preparing', trials=args.trials, arms=list(ARMS),
         main_contrasts=['F4-cache-zcount-csoftmax-epoch/F4-cache-zcount-csoftmax'], tuning=tuning(args),
         activation_policy='owned_forward_activation_cache', zero_count_policy='common_fused_optimizer_zero_count',
-        softmax_policy='ma11_in_both_arms', publication_policy='candidate_epoch_barrier',
+        softmax_policy='ma11_in_both_arms', publication_policy='candidate_epoch_barrier_native_pair_v2',
         fullstep_execution_path_validated=False,
         acceptance_status={'F4-cache-zcount-csoftmax-epoch': 'pending_execution_evidence'},
         target_evaluated=False, target_validated=False, target_percent=2.0, target_point_observed=False,
@@ -208,7 +208,7 @@ def main(argv=None):
     else:
         import ma14_build
         require(ma14_build.verify(args.ma14_build, built=True)['tuning'] == tuning(args),
-                'Reused build differs from fixed MA14-v1 MA11-control configuration')
+                'Reused build differs from fixed MA14-v2 MA11-control configuration')
     if args.nccl_root:
         require(all((args.nccl_root/name).is_file() for name in ('include/nccl.h', 'lib/libnccl_static.a')),
                 'NCCL development files missing')

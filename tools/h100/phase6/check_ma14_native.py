@@ -36,7 +36,8 @@ def main(argv=None):
     record = dict(completed=False, gpu_used=False, gpu_validated=False,
                   full_flux_linked=False, diagnostic_only=True, commands=commands,
                   inputs={name: sha(HERE / name) for name in
-                          ('ma14_sources.py', 'ma14_epoch.cuh', 'check_ma14_native.py')},
+                          ('ma14_sources.py', 'ma14_epoch.cuh', 'ma14_pair.h',
+                           'check_ma14_native.py')},
                   limitations=['Compilation and CPU ABI rejection checks only; no GPU execution.'])
 
     def run(name, command):
@@ -90,7 +91,7 @@ def main(argv=None):
         lib = ctypes.CDLL(str(library))
         lib.taco_ma14_epoch_protocol.argtypes = []
         lib.taco_ma14_epoch_protocol.restype = ctypes.c_int
-        if lib.taco_ma14_epoch_protocol() != 14:
+        if lib.taco_ma14_epoch_protocol() != ma14_sources.NATIVE_PROTOCOL:
             raise RuntimeError('Wrong MA14 native protocol')
         barrier = lib.taco_ma14_epoch_barrier
         barrier.argtypes, barrier.restype = [EpochConfig, ctypes.c_void_p], ctypes.c_int
@@ -120,7 +121,7 @@ def main(argv=None):
         if ('st.release.sys.global.u64' not in body or 'ld.acquire.sys.global.u64' not in body
                 or 'atom.' in body or 'red.' in body):
             raise RuntimeError('Compiled epoch protocol differs from store/acquire design')
-        record.update(completed=True, native_protocol=14, rejected_configs=rejected,
+        record.update(completed=True, native_protocol=ma14_sources.NATIVE_PROTOCOL, rejected_configs=rejected,
                       system_release_acquire_ptx=True, barrier_has_no_rmw=True,
                       checks=['actual_runtime_link', 'actual_torch_wrapper', 'actual_pybind_object',
                               'native_exports', 'invalid_abi_rejection', 'epoch_ptx'])

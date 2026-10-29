@@ -25,9 +25,41 @@ class ProfileTests(unittest.TestCase):
             result = bench.trace_path(fixture(candidate), arm, 'attn')
             self.assertTrue(result['execution_path_validated'])
             self.assertEqual(result['median_us']['barrier_us'], 1)
+            self.assertAlmostEqual(result['median_us']['cpu_marker_to_gemm_launch_us'], 10)
+            self.assertAlmostEqual(result['median_us']['gemm_to_barrier_api_gap_us'], 9.9)
+            self.assertAlmostEqual(result['sum_us']['cpu_marker_to_gemm_launch_us'], 40)
             result = full._trace_forward(fixture(candidate, True), arm)
             self.assertEqual(result['attn']['publication_barriers'], 128)
             self.assertEqual(result['mlp']['barrier_us'], 1)
+            self.assertAlmostEqual(result['attn']['cpu_marker_to_gemm_launch_us'], 9)
+            self.assertAlmostEqual(result['mlp']['sum_us']['gemm_to_barrier_api_gap_us'], 128*9.9)
+
+    def test_submission_intervals_require_unique_owned_launches(self):
+        import copy
+        events = fixture(True)
+        marker = next(e for e in events if e.get('cat') == 'user_annotation')
+        path = [e for e in events if e.get('cat') == 'kernel'][:3]
+        launch = next(e for e in events if e.get('cat') == 'cuda_runtime' and
+                      e['args']['correlation'] == path[0]['args']['correlation'])
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            profile.submission_intervals(marker, path, events + [copy.deepcopy(launch)])
+        launch['tid'] = 999
+        with self.assertRaisesRegex(ValueError, 'correlated launch'):
+            profile.submission_intervals(marker, path, events)
+
+    def test_submission_gap_uses_cpu_api_end_not_gpu_kernel_end(self):
+        events = fixture(True)
+        marker = next(e for e in events if e.get('cat') == 'user_annotation')
+        path = [e for e in events if e.get('cat') == 'kernel'][:3]
+        # Synthetic GPU timestamps are a million us after their host launches.
+        self.assertGreater(path[0]['ts'], 1000000)
+        value = profile.submission_intervals(marker, path, events)
+        self.assertAlmostEqual(value['gemm_to_barrier_api_gap_us'], 9.9)
+        launch = next(e for e in events if e.get('cat') == 'cuda_runtime' and
+                      e['args']['correlation'] == path[0]['args']['correlation'])
+        launch['dur'] = 30
+        with self.assertRaisesRegex(ValueError, 'precedes'):
+            profile.submission_intervals(marker, path, events)
 
     def test_wrong_barrier_or_extra_clear_rejected(self):
         for arm in bench.ARMS:

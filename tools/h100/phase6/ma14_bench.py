@@ -28,7 +28,7 @@ for old, new, count in (
         ('ma9_bench', 'ma14_bench', 8), ('ma9_build', 'ma14_build', 3),
         ('ma9_sources', 'ma14_sources', 7), ('ma9_manifest_sha256', 'ma14_manifest_sha256', 1),
         ('H100_MA9_', 'H100_MA14_', 1),
-        ("'h100-ma9-f4-zcount-v1'", "'h100-ma14-epoch-reuse-v1'", 1),
+        ("'h100-ma9-f4-zcount-v1'", "'h100-ma14-epoch-reuse-v2'", 1),
         ("ARMS = ('F4', 'F4-zcount')", "ARMS = ('F4-cache-zcount-csoftmax', 'F4-cache-zcount-csoftmax-epoch')", 1),
         ("MAIN_COMPARISONS = (('F4-zcount', 'F4'),)",
          "MAIN_COMPARISONS = (('F4-cache-zcount-csoftmax-epoch', 'F4-cache-zcount-csoftmax'),)", 1),
@@ -60,7 +60,10 @@ _driver = _replace(_driver,
     "        ma14_profile.validate_projection_work([e for e in events if e.get('cat') in ('kernel','gpu_memcpy','gpu_memset') and e.get('args',{}).get('correlation') in correlations], arm)\n"
     "        path=sorted((e for e in kernels if e.get('args',{}).get('correlation') in correlations),key=lambda e:e['ts'])")
 _driver = _replace(_driver, "durations.append(dict(cpu_us=marker['dur'],decoder_us=path[2]['dur']",
-    "durations.append(dict(cpu_us=marker['dur'],barrier_us=path[1]['dur'],decoder_us=path[2]['dur']")
+    "durations.append(dict(**ma14_profile.submission_intervals(marker,path,runtime),cpu_us=marker['dur'],barrier_us=path[1]['dur'],decoder_us=path[2]['dur']")
+_driver = _replace(_driver, "launch=launches[0],median_us=",
+    "launch=launches[0],submission_attribution=ma14_profile.SUBMISSION_LIMITATION,"
+    "sum_us={k:sum(v[k] for v in durations) for k in ma14_profile.SUBMISSION_FIELDS},median_us=")
 exec(compile(_driver, str(DRIVER), 'exec'), globals())
 
 _driver_freeze, _driver_verify = freeze_helpers, verify
@@ -104,7 +107,7 @@ def native_tuning(op, arm, plan):
         if arm == ARMS[1]:
             protocol = slot.lib.taco_ma14_epoch_protocol
             protocol.argtypes = []; protocol.restype = ctypes.c_int
-            require(protocol() == 14, 'Wrong MA14 epoch publication helper')
+            require(protocol() == 1402, 'Wrong MA14-v2 native pair/publication helper')
             require(all(hasattr(slot.lib, name) for name in ma14_sources.NATIVE_EXPORTS),
                     'Missing MA14 epoch publication exports')
         else:
@@ -126,7 +129,7 @@ def validate_epoch_state(states, submissions, arm):
     require(len(states) == len(submissions) == 2, 'Missing two epoch slots')
     require(len({s['local_ready_ptr'] for s in states}) == 2, 'Epoch slots share counters')
     for state, submission in zip(states, submissions):
-        require(state['protocol_version'] == 14 and state['initializations'] == 1 and
+        require(state['protocol_version'] == 1402 and state['initializations'] == 1 and
                 state['slot'] == submission['slot'] and state['failed'] is False and
                 state['epoch'] == submission['successful_calls'] and
                 0 < state['epoch'] < 2**63 and state['local_ready_ptr'] > 0,

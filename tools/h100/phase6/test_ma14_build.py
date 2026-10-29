@@ -31,14 +31,14 @@ class BuildIdentityTests(unittest.TestCase):
                                   for name, value in updates.items()})
         control, candidate = (record['variants'][arm] for arm in source.VARIANTS)
         self.assertEqual(control, expected)
-        self.assertEqual(set(candidate) - set(control), {source.EPOCH_HEADER})
+        self.assertEqual(set(candidate) - set(control), {source.EPOCH_HEADER, source.PAIR_HEADER})
         self.assertEqual({name for name in control if control[name] != candidate[name]},
                          {source.RUNTIME, source.HEADER, source.WRAPPER, source.WRAPPER_HEADER,
                           source.PYBIND, source.FRONTEND, source.VERSION_SCRIPT})
         for name in (source.ZERO_COUNT_HEADER, source.DECODER, ma11_sources.SOFTMAX_HEADER,
                      ma11_sources.SOFTMAX_TU, source.CUDA_CMAKE):
             self.assertEqual(control[name], candidate[name])
-        for name in ('ma8_adapter.py', 'ma9_adapter.py', 'ma14_epoch.cuh', 'ma11_adapter.py', 'ma11_softmax.cuh'):
+        for name in ('ma8_adapter.py', 'ma9_adapter.py', 'ma14_epoch.cuh', 'ma14_pair.h', 'ma11_adapter.py', 'ma11_softmax.cuh'):
             self.assertIn(str(builder.HERE / name), record['inputs'])
 
     def test_actual_linker_map_preserves_ma9_in_both_arms(self):
@@ -84,6 +84,18 @@ class BuildIdentityTests(unittest.TestCase):
     def test_unbuilt_sources_cannot_be_measured(self):
         with self.assertRaisesRegex(ValueError, 'Missing MA14 runtime|Unbuilt'):
             builder.verify(self.root, built=True)
+
+    def test_version_one_manifest_is_rejected(self):
+        path = self.root / builder.MANIFEST
+        original = path.read_bytes()
+        try:
+            record = read(path)
+            record['protocol'] = 'h100-ma14-epoch-reuse-v1'
+            write(path, record)
+            with self.assertRaisesRegex(ValueError, 'Wrong MA14 source protocol'):
+                builder.verify(self.root)
+        finally:
+            path.write_bytes(original)
 
     def test_fixed_geometry_and_source_arm_validation(self):
         invalid = source.tuning_config()
