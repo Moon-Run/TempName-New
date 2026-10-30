@@ -350,6 +350,47 @@ def mapping_checks(args, build, plan):
                                                build_manifest_sha256=plan['build']['manifest_sha256']))
 
 
+def print_smoke_failures(directory):
+    errors = {}
+    for path in sorted(directory.glob('rank*.json')):
+        try:
+            row = read(path)
+        except (OSError, ValueError):
+            continue
+        if isinstance(row, dict) and isinstance(row.get('error'), str):
+            errors.setdefault(row['error'], []).append(path.stem)
+    for error, ranks in errors.items():
+        print('LOCAL TRANSPORT FAILURE ' + ','.join(ranks) + ': ' + error, file=sys.stderr, flush=True)
+    if not errors:
+        path = directory/'process.log'
+        if path.is_file():
+            print('\n'.join(path.read_text(errors='replace').splitlines()[-80:]), file=sys.stderr, flush=True)
+
+
+def worker_source_preflight():
+    sources = load('sources')
+    for arm in p.ARMS:
+        for name, generate in (('worker', sources.worker_source), ('adapter', sources.adapter_source),
+                               ('taco_support', sources.taco_source)):
+            compile(generate(arm), f'{arm}/{name}.py', 'exec')
+
+
+def reuse_build(args, build, stage):
+    """Migrate only the registered Python defect under the campaign lock."""
+    from repair_native_rank import LEGACY_SHA256, repair
+    builder = load('build')
+    record = read(build/'baseline-build.json')
+    environment = builder.environment_identity(args.build_cuda_home)
+    require(record.get('environment') == environment, 'Build Python/CUDA/ABI environment changed')
+    if record.get('transport_inputs', {}).get('nccl_transport.py') == LEGACY_SHA256:
+        stage('repair-native-rank')
+        receipt = repair(build)
+        write(args.out/'build-frontend-repair.json', receipt)
+        print('FRONTEND REPAIR PASSED', receipt['backup'], flush=True)
+    stage('verify-build')
+    return builder.verify(build, True)
+
+
 def local_smoke_checks(args, build, plan):
     import local_smoke
     from tp8_dp2_train import run_process
@@ -366,7 +407,11 @@ def local_smoke_checks(args, build, plan):
                    '--out', dest, '--execute']
         write(dest/'command.json', dict(command=list(map(str, command)), arm=arm))
         print('LOCAL TRANSPORT SMOKE', arm, flush=True)
-        run_process(command, REPO, env, dest/'process.log', max(900, args.worker_timeout), Peer())
+        try:
+            run_process(command, REPO, env, dest/'process.log', max(900, args.worker_timeout), Peer())
+        except Exception:
+            print_smoke_failures(dest)
+            raise
         result = local_smoke.validate_reports(dest, arm, plan['build']['manifest_sha256'])
         require(result == read(dest/'report.json'), 'Local transport smoke disagrees with original records')
         summary['arms'][arm] = result
@@ -396,6 +441,9 @@ def supervise(args):
         lock = lock_path.open('a')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         verify_controllers(root)
+        if not args.preflight_only:
+            stage('worker-source-preflight')
+            worker_source_preflight()
         stage('hardware-preflight')
         hardware = hardware_preflight(args)
         if args.preflight_only:
@@ -406,10 +454,7 @@ def supervise(args):
         builder, sources, profiler = load('build'), load('sources'), load('profile')
         build = args.baseline_build or root/'build'
         if args.baseline_build:
-            stage('verify-build')
-            built = builder.verify(build, True)
-            require(built['environment'] == builder.environment_identity(args.build_cuda_home),
-                    'Build Python/CUDA/ABI environment changed')
+            built = reuse_build(args, build, stage)
         else:
             stage('prepare-build')
             builder.prepare(build)

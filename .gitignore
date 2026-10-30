@@ -88,9 +88,7 @@ htmlcov/
 !/outputs/
 /outputs/**
 !/logs/
-!/logs/**
-!/logs/
-!/outputs/
+/logs/**
 !/logs/h100/
 !/outputs/h100/
 !/logs/h100/phase6/

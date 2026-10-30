@@ -1,5 +1,7 @@
 """CPU-only integration checks; no GPU timing data is synthesized as results."""
+from contextlib import redirect_stderr
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -24,6 +26,87 @@ preflight = module('rtx5090_preflight_test', 'baseline_preflight.py')
 
 
 class Launcher(unittest.TestCase):
+    def test_transport_smoke_shell_preview_does_not_read_or_repair_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = dict(os.environ, RTX5090_PYTHON=sys.executable)
+            result = subprocess.run(['bash', str(HERE/'run_transport_smoke.sh'),
+                                     '--baseline-build', str(root/'missing-build'), '--out', str(root/'out')],
+                                    cwd=root, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            plan = json.loads(result.stdout[result.stdout.index('{'):])
+            self.assertTrue(plan['transport_smoke_only'])
+            self.assertEqual(plan['formal_optimizer_steps'], 0)
+            self.assertFalse((root/'out').exists())
+            self.assertFalse((root/'missing-build').exists())
+
+    def test_reused_legacy_build_is_repaired_and_verified_in_one_launch(self):
+        import repair_native_rank as repair
+        builder = load('build')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = launcher.arguments(['--out', str(root/'out')])
+            environment = {'CPU_FIXTURE': True}
+            launcher.write(root/'build/baseline-build.json', dict(environment=environment,
+                           transport_inputs={'nccl_transport.py': repair.LEGACY_SHA256}))
+            receipt = dict(status='repaired', backup='CPU-FIXTURE-backup')
+            stages = []
+            with patch.object(repair, 'repair', return_value=receipt) as migrate, \
+                 patch.object(builder, 'environment_identity', return_value=environment), \
+                 patch.object(builder, 'verify', return_value={'CPU_FIXTURE': True}) as verify:
+                launcher.reuse_build(args, root/'build', stages.append)
+            self.assertEqual(stages, ['repair-native-rank', 'verify-build'])
+            migrate.assert_called_once_with(root/'build')
+            verify.assert_called_once_with(root/'build', True)
+            self.assertEqual(launcher.read(args.out/'build-frontend-repair.json'), receipt)
+
+    def test_changed_environment_and_unknown_build_are_not_repaired(self):
+        import repair_native_rank as repair
+        builder = load('build')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = launcher.arguments(['--out', str(root/'out')])
+            for identity in (repair.LEGACY_SHA256, 'unknown-frontend'):
+                launcher.write(root/'build/baseline-build.json', dict(environment={'version': 'old'},
+                               transport_inputs={'nccl_transport.py': identity}))
+                with patch.object(repair, 'repair') as migrate, \
+                     patch.object(builder, 'environment_identity', return_value={'version': 'new'}), \
+                     patch.object(builder, 'verify') as verify:
+                    with self.assertRaisesRegex(ValueError, 'environment changed'):
+                        launcher.reuse_build(args, root/'build', lambda stage: None)
+                    migrate.assert_not_called()
+                    verify.assert_not_called()
+            with patch.object(repair, 'repair') as migrate, \
+                 patch.object(builder, 'environment_identity', return_value={'version': 'old'}), \
+                 patch.object(builder, 'verify', side_effect=ValueError('unknown build')):
+                with self.assertRaisesRegex(ValueError, 'unknown build'):
+                    launcher.reuse_build(args, root/'build', lambda stage: None)
+                migrate.assert_not_called()
+
+    def test_source_failure_stops_before_hardware_or_compilation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = launcher.arguments(['--out', str(root/'out'), '--execute'])
+            launcher.write(args.out/'batch-state.json', dict(status='launching'))
+            with patch.object(launcher, 'REPO', root), patch.object(launcher, 'verify_controllers'), \
+                 patch.object(load('sources'), 'worker_source', side_effect=ValueError('bad worker')), \
+                 patch.object(launcher, 'hardware_preflight') as hardware:
+                with self.assertRaisesRegex(ValueError, 'bad worker'):
+                    launcher.supervise(args)
+                hardware.assert_not_called()
+            self.assertEqual(launcher.read(args.out/'batch-state.json')['stage'], 'worker-source-preflight')
+
+    def test_smoke_prints_underlying_rank_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rank in (0, 7):
+                launcher.write(root/f'rank{rank}.json', dict(completed=False, error='AttributeError: missing rank'))
+            output = io.StringIO()
+            with redirect_stderr(output):
+                launcher.print_smoke_failures(root)
+            self.assertIn('rank0,rank7: AttributeError: missing rank', output.getvalue())
+            self.assertEqual(output.getvalue().count('missing rank'), 1)
+
     def test_shell_preview_has_no_external_work_and_no_output_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

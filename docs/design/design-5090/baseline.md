@@ -4,7 +4,7 @@
 
 **当前状态：代码改为不依赖 P2P 的 NCCL staging v2，尚无 RTX 5090 训练实测结果。** 2026-10-30 用户回传的官方 `nvcr.io/nvidia/pytorch:25.06-py3` 临时容器检查确认，8 张 RTX 5090 均为 SM120 / 170 SM，但全部 56 条跨卡有向 peer-access 链路不可用。新的投影路径为 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**，不再把其他 GPU 的地址交给 CUDA kernel。P2P 矩阵仍记录在预检证据中，但不再要求链路可用。
 
-本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。2026-10-30 目标机回传日志已推进到 `prepare-workers`，此前硬件/NCCL 预检及七组原生构建已完成；本轮在 Python 3.12 的 AST 校验处中止。数值检查、路径检查及正式计时仍须在目标机执行，不把 H100 耗时填作 5090 耗时。
+本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。2026-10-30 目标机回传日志已确认七组原生构建、硬件/NCCL 预检、worker 生成及 native mapping 检查完成；MA11 原生传输 smoke 在 Python 前端初始化处因缺失 `self.rank` 中止。当前已修复此缺陷并提供旧构建自动更新流程；传输数值检查、完整模型检查及正式计时仍待目标机执行，不把 H100 耗时填作 5090 耗时。
 
 ## 1. 对比目标与 H100 参考
 
@@ -84,7 +84,7 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 普通 NCCL 通信可在不能使用 P2P 时使用主机共享内存等传输方式；`NCCL_P2P_DISABLE=1` 仅禁用 NCCL 的 P2P transport，不会改写应用中自定义 CUDA kernel 的远端指针访问。[NCCL 环境变量说明](https://docs.nvidia.com/deeplearning/nccl/archives/nccl_2276/user-guide/docs/env.html#nccl-p2p-disable)
 
-新的统一入口已把八卡 NCCL 集合通信作为正式前置检查。`Flux＋基础量化` 保留 GemmOnly＋独立编码＋NCCL All-to-All＋接收端融合 v2；其余八组使用本地 fused producer 和 staging 传输。后续回传的批次 `baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-151053-241177` 已通过前置检查并完成七组原生编译/链接，随后在 `prepare-workers` 报出 `Original training functions changed`。该次尚未进入原生传输 smoke，两类投影路径仍待目标机验证。
+新的统一入口已把八卡 NCCL 集合通信作为正式前置检查。`Flux＋基础量化` 保留 GemmOnly＋独立编码＋NCCL All-to-All＋接收端融合 v2；其余八组使用本地 fused producer 和 staging 传输。回传批次 `baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-160138-770121` 已通过预检、旧构建验证、worker 生成和 mapping 检查，八个 rank 随后均报 `AttributeError: '_NativeRuntime' object has no attribute 'rank'`。错误发生在原生投影初始化前；两类投影路径尚无目标机 smoke 通过记录。
 
 ## 4. 一键执行
 
@@ -109,7 +109,7 @@ bash tools/5090/phase6/run_baseline.sh
 bash tools/5090/phase6/run_baseline.sh --execute --preflight-only
 
 # 构建并检查新的原生传输；通过后停止，不运行完整模型和正式计时。
-bash tools/5090/phase6/run_baseline.sh --execute --transport-smoke-only --foreground
+bash tools/5090/phase6/run_transport_smoke.sh --execute
 
 # 九组完整批次：预检查、构建、原生/模型 smoke、profile、正式计时与报告。
 bash tools/5090/phase6/run_baseline.sh --execute
@@ -119,13 +119,25 @@ bash tools/5090/phase6/run_baseline.sh --execute
 
 若旧版脚本在 Python 3.12 的 `prepare-workers` 阶段报 `Original training functions changed`，原因是 [Python 3.12 为函数和类 AST 新增了 `type_params` 字段](https://docs.python.org/3.12/library/ast.html#ast.FunctionDef)，普通函数也会带 `type_params=[]`，无法直接匹配 Python 3.10 生成的冻结 AST 哈希。5090 的 `baseline_sources.py` 已在局部解析树中统一这个空字段；原训练函数和计时循环哈希保持不变，非空类型参数及实际代码修改仍会被拒绝。无需更换镜像或重装环境。
 
-同步修复后的 `tools/5090/phase6/baseline_sources.py` 后，可复用上述批次已完成的构建重试；入口会校验旧构建并创建新的结果目录：
+**已有 20261030-151053 构建的一次性重试：** 同步更新整个 `tools/5090/phase6/` 目录后，在容器内执行下面一条命令。脚本会自动识别已知的旧 Python 前端，备份并修复六份前端和相关哈希清单，完整校验旧/新构建，复用 CUDA 二进制，再运行八组原生传输 smoke；无需单独运行修复脚本或重新编译。
 
 ```bash
-bash tools/5090/phase6/run_baseline.sh \
-  --execute --transport-smoke-only --foreground \
+bash tools/5090/phase6/run_transport_smoke.sh --execute \
   --baseline-build /workspace/TempName-New/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-151053-241177/build
 ```
+
+若希望一条命令继续完成九组完整实验，使用下面的入口；它包含同样的自动修复和传输 smoke，所有正确性和 profile 检查通过后才计时：
+
+```bash
+bash tools/5090/phase6/run_baseline.sh --execute --foreground \
+  --baseline-build /workspace/TempName-New/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-151053-241177/build
+```
+
+正式执行先检查九组 worker 源码，再进行硬件检查和构建，避免源码错误在长时间编译后才被发现。`_NativeRuntime` 在设备检查前绑定传入的 rank，保持 rank/device 一致性门禁。
+
+自动修复只接受源码哈希为 `61bb8c847e41774648629cc1cffcb35729601bd6ad64e6fa9f73a8d6c0ebab22` 的已知旧前端及这次单行修复；其他原生源码、库、环境或构建身份变化仍会拒绝复用。旧文件备份位于构建目录的 `repairs/native-rank-*/`，新批次保存 `build-frontend-repair.json`，校验失败会恢复原文件。修复过程持有与测试相同的仓库锁，不会与另一个批次同时修改构建。已修复构建再次使用时只校验；旧失败批次不会被改写为成功。
+
+`run_transport_smoke.sh` 固定使用前台传输检查；不加 `--execute` 时仅预览，不修复构建、不使用 GPU。传输 smoke 子进程失败时，入口会直接打印 rank 记录中的原始错误，并保留 `process.log`。
 
 与 H100 的 `run_ma19.sh` 类似，默认执行模式交给后台控制进程；使用 `--foreground` 可在当前终端运行。后台任务持续运行要求容器保持运行；如果容器的主进程是交互式 bash，退出该 bash 会停止容器及其子进程。可在持续运行的容器中通过 `docker exec` 启动测试，并查看批次状态与阶段日志。
 
