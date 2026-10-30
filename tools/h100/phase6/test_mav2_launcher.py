@@ -17,6 +17,7 @@ from common import read, sha, write
 
 def submission(trial):
     info = dict(protocol=routing.PROTOCOL, run_id=trial, execution_timing=routing.TIMING,
+                allow_quality_failure=False,
                 executable=True, source_only=False, rounds=2, blocks_per_round=6,
                 timing_windows=36, schedule=routing.schedule(),
                 variants={p: routing.definition(p) for p in routing.POLICIES},
@@ -33,11 +34,14 @@ def submission(trial):
 def report_fixture(root, info):
     # These files stay in a test TemporaryDirectory and never describe GPU work.
     gate = dict(protocol=routing.PROTOCOL, completed=True,
+                allow_quality_failure=info['allow_quality_failure'],
                 submission_sha256=sha(root/'submission.json'))
     gate.update({k: info[k] for k in ('communication', 'codec_identity', 'codec_library')})
     write(root/'preflight.json', gate)
     write(root/'all-state.json', {'status': 'completed'})
     result = dict(protocol=routing.PROTOCOL, completed=True, correctness_passed=True,
+                  allow_quality_failure=info['allow_quality_failure'],
+                  quality_by_candidate={'mav2': True, 'd8': True},
                   execution_path_validated=True, quality_within_pairs=True, equivalence_pairs=routing.EQUIVALENCE_PAIRS,
                   run_id=info['run_id'], execution_timing=routing.TIMING,
                   round_count=2, blocks_per_round=6, timing_windows=36,
@@ -91,6 +95,16 @@ class LauncherTests(unittest.TestCase):
     def test_single_comparison_finishes_without_compare2(self):
         self.exercise(False, trials=1)
 
+    def test_opt_in_finishes_both_trials_with_failed_quality_status(self):
+        self.exercise(False, trials=2, quality_failed=True)
+
+    def test_quality_opt_in_is_explicit_and_forwarded_only_to_preparation(self):
+        for enabled in (False, True):
+            args = launch.arguments(['--out', '/CPU/batch'] + (['--allow-quality-failure'] if enabled else []))
+            commands = dict(launch.commands(args))
+            self.assertEqual('--allow-quality-failure' in commands['compare1-prepare'], enabled)
+            self.assertNotIn('--allow-quality-failure', commands['compare1-controller'])
+
     def test_single_preview_and_directory_describe_one_comparison(self):
         args = launch.arguments(['--trials', '1'])
         self.assertIn('mav2-three-arm-1x-50steps-', args.out.name)
@@ -111,12 +125,13 @@ class LauncherTests(unittest.TestCase):
     def test_incomplete_first_report_prevents_second_training(self):
         self.exercise(True, trials=2)
 
-    def exercise(self, broken, trials=1):
+    def exercise(self, broken, trials=1, quality_failed=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root/'handoff').mkdir()
             write(root/'handoff/controllers.json', {})
-            args = launch.arguments(['--out', str(root), '--trials', str(trials), '--flux-build', '/CPU/flux', '--codec-build', '/CPU/codec'])
+            args = launch.arguments(['--out', str(root), '--trials', str(trials), '--flux-build', '/CPU/flux', '--codec-build', '/CPU/codec']
+                                    + (['--allow-quality-failure'] if quality_failed else []))
             seen = []
 
             def invoke(command, log, env):
@@ -128,9 +143,14 @@ class LauncherTests(unittest.TestCase):
                 folder = root/trial
                 if label.endswith('-prepare'):
                     folder.mkdir()
-                    write(folder/'submission.json', submission(trial))
+                    write(folder/'submission.json', dict(submission(trial), allow_quality_failure=quality_failed))
                 if label.endswith('-report'):
                     result = report_fixture(folder, read(folder/'submission.json'))
+                    if quality_failed:
+                        result.update(quality_within_pairs=False, correctness_passed=False,
+                                      quality_by_candidate={'mav2': False, 'd8': False})
+                        write(folder/'report.json', result)
+                        write(folder/'all-state.json', {'status': 'completed_with_quality_failure'})
                     if broken and trial == 'compare1':
                         result['all_samples'].pop()
                         write(folder/'report.json', result)
@@ -145,7 +165,10 @@ class LauncherTests(unittest.TestCase):
                     self.assertEqual(read(root/'batch-state.json')['status'], 'failed')
                 else:
                     result = launch.supervise(args)
-                    self.assertEqual(result['status'], 'completed')
+                    status = 'completed_with_quality_failure' if quality_failed else 'completed'
+                    self.assertEqual(result['status'], status)
+                    self.assertEqual(result['quality_within_pairs'], not quality_failed)
+                    self.assertTrue(all(c['status'] == status for c in result['comparisons'].values()))
                     self.assertEqual(result['trials'], trials)
                     self.assertEqual(result['formal_optimizer_steps'], 1800 * trials)
                     self.assertEqual(result['timing_windows'], 36 * trials)
@@ -159,7 +182,7 @@ class LauncherTests(unittest.TestCase):
     def test_repeated_inputs_reject_changed_codec_or_shared_environment(self):
         first, second = submission('first'), submission('second')
         launch.same_inputs(first, second)
-        for key in ('codec_library', 'shared_environment', 'hardware'):
+        for key in ('codec_library', 'shared_environment', 'hardware', 'allow_quality_failure'):
             changed = copy.deepcopy(second)
             changed[key] = {'changed': True}
             with self.subTest(key=key), self.assertRaises(ValueError):

@@ -39,6 +39,10 @@ def verify_inputs(root, offline=False):
     cfg = read(root/'scripts/config.json')
     seal = read(root/'provenance/preparation.json')
     require(all(seal[k] == info[k] for k in seal), 'Preparation identity changed')
+    require(type(info.get('allow_quality_failure')) is bool and
+            cfg.get('allow_quality_failure') is info['allow_quality_failure'] and
+            seal.get('allow_quality_failure') is info['allow_quality_failure'],
+            'Quality-failure policy changed; prepare a fresh comparison')
     require(info['execution_timing'] == routing.TIMING and all(type(cfg[k]) is int and cfg[k] == v for k, v in routing.TIMING.items()) and
             cfg['smoke_warmup_steps'] == 2 and cfg['smoke_steps'] == 3, 'Timing/smoke steps changed')
     require(info['quality_budget'] == cfg['quality_budget'] == routing.QUALITY_BUDGET and
@@ -190,7 +194,11 @@ def quality_pair(basic, candidate):
             scores = [e/(atol+rtol*abs(x)) for e, x in zip(errors, left)]
             rms = math.sqrt(sum(e*e for e in errors)/len(errors))
             scale = math.sqrt(sum(x*x for x in left)/len(left))
+            worst = max(range(len(scores)), key=scores.__getitem__)
             fields[field] = dict(passed=max(scores) <= 1, max_budget_fraction=max(scores),
+                                 failed_points=sum(score > 1 for score in scores),
+                                 worst_point=dict(index=worst, control=left[worst], candidate=right[worst],
+                                     abs_error=errors[worst], allowed_abs_error=atol+rtol*abs(left[worst])),
                                  max_abs=max(errors), rmse=rms,
                                  normalized_rmse=rms/scale if scale else None,
                                  control_mean=statistics.mean(left), candidate_mean=statistics.mean(right),
@@ -201,6 +209,41 @@ def quality_pair(basic, candidate):
         result['ranks'].append(dict(rank=rank, passed=passed, fields=fields))
         result['passed'] = result['passed'] and passed
     return result
+
+
+def quality_failure_summary(quality):
+    """One worst rank/point per failed arm, mode and metric."""
+    failures = []
+    for policy, modes in quality.items():
+        for mode, pair in modes.items():
+            fields = pair['ranks'][0]['fields']
+            for field in fields:
+                rank = max(pair['ranks'], key=lambda r: r['fields'][field]['max_budget_fraction'])
+                value = rank['fields'][field]
+                if value['passed']:
+                    continue
+                point = value['worst_point']
+                failures.append(f'{policy}/{mode}/{field}: rank={rank["rank"]}, index={point["index"]}, '
+                    f'basic={point["control"]:.6g}, candidate={point["candidate"]:.6g}, '
+                    f'error={point["abs_error"]:.6g} > budget={point["allowed_abs_error"]:.6g} '
+                    f'({value["max_budget_fraction"]:.3f}x)')
+    return '; '.join(failures)
+
+
+def admit_preflight(root, info, gate):
+    """Only a sealed opt-in may admit finite training-quality failures."""
+    require(gate['completed'] is True and gate['execution_path_validated'] is True and
+            gate['submission_sha256'] == sha(Path(root)/'submission.json'),
+            'Complete passing numerical/path preflight required')
+    require(gate.get('allow_quality_failure') is info['allow_quality_failure'] and
+            type(gate['correctness_passed']) is bool and
+            gate['correctness_passed'] is gate['quality_within_pairs'] and
+            set(gate['quality_by_candidate']) == set(POLICIES)-{'basic'} and
+            all(type(value) is bool for value in gate['quality_by_candidate'].values()) and
+            gate['quality_within_pairs'] == all(gate['quality_by_candidate'].values()),
+            'Preflight quality status/policy mismatch')
+    require(gate['quality_within_pairs'] or info['allow_quality_failure'],
+            'Complete passing numerical/path preflight required; training quality failed')
 
 
 def contained(child, parent):
@@ -305,6 +348,7 @@ def preflight(root, offline=False):
     transforms = {p: {mode: {str(row['rank']): row['transform_diagnostics'] for row in records[(p, mode)]}
                       for mode in ('smoke', 'profile')} for p in POLICIES}
     gate = dict(protocol=PROTOCOL, completed=True, correctness_passed=passed, execution_path_validated=True,
+                allow_quality_failure=info['allow_quality_failure'],
                 bitwise_equal_within_pairs=False, quality_within_pairs=passed,
                 quality_by_candidate=quality_by_candidate,
                 quality_budget=dict(routing.QUALITY_BUDGET), quality=quality,
@@ -313,8 +357,13 @@ def preflight(root, offline=False):
                 codec_identity=info['codec_identity'], codec_library=info['codec_library'], fingerprints=reference,
                 role_profiles=profiles, files={str(p.relative_to(root)): sha(p) for p in files})
     gate['transform_diagnostics'] = transforms
+    gate['quality_failure_summary'] = quality_failure_summary(quality)
     write(root/'preflight.json', gate)
-    require(passed, 'MAV2 preflight training-quality budget failed; diagnostics saved in preflight.json')
+    if not passed:
+        message = ('MAV2 preflight training-quality budget failed; diagnostics saved in preflight.json: '
+                   + gate['quality_failure_summary'])
+        require(info['allow_quality_failure'], message)
+        print('QUALITY FAILED; continuing performance measurement by explicit opt-in. '+message, flush=True)
     return gate
 
 
@@ -347,6 +396,10 @@ def markdown(result):
              '每个候选独立对照 basic：逐点 loss 门槛为 0.05+5%×对照绝对值，grad_norm 为 0.1+10%×对照绝对值。',
              f'短程数值门禁通过：{result["quality_within_pairs"]}。逐 rank/逐窗口误差、均值/末步比与归一化 RMSE 保存在 JSON quality 字段。',
              '三组没有预设耗时排序；负结果全部保留。']
+    if result['allow_quality_failure']:
+        lines += ['', '本批次显式允许质量超限后继续性能测量；数值门槛未放宽，预检与正式窗口的质量失败均计入最终判定。']
+    if not result['quality_within_pairs']:
+        lines += ['', '**质量门禁未通过：流程完成不代表数值合格；质量失败的比较不能认定为合格加速。**']
     lines += ['', '| 候选 | 相对 basic 的数值门禁 | 耗时下降点估计为正 | 正收益且 95% CI 下界为正 |',
               '| --- | --- | --- | --- |']
     for policy, acceptance in result['candidate_acceptance'].items():
@@ -377,14 +430,13 @@ def report(root, offline=False, save=True):
     root = Path(root)
     info = verify_inputs(root, offline)
     gate = read(root/'preflight.json')
-    require(info['executable'] and not info['source_only'] and gate['completed'] and gate['correctness_passed'] and
-            gate['execution_path_validated'] and gate['quality_within_pairs'] is True and
+    admit_preflight(root, info, gate)
+    require(info['executable'] and not info['source_only'] and
             gate['bitwise_equal_within_pairs'] is False and gate['quality_budget'] == routing.QUALITY_BUDGET and
             gate['equivalence_pairs'] == routing.EQUIVALENCE_PAIRS and gate['protocol'] == PROTOCOL and
             gate['submission_sha256'] == sha(root/'submission.json') and
             all(gate[k] == info[k] for k in ('communication', 'codec_identity', 'codec_library')) and
-            set(gate['quality_by_candidate']) == set(POLICIES)-{'basic'} and
-            all(gate['quality_by_candidate'].values()),
+            set(gate['quality_by_candidate']) == set(POLICIES)-{'basic'},
             'Fresh complete three-arm preflight is required')
     verify_files(root, gate['files'])
     require({str(p.relative_to(root/'results')) for p in (root/'results').glob('round*/window-*') if p.is_dir()} ==
@@ -392,8 +444,10 @@ def report(root, offline=False, save=True):
     result = dict(protocol=PROTOCOL, run_id=info['run_id'], completed=False, correctness_passed=True,
                   execution_path_validated=True, offline=offline, comparison_scope='both',
                   bitwise_equal_within_pairs=False, identical_trajectories_within_pairs=False,
+                  allow_quality_failure=info['allow_quality_failure'],
                   quality_within_pairs=True, quality_budget=dict(routing.QUALITY_BUDGET), quality=[],
-                  quality_by_candidate={p: True for p in POLICIES if p != 'basic'},
+                  preflight_quality_by_candidate=dict(gate['quality_by_candidate']),
+                  quality_by_candidate=dict(gate['quality_by_candidate']),
                   equivalence_pairs=routing.EQUIVALENCE_PAIRS, full_optimizer_steps_measured=True,
                   round_count=2, blocks_per_round=info['blocks_per_round'], config=info['config'],
                   execution_timing=dict(routing.TIMING), communication=info['communication'],

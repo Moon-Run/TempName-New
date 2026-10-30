@@ -8,6 +8,7 @@ from itertools import permutations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -134,6 +135,22 @@ class ProtocolTests(unittest.TestCase):
         changed[0]['grad_norms'][0] = float('nan')
         with self.assertRaises(ValueError): report.quality_pair(base, changed)
 
+    def test_returned_profile_failure_reports_actual_worst_point(self):
+        # rank0 values from the 20261031-010411 returned H100 profile.
+        base = [dict(losses=[8.973113059997559], grad_norms=[0.2716255507018137],
+                     initial_loss=11.255111694335938, warmup_last_loss=9.039176940917969)]*8
+        candidate = [dict(losses=[13.185644149780273], grad_norms=[71.15936875576364],
+                          initial_loss=11.255816459655762, warmup_last_loss=8.886245727539062)]*8
+        quality = report.quality_pair(base, candidate)
+        self.assertFalse(quality['passed'])
+        field = quality['ranks'][0]['fields']['grad_norms']
+        self.assertEqual(field['failed_points'], 1)
+        self.assertAlmostEqual(field['max_budget_fraction'], 557.4576821450204)
+        message = report.quality_failure_summary({'mav2': {'profile': quality}})
+        self.assertIn('mav2/profile/grad_norms: rank=0, index=0', message)
+        self.assertIn('candidate=71.1594', message)
+        self.assertNotIn('initial_loss:', message)
+
 
 class IntegrationTests(unittest.TestCase):
     @classmethod
@@ -171,6 +188,11 @@ class IntegrationTests(unittest.TestCase):
             with self.assertRaises(ValueError): report.verify_inputs(self.compare)
         finally:
             write(path, saved)
+        try:
+            write(path, dict(saved, allow_quality_failure=True))
+            with self.assertRaises(ValueError): report.verify_inputs(self.compare)
+        finally:
+            write(path, saved)
         path = self.compare/'scripts/mav2_reference.py'
         saved = path.read_text()
         try:
@@ -198,12 +220,72 @@ class IntegrationTests(unittest.TestCase):
         from common import sha
         write(root/'preflight.json', dict(completed=True, correctness_passed=False,
               quality_within_pairs=False, execution_path_validated=True,
+              allow_quality_failure=False, quality_by_candidate={'mav2': False, 'd8': False},
               submission_sha256=sha(root/'submission.json')))
         with mock.patch.object(report, 'verify_inputs', return_value=info), \
                 mock.patch.object(cli, 'run_worker') as worker:
             with self.assertRaisesRegex(ValueError, 'passing numerical/path preflight'):
                 cli.run(root, stage='timing', execute=True)
             worker.assert_not_called()
+
+    def test_opt_in_runs_all_windows_and_keeps_preflight_failure_in_final_report(self):
+        root = preparation.prepare(self.root/'QUALITY-FAILURE-CPU-FIXTURE', self.flux, self.codec,
+                                   Path('/absent'), source_only=True, allow_quality_failure=True)
+        info = report.verify_inputs(root)
+        info.update(executable=True, source_only=False, hardware=fixture.HARDWARE,
+                    calibration_hardware=fixture.HARDWARE, codec_library=fixture.LIBRARY)
+        for policy, variant in info['variants'].items():
+            variant['libraries'] = {name: dict(path='/CPU-FIXTURE/'+policy+'/'+name, sha256='f'*64)
+                                    for name in ('libflux_cuda.so', 'libflux_cuda_ths_op.so')}
+        write(root/'submission.json', info)
+        write(root/'start-gpu-check.json', dict(passed=True, run_id=info['run_id'], synthetic=True))
+        generated = self.root/'mock-worker-output'
+        generated.mkdir()
+        (generated/'scripts').symlink_to(root/'scripts', target_is_directory=True)
+        seen = []
+
+        def worker(command, megatron, env, log, timeout):
+            folder = Path(env['E2E_PROCESS_OUT'])
+            job = read(folder/'command.json')
+            seen.append(job['directory'])
+            make_window(generated, info, job)
+            shutil.copytree(generated/'results'/job['directory'], folder, dirs_exist_ok=True)
+            if job['mode'] == 'profile' and job['policy'] == 'mav2':
+                for rank in range(8):
+                    path = folder/f'rank{rank}.json'
+                    write(path, dict(read(path), grad_norms=[71.15936875576364]))
+
+        with mock.patch.object(report, 'verify_inputs', return_value=info), \
+                mock.patch.object(report.baseline_codec_validation, 'verify'), \
+                mock.patch.object(cli, 'check_start'), \
+                mock.patch.object(cli, 'environment', return_value={}), \
+                mock.patch.object(cli, 'run_worker', side_effect=worker), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = cli.run(root, execute=True)
+            self.assertEqual(len(seen), 42)
+            self.assertEqual(len(result['all_samples']), 36)
+            self.assertFalse(result['correctness_passed'] or result['quality_within_pairs'])
+            self.assertEqual(result['quality_by_candidate'], {'mav2': False, 'd8': True})
+            self.assertTrue(all(q['passed'] for q in result['quality']))
+            self.assertFalse(result['candidate_acceptance']['mav2']['benefit_confirmed'])
+            self.assertFalse(result['comparison_acceptance']['d8/mav2']['quality_passed'])
+            self.assertEqual(read(root/'all-state.json')['status'], 'completed_with_quality_failure')
+            self.assertIn('质量门禁未通过', (root/'report.md').read_text())
+            gate = read(root/'preflight.json')
+            report.admit_preflight(root, info, gate)
+            with self.assertRaises(ValueError):
+                report.admit_preflight(root, dict(info, allow_quality_failure=False), gate)
+            with self.assertRaises(ValueError):
+                report.admit_preflight(root, info, dict(gate, execution_path_validated=False))
+            # Opt-in never permits missing codec evidence or nonfinite trajectories.
+            with mock.patch.object(report.baseline_codec_validation, 'verify',
+                                   side_effect=ValueError('codec evidence rejected')):
+                with self.assertRaisesRegex(ValueError, 'codec evidence rejected'):
+                    report.preflight(root, offline=True)
+            path = root/'results/smoke-mav2/rank0.json'
+            row = read(path)
+            write(path, dict(row, losses=[float('nan')]*len(row['losses'])))
+            with self.assertRaises(ValueError): report.preflight(root, offline=True)
 
     def test_forced_d8_sample_rejects_h8_or_selector_fallback(self):
         root = preparation.prepare(self.root/'d8-observed-route', self.flux, self.codec,

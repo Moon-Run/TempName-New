@@ -85,8 +85,9 @@ def controller_paths():
 
 
 def prepare(out, flux_root, codec_root, megatron, blocks=6, rounds=2,
-            nvls='0', source_only=False, scope='both'):
+            nvls='0', source_only=False, scope='both', allow_quality_failure=False):
     require(scope == 'both', 'All arms must cover Attention and MLP together')
+    require(type(allow_quality_failure) is bool, 'Quality-failure policy must be boolean')
     flux_root, codec_root, megatron = map(lambda p: Path(p).resolve(),
                                         (flux_root, codec_root, megatron))
     jobs = routing.schedule(blocks, rounds=rounds)
@@ -136,6 +137,7 @@ def prepare(out, flux_root, codec_root, megatron, blocks=6, rounds=2,
                role_plan_sha256={p: {r: None for r in routing.SHAPES} for p in routing.POLICIES},
                communication=comm, codec_identity=codec, codec_library=c['library'],
                transform=dict(routing.TRANSFORM), quality_budget=dict(routing.QUALITY_BUDGET),
+               allow_quality_failure=allow_quality_failure,
                scope='Three all-remote-quantized arms: H8, selective D8/H8, forced D8; shared fixed136 packets and NCCL.')
     write(scripts/'config.json', cfg)
     variants = {}
@@ -147,6 +149,7 @@ def prepare(out, flux_root, codec_root, megatron, blocks=6, rounds=2,
                                               for n in ('libflux_cuda.so', 'libflux_cuda_ths_op.so')})
     info = dict(protocol=routing.PROTOCOL, run_id=run_id, config=m,
                 execution_timing=dict(routing.TIMING), comparison_scope='both',
+                allow_quality_failure=allow_quality_failure,
                 source_only=source_only, executable=not source_only, gpu_validated=False,
                 rounds=rounds, blocks_per_round=blocks, schedule_seed=routing.SCHEDULE_SEED,
                 schedule=jobs, timing_windows=len(jobs), variants=variants,
@@ -161,7 +164,7 @@ def prepare(out, flux_root, codec_root, megatron, blocks=6, rounds=2,
     write(provenance/'preparation.json', {k: info[k] for k in
           ('protocol', 'run_id', 'source_only', 'executable', 'rounds', 'execution_timing', 'comparison_scope',
            'communication', 'shared_environment', 'hardware', 'codec_identity', 'codec_library',
-           'transform', 'quality_budget')})
+           'transform', 'quality_budget', 'allow_quality_failure')})
     write(out/'schedule.json', jobs)
     info['files'] = {str(p.relative_to(out)): sha(p) for folder in (scripts, provenance)
                      for p in folder.rglob('*') if p.is_file()}

@@ -13,7 +13,7 @@ import mav2_build as codec_builder
 import scope_run
 from ablation2_guard import check_start
 from calibrate import environment
-from common import REPO, read, require, sha, verify_files, write
+from common import REPO, read, require, verify_files, write
 from ma1_bench import run_worker
 
 
@@ -56,10 +56,7 @@ def run(root, stage='all', execute=False, python=Path(sys.executable), cuda_home
                 policy, mode = job['policy'], job['mode']
                 if mode == 'timing' and not gated:
                     gate = reporter.preflight(root) if stage == 'all' else read(root/'preflight.json')
-                    require(gate['completed'] and gate['correctness_passed'] and
-                            gate['quality_within_pairs'] is True and gate['execution_path_validated'] and
-                            gate['submission_sha256'] == sha(root/'submission.json'),
-                            'Complete passing numerical/path preflight required')
+                    reporter.admit_preflight(root, info, gate)
                     verify_files(root, gate['files'])
                     gated = True
                 reporter.verify_inputs(root)
@@ -78,9 +75,12 @@ def run(root, stage='all', execute=False, python=Path(sys.executable), cuda_home
                     run_worker(command, info['megatron'], env, log, worker_timeout)
                 reporter.window(root, folder, policy, mode, job['block'], job['index'])
             result = reporter.preflight(root) if stage == 'preflight' else reporter.report(root)
-            require(result['correctness_passed'] and result['quality_within_pairs'] is True,
+            require(result['quality_within_pairs'] is True or info['allow_quality_failure'],
                     'MAV2 training-quality budget failed; complete diagnostics retained in report.json')
-            write(state_path, dict(status='completed', run_id=info['run_id']))
+            status = 'completed' if result['quality_within_pairs'] else 'completed_with_quality_failure'
+            write(state_path, dict(status=status, run_id=info['run_id'],
+                  allow_quality_failure=info['allow_quality_failure'],
+                  quality_by_candidate=result['quality_by_candidate']))
             return result
         except BaseException as error:
             write(state_path, dict(status='failed', run_id=info['run_id'], error=f'{type(error).__name__}: {error}'))
@@ -111,6 +111,8 @@ def arguments(argv=None):
     p.add_argument('--nvls-enable', choices=('0',), default='0')
     p.add_argument('--scope', choices=('both',), default='both')
     p.add_argument('--source-only', action='store_true')
+    p.add_argument('--allow-quality-failure', action='store_true',
+                   help='Continue performance measurement after finite training-quality failures; retain failed verdicts')
     p = sub.add_parser('run')
     p.add_argument('root', type=Path)
     p.add_argument('--stage', choices=('preflight', 'timing', 'all'), default='all')
@@ -138,7 +140,8 @@ def main(argv=None):
             builder.compile_build(args.root, args.cuda_home, args.jobs, args.nccl_root)
     elif args.action == 'prepare':
         print(preparation.prepare(args.out, args.flux_build, args.codec_build, args.megatron,
-                                  args.blocks, args.rounds, args.nvls_enable, args.source_only, args.scope))
+                                  args.blocks, args.rounds, args.nvls_enable, args.source_only, args.scope,
+                                  args.allow_quality_failure))
     elif args.action == 'run':
         return run(args.root, args.stage, args.execute, args.python, args.cuda_home, args.worker_timeout)
     else:

@@ -41,6 +41,8 @@ def arguments(argv=None):
     p.add_argument('--nccl-root', type=Path)
     p.add_argument('--jobs', type=int, default=2)
     p.add_argument('--worker-timeout', type=int, default=1800)
+    p.add_argument('--allow-quality-failure', action='store_true',
+                   help='Continue performance measurement after finite training-quality failures; retain failed verdicts')
     p.add_argument('--execute', action='store_true')
     p.add_argument('--foreground', action='store_true')
     args = p.parse_args(argv)
@@ -79,7 +81,8 @@ def commands(args):
                      '--worker-timeout', str(args.worker_timeout)]
         steps += [(trial + '-prepare', cli + ['prepare', root, '--flux-build', str(flux), '--codec-build', str(codec),
                     '--megatron', str(args.megatron), '--blocks', str(BLOCKS),
-                    '--rounds', str(ROUNDS), '--nvls-enable', '0']),
+                    '--rounds', str(ROUNDS), '--nvls-enable', '0',
+                    *(['--allow-quality-failure'] if args.allow_quality_failure else [])]),
                   (trial + '-dry-run', run),
                   (trial + '-controller', run + ['--stage', 'all', '--execute']),
                   (trial + '-report', cli + ['report', root])]
@@ -92,6 +95,7 @@ def check_inputs(root):
             and info['executable'] is True and info['source_only'] is False
             and info['rounds'] == ROUNDS and info['blocks_per_round'] == BLOCKS
             and info['timing_windows'] == WINDOWS_PER_COMPARE
+            and type(info.get('allow_quality_failure')) is bool
             and set(info['variants']) == set(routing.POLICIES)
             and info['schedule'] == routing.schedule(BLOCKS, rounds=ROUNDS)
             and info['communication']['environment'].get('NCCL_NVLS_ENABLE') == '0',
@@ -101,7 +105,7 @@ def check_inputs(root):
 
 def same_inputs(first, second):
     require(first['run_id'] != second['run_id'], 'Comparisons must have independent run IDs')
-    for key in ('config', 'execution_timing', 'schedule', 'variants', 'communication',
+    for key in ('config', 'execution_timing', 'schedule', 'variants', 'communication', 'allow_quality_failure',
                 'calibration_hardware', 'megatron', 'megatron_commit',
                 'flux_build_manifest', 'codec_build_manifest', 'codec_identity',
                 'codec_library', 'shared_environment', 'hardware', 'controllers'):
@@ -112,10 +116,13 @@ def same_inputs(first, second):
 
 def check_report(root, info):
     result, gate = read(root / 'report.json'), read(root / 'preflight.json')
-    require(read(root / 'all-state.json')['status'] == 'completed'
-            and result['completed'] is True and result['correctness_passed'] is True
+    quality = result['quality_within_pairs']
+    status = 'completed' if quality else 'completed_with_quality_failure'
+    require(type(quality) is bool and (quality or info['allow_quality_failure'])
+            and result.get('allow_quality_failure') is info['allow_quality_failure']
+            and read(root / 'all-state.json')['status'] == status
+            and result['completed'] is True and result['correctness_passed'] is quality
             and result['execution_path_validated'] is True
-            and result['quality_within_pairs'] is True
             and result['equivalence_pairs'] == routing.EQUIVALENCE_PAIRS
             and result['protocol'] == routing.PROTOCOL and result['run_id'] == info['run_id']
             and result['execution_timing'] == routing.TIMING
@@ -128,6 +135,7 @@ def check_report(root, info):
             and result['candidate_shape_mappings'] == 0,
             'Incomplete three-arm transform comparison; preserve the failed evidence')
     require(gate['completed'] is True and gate['protocol'] == routing.PROTOCOL
+            and gate.get('allow_quality_failure') is info['allow_quality_failure']
             and gate['submission_sha256'] == sha(root / 'submission.json')
             and result['evidence']['preflight_sha256'] == sha(root / 'preflight.json')
             and all(result[k] == gate[k] == info[k]
@@ -159,6 +167,7 @@ def supervise(args):
     windows = args.trials * WINDOWS_PER_COMPARE
     formal_steps = args.trials * STEPS_PER_COMPARE
     state = dict(status='preparing', protocol=routing.PROTOCOL,
+                 allow_quality_failure=args.allow_quality_failure,
                  trials=args.trials, expected_timing_windows=windows,
                  expected_formal_optimizer_steps=formal_steps,
                  execution_timing=routing.TIMING, comparisons={},
@@ -178,6 +187,8 @@ def supervise(args):
             if label.endswith('-dry-run'):
                 trial = label.removesuffix('-dry-run')
                 info = check_inputs(args.out / trial)
+                require(info['allow_quality_failure'] is args.allow_quality_failure,
+                        'Prepared quality-failure policy differs from launch request')
                 if inputs:
                     same_inputs(next(iter(inputs.values())), info)
                 inputs[trial] = info
@@ -189,15 +200,20 @@ def supervise(args):
                     require(result['measurement_identity'] == reports[0]['measurement_identity'],
                             'Hardware/software identity changed between comparisons')
                 reports.append(result)
-                state['comparisons'][trial].update(status='completed', timing_windows=WINDOWS_PER_COMPARE,
+                status = 'completed' if result['quality_within_pairs'] else 'completed_with_quality_failure'
+                state['comparisons'][trial].update(status=status,
+                    quality_within_pairs=result['quality_within_pairs'],
+                    quality_by_candidate=result['quality_by_candidate'], timing_windows=WINDOWS_PER_COMPARE,
                     formal_optimizer_steps=STEPS_PER_COMPARE, report=str(args.out / trial / 'report.json'),
                     report_sha256=sha(args.out / trial / 'report.json'))
             write(state_path, state)
         require(len(reports) == args.trials, 'All requested complete comparison reports are required')
-        state.update(status='completed', stage='done', timing_windows=windows,
+        quality_passed = all(result['quality_within_pairs'] for result in reports)
+        status = 'completed' if quality_passed else 'completed_with_quality_failure'
+        state.update(status=status, quality_within_pairs=quality_passed, stage='done', timing_windows=windows,
                      timing_rank_records=windows * 8, formal_optimizer_steps=formal_steps)
         write(state_path, state)
-        print(f'Completed: {args.trials} comparison(s), {windows} windows / '
+        print(f'{status}: {args.trials} comparison(s), {windows} windows / '
               f'{formal_steps} formal optimizer steps.', flush=True)
         return state
     except BaseException as error:
@@ -210,6 +226,9 @@ def main(argv=None):
     args = arguments(argv)
     print('Batch:', args.out, flush=True)
     print('Flux basic H8 / MAV2 selective D8-H8 / forced D8; shared GemmOnly, full remote quantization, 136-byte packets and NCCL; Attention + MLP.', flush=True)
+    if args.allow_quality_failure:
+        print('Quality failures will be retained while performance measurement continues; '
+              'codec, finite-value, execution-path and provenance checks remain required.', flush=True)
     if not args.execute:
         print('PLAN ONLY: no directories, subprocesses, compilation, forks or GPU queries.')
         for _, command in commands(args):
@@ -231,6 +250,7 @@ def main(argv=None):
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'handoff').mkdir()
     write(args.out / 'batch-state.json', dict(status='launching', protocol=routing.PROTOCOL,
+          allow_quality_failure=args.allow_quality_failure,
           trials=args.trials, expected_timing_windows=args.trials * WINDOWS_PER_COMPARE,
           expected_formal_optimizer_steps=args.trials * STEPS_PER_COMPARE))
     write(args.out / 'handoff/launch.json',

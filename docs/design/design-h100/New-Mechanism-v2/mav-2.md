@@ -1,8 +1,8 @@
 # MAV2：在 Flux＋基础量化上单独验证选择性变换
 
-更新：2026-10-30。实现 [idea.md 的 Idea 1](idea.md#3-idea-1选择性变换量化不必总经过-h128)，本次对照采用 [baseline.md](../New-Mechanism/baseline.md) 中的 **Flux＋基础量化 v2**，具体路径见 [a-baseline.md](../New-Mechanism/a-baseline.md)。选择性候选只在 D8（直接块缩放 FP8）和 H8（原 H128/E4M3）之间选择；**所有远端贡献始终量化，本地贡献始终 BF16**。另加入 `d8` 组，强制全部远端使用直接 FP8，不执行选择判断或 H8 回退。
+更新：2026-10-31。实现 [idea.md 的 Idea 1](idea.md#3-idea-1选择性变换量化不必总经过-h128)，本次对照采用 [baseline.md](../New-Mechanism/baseline.md) 中的 **Flux＋基础量化 v2**，具体路径见 [a-baseline.md](../New-Mechanism/a-baseline.md)。选择性候选只在 D8（直接块缩放 FP8）和 H8（原 H128/E4M3）之间选择；**所有远端贡献始终量化，本地贡献始终 BF16**。另加入 `d8` 组，强制全部远端使用直接 FP8，不执行选择判断或 H8 回退。
 
-当前完成代码与测试入口，尚无本次 H100 八卡数值或性能实测。历史基础组的 582.318 ms 只用于识别基线；MAV2 的收益必须由本次同期对照计算。
+已取得 H100 八卡 smoke/profile 回传：codec、投影及路径检查通过，但 MAV2 和 D8 的跨臂训练质量超限，正式性能窗口尚未执行，详见第 7 节。历史基础组的 582.318 ms 只用于识别基线；MAV2 的收益必须由本次同期对照计算。
 
 ## 1. 一条命令启动对比
 
@@ -20,6 +20,9 @@ bash tools/h100/phase6/run_mav2.sh --foreground --execute
 
 # 两次独立比较，分别报告结果
 bash tools/h100/phase6/run_mav2.sh --trials 2 --execute
+
+# 显式允许跨臂训练质量超限后继续测性能；保留质量失败，不认定为合格加速
+bash tools/h100/phase6/run_mav2.sh --allow-quality-failure --execute
 ```
 
 启动器沿用 `run_ma11.sh` 的环境加载方式，读取 `outputs/h100/container-recovery/env.sh`（若存在）。可通过 `MAV2_PYTHON=/absolute/path/to/python` 选择原训练环境；其余参数见 `bash tools/h100/phase6/run_mav2.sh --help`。`--flux-build` 可复用通过来源检查的 GemmOnly 构建；`--codec-build` 必须是本次三臂版本的 MAV2 codec 构建；旧基础库及上一版双臂库都会被来源检查拒绝。
@@ -101,11 +104,11 @@ H8 的两个 scale 保持原含义；D8 用第一槽保存直接 scale，第二�
 | 路径 | 相同 SM90 GemmOnly 与 NCCL All-to-All；各自编码与融合接收 kernel 确实执行 |
 | 存储与异常 | 保留输出不被后续调用覆盖；非有限输入由独立 CUDA context 验证报错 |
 
-mav2 和 d8 分别相对 basic 检查上述 loss／grad_norm 门槛，并报告各自质量状态；不要求两个候选的轨迹彼此接近。上述门槛是短程筛查条件，**不是全部参数梯度逐位一致，也不是长期收敛结论**。接近零的 loss 主要受绝对容差控制，因此 JSON 同时保留均值、末步比值和曲线归一化 RMSE，避免只报“通过”掩盖相对差异。预检失败阻止正式计时；正式轨迹超限仍保存全部窗口和失败报告，但不认定为合格加速。
+mav2 和 d8 分别相对 basic 检查上述 loss／grad_norm 门槛，并报告各自质量状态；不要求两个候选的轨迹彼此接近。上述门槛是短程筛查条件，**不是全部参数梯度逐位一致，也不是长期收敛结论**。接近零的 loss 主要受绝对容差控制，因此 JSON 同时保留均值、末步比值和曲线归一化 RMSE，避免只报“通过”掩盖相对差异。默认预检失败阻止正式计时；显式指定 `--allow-quality-failure` 时，仅允许有限值的跨臂训练质量超限继续测性能。codec、投影、非有限值、执行路径及来源完整性检查仍必须通过。预检和正式轨迹超限都保存失败结论，不认定相关比较为合格加速。
 
 每个 rank、每个投影模块在独立 smoke/profile 中保留首次真实调用的编码包，窗口结束后读取 D8/H8 数量；报告按 Attention／MLP 汇总。这个比例只代表首包样本，不是 50 步训练的完整比例。正式计时不保留诊断包，也不执行额外统计归约或主机同步。
 
-本机没有 CUDA 设备，不能在此确认 GPU 自测、完整训练质量或加速结果。上机数值门禁失败时应保留日志并停止，不把未通过的候选报告为成功；正式运行出现负收益时照常出报告。
+本机没有 CUDA 设备，不能在此重跑 GPU 自测、完整训练质量或加速结果。上机数值门禁失败时保留日志，默认停止；显式允许质量失败的批次可完成性能报告，状态为 `completed_with_quality_failure`。未通过的候选仍报告质量失败；正式运行出现负收益时照常出报告。
 
 ## 5. 实现与本地验证
 
@@ -180,3 +183,62 @@ bash tools/h100/phase6/run_mav2.sh \
 ```
 
 原回传日志及失败批次保留。本机仍无 GPU，修复后的 H100 smoke 和完整三组性能需要以上新批次确认。
+
+## 7. 2026-10-31 训练质量预检失败与性能测量选项
+
+回传批次 `mav2-three-arm-1x-50steps-20261031-010411-468911` 完成了三组 smoke 和三组 profile，共 48 份 rank 记录、24 份 trace。之前的 codec 自测问题未再次触发；[preflight.json](../../../../../Load/logs/mav2-three-arm-1x-50steps-20261031-010411-468911/compare1/preflight.json) 中 `execution_path_validated=true`，初始化／数据指纹一致，但 `quality_by_candidate` 中 MAV2 和 D8 均为 false。控制器因此在第一个正式窗口前停止，正式窗口为 **0**。
+
+rank 0 的 profile 数值如下，其余 rank 的判定一致：
+
+| 指标 | basic | mav2 | d8 |
+| --- | ---: | ---: | ---: |
+| loss | 8.973113 | 13.185644 | 12.110011 |
+| grad_norm | 0.271626 | 71.159369 | 69.519813 |
+
+MAV2／D8 的 profile grad_norm 误差分别为原预算的 **557.458／544.564 倍**，smoke grad_norm 也超限。这是训练质量门禁真实拒绝，不是启动器未启动或构建失败。现有回传未定位出导致轨迹分离的实现错误，也不能由首步投影通过推断后续训练质量合格。
+
+按用户确认，新增 `--allow-quality-failure`，仅改变质量超限后的流程控制：
+
+- 默认仍拒绝质量超限；显式选项在 prepare 时写入 submission、worker config 和 preparation seal，运行途中不能切换。
+- 允许完整跑完 36 个性能窗口并出报告；阈值、模型、codec、三臂路径和计时方式不变。
+- `preflight.json`、`report.json` 保留 `correctness_passed=false`、`quality_within_pairs=false` 和逐候选质量状态；后续窗口通过不会覆盖预检失败。失败候选涉及的比较始终 `benefit_confirmed=false`。
+- 完成但质量失败时，controller、comparison 和 batch 状态均为 `completed_with_quality_failure`；报告 Markdown 明确显示质量未通过。
+- 每个质量指标新增超限点数和最差点的索引、对照值、候选值、绝对误差与允许误差，控制器日志直接输出失败摘要。索引从 0 开始。
+
+同步修改后在 H100 仓库根目录启动**新批次**：
+
+```bash
+bash tools/h100/phase6/run_mav2.sh \
+  --flux-build logs/h100/phase6/mav2-three-arm-1x-50steps-20261030-215237-552847/flux-build \
+  --allow-quality-failure \
+  --execute
+```
+
+原失败批次及回传日志保留，不向旧批次补写成功状态。本次没有修改 CUDA codec 或训练更新算法，不能宣称修复了量化训练质量；此选项用于取得性能结果并同时保留质量失败结论。本机无 CUDA 设备，完整 H100 重跑仍需上述命令验证。
+
+本地验证：MAV2 全集 **53 项通过、1 项因无 CUDA 跳过**，覆盖默认拒绝、显式放行后的完整 36 窗口控制流程、预检失败保留、两次比较的失败状态汇总及来源冻结；脚本语法与只读预览通过，预览未创建批次。测试中的窗口是 CPU 模拟数据，不是 H100 性能结果。记录见 [validation.json](../../../../outputs/h100/phase6/mav2-quality-continuation-20261031/validation.json)、[tests.log](../../../../outputs/h100/phase6/mav2-quality-continuation-20261031/tests.log)；48 份真实回传记录的质量重算见 [returned-quality.json](../../../../outputs/h100/phase6/mav2-quality-continuation-20261031/returned-quality.json)。
+
+## 8. 后台依次运行 MAV2 和 MA14–MA18
+
+在 H100 的 `TempName-New` 仓库根目录执行新脚本：
+
+```bash
+bash tools/h100/phase6/run_mav2_then_ma14_ma15_ma16_ma17_ma18.sh --execute
+```
+
+默认已配置第 7 节的 Flux 构建路径、`--allow-quality-failure` 和每个实验一次比较。执行顺序固定为 **MAV2 → MA14 → MA15 → MA16 → MA17 → MA18**。MAV2 以前台模式运行在后台 supervisor 下，完整计时、profile 和报告结束后，才调用原 `run_ma14_ma15_ma16_ma17_ma18.sh --execute`；原脚本继续等待每个 MA 实验完成，不会与 MAV2 并发占用 GPU。
+
+外层 supervisor 双重 fork、创建独立会话、重定向标准输入输出，并确认归属容器 PID 1。终端显示 `Detached and started` 后即可关闭终端或 VS Code，无需额外 `nohup` 或 `&`；容器与机器须保持运行。默认仅预览，加 `--execute` 才会后台执行。
+
+启动时打印总日志目录 `logs/h100/phase6/mav2-then-ma14-ma18-<时间>/`：
+
+- `batch-state.json`：整个队列的状态和当前阶段。
+- `handoff/container-supervisor.log`、`handoff/supervisor.json`：后台进程日志及 PID／会话身份。
+- `mav2.log`、`mav2/`：MAV2 的启动日志和完整批次。
+- `ma14-ma18.log`：原 MA14–MA18 顺序脚本的输出，其中打印各 MA 独立批次的日志目录。
+
+MAV2 的 `completed_with_quality_failure` 会继续启动 MA14–MA18，并保留在最终队列状态中；进程异常或 MAV2 批次未真正完成时停止后续任务，记录失败阶段和退出码，不自动重试。
+
+可用 `--out <新目录>` 指定总日志目录、`--flux-build <目录>` 覆盖 MAV2 构建路径、`--trials 2` 让每个实验运行两次比较。`--foreground` 仅供前台诊断，此时关闭终端不再受后台托管保证。
+
+本地 9 项 CPU 测试通过，覆盖六个实验顺序、质量超限继续、MAV2／MA16 异常停止、只读预览，以及真实双重 fork 后关闭控制终端仍继续完成队列。测试使用模拟训练子进程，未启动 GPU 实验。测试入口：`python -m unittest discover -s tools/h100/phase6 -p 'test_mav2_sequence.py' -v`。
