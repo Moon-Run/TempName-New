@@ -1,5 +1,7 @@
 # 全新 H100 容器一键配置
 
+RTX 5090 / NGC PyTorch 25.06 使用独立的 [setup_5090.sh 配置说明](README_5090.md)，沿用镜像自带的 Python/PyTorch/CUDA/Apex。下文为 H100 专用流程。
+
 适用环境：`nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04`，Ubuntu22.04 x86_64，容器内 root，已通过 `--gpus all --ipc=host --ulimit memlock=-1` 暴露八卡。按当前挂载布局：
 
 ```text

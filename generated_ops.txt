@@ -1,0 +1,1 @@
+/tmp/rtx5090-rs-registers/flux_bf16_bf16_void_bf16_fp32_fp32_sm80_a100_reducescatter_rcr_gemmv2_false_false_intranode.cu
