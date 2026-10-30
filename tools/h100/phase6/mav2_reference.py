@@ -16,7 +16,11 @@ def _groups(x):
 def _direct_quantize(x):
     g = _groups(x)
     amax = g.abs().amax(-1)
-    scale = torch.where(amax == 0, torch.ones_like(amax), (amax / 448).clamp_min(2.**-149))
+    # A Python scalar divisor makes PyTorch CUDA multiply by a rounded reciprocal.
+    # That one-ULP scale change can flip E4M3 midpoint rounding. A device tensor
+    # divisor selects FP32 division, matching the encoder's explicit __fdiv_rn.
+    fp8_max = torch.full_like(amax, 448.0)
+    scale = torch.where(amax == 0, torch.ones_like(amax), (amax / fp8_max).clamp_min(2.**-149))
     payload = (g / scale.unsqueeze(-1)).clamp(-448, 448).to(torch.float8_e4m3fn)
     restored = (payload.float()*scale.unsqueeze(-1)).to(torch.bfloat16)
     return g, amax, payload, scale, restored

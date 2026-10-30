@@ -8,8 +8,11 @@ import sys
 from types import SimpleNamespace
 import basic_quant_validation as baseline
 
-CASES = ('zeros', 'small', 'outliers', 'tiny', 'mixed', 'full_shape')
+CASES = ('zeros', 'small', 'outliers', 'tiny', 'mixed', 'rounding_midpoint', 'full_shape')
 SELECTOR = dict(relative_l2=.025, max_abs_over_amax=.0625)
+# User-approved D8-to-reference tolerance. Packet decoding still uses 0.5%,
+# and reconstruction against the BF16 input still uses 5%.
+D8_REFERENCE_L2_LIMIT = .008
 
 
 def validate_nonfinite(codec, policy='mav2'):
@@ -70,6 +73,12 @@ def validate(codec, reference, rank):
         elif case == 'mixed':
             partials.zero_(); partials[:, rows//2:, :] = .51953125
             partials[:, rows//2:, ::128] = 1
+        elif case == 'rounding_midpoint':
+            # Both constants are exact BF16 values. Correctly rounded scale
+            # makes x/s == 368, an E4M3 midpoint that rounds to 384.
+            # float32 amax * (1/448) moves below the midpoint and rounds to 352.
+            partials.fill_(2.0563602447509766e-6)
+            partials[:, :, 0] = 2.5033950805664062e-6
         remote = torch.cat([partials[s] for s in range(8) if s != rank])
         packets = codec.pack_rows(remote, 7, policy='mav2')
         actual = codec.unpack_rows(packets, rows, n, policy='mav2')
@@ -111,6 +120,16 @@ def validate(codec, reference, rank):
         direct_wire_error = float((direct_actual.double()-direct_wire.double()).norm()/denom)
         direct_input_error = float((direct_actual.double()-remote.double()).norm()/denom)
         direct_diag = codec.packet_diagnostics(forced_d8, rows*n)
+        midpoint_check = None
+        if case == 'rounding_midpoint':
+            elements, groups = rows*n, rows*n//128
+            wire_scale = forced_d8[:, elements:elements+groups*4].contiguous().view(torch.float32)
+            wire_q = forced_d8[:, :elements].contiguous().view(torch.float8_e4m3fn).float().reshape(7, rows, n)
+            expected_q = torch.full_like(wire_q, 384.)
+            expected_q[:, :, 0] = 448.
+            midpoint_check = dict(scale_exact=bool((wire_scale == 5.587935447692871e-9).all()),
+                                  payload_exact=bool((wire_q == expected_q).all()),
+                                  reference_equal=torch.equal(direct_actual, direct_expected))
         direct_fold = torch.zeros_like(partials[rank])
         direct_sources = direct_actual.reshape(7,rows,n)
         for offset in range(1, 9):
@@ -123,22 +142,25 @@ def validate(codec, reference, rank):
         formal_equals_diagnostic = torch.equal(forced_d8,
             codec.pack_rows(remote, 7, policy='mav2', force_mode=1))
         direct_passed = (direct_finite and direct_ordered_equal and formal_equals_diagnostic and
-            direct_error <= .005 and direct_wire_error <= .005 and direct_input_error <= .05 and
-            direct_diag['d8'] == direct_diag['total'] and direct_diag['h8'] == 0)
+            direct_error <= D8_REFERENCE_L2_LIMIT and direct_wire_error <= .005 and direct_input_error <= .05 and
+            direct_diag['d8'] == direct_diag['total'] and direct_diag['h8'] == 0 and
+            (midpoint_check is None or all(midpoint_check.values())))
         direct_row = dict(case=case, shape=[rows,n], passed=direct_passed, finite=direct_finite,
             relative_l2=direct_input_error, protocol_relative_l2=direct_error,
             packet_relative_l2=direct_wire_error, ordered_bf16_fold_equal=direct_ordered_equal,
             formal_equals_diagnostic=formal_equals_diagnostic, diagnostics=direct_diag,
-            policy='d8', quality_selection=False, h8_fallback_allowed=False)
+            policy='d8', quality_selection=False, h8_fallback_allowed=False,
+            budget_vs_reference=D8_REFERENCE_L2_LIMIT, rounding_midpoint=midpoint_check)
         if not direct_passed: raise RuntimeError('Formal D8 preflight failed: '+repr(direct_row))
         direct_checks.append(direct_row); retained.append((direct_fused, direct_fused.clone()))
         finite = bool(torch.isfinite(actual).all() and torch.isfinite(fused).all())
         passed = (finite and ordered_equal and h8_equal and h8_decode_equal and h8_fold_equal
                   and protocol <= .01 and wire_error <= .005
-                  and input_error <= .05 and direct_error <= .005)
+                  and input_error <= .05 and direct_error <= D8_REFERENCE_L2_LIMIT)
         row = dict(case=case, shape=[rows,n], passed=passed, finite=finite,
             relative_l2=input_error, protocol_relative_l2=protocol, packet_relative_l2=wire_error,
-            forced_d8_relative_l2=direct_error, forced_h8_packet_equal=h8_equal,
+            forced_d8_relative_l2=direct_error, forced_d8_reference_budget=D8_REFERENCE_L2_LIMIT,
+            forced_h8_packet_equal=h8_equal,
             forced_h8_decode_equal=h8_decode_equal, forced_h8_fold_equal=h8_fold_equal,
             ordered_bf16_fold_equal=ordered_equal, diagnostics=diag)
         if not passed: raise RuntimeError('MAV2 codec preflight failed: '+repr(row))
@@ -172,9 +194,10 @@ def verify(record, library, rank):
         expected_shape = [256,4096] if row['case'] == 'full_shape' else [8,128]
         require(row['passed'] and row['finite'] and row['shape'] == expected_shape and
                 row['forced_h8_packet_equal'] and row['forced_h8_decode_equal'] and
-                row['forced_h8_fold_equal'] and row['ordered_bf16_fold_equal'], 'Incomplete MAV2 codec evidence')
+                row['forced_h8_fold_equal'] and row['ordered_bf16_fold_equal'] and
+                row['forced_d8_reference_budget'] == D8_REFERENCE_L2_LIMIT, 'Incomplete MAV2 codec evidence')
         for key, limit in (('relative_l2',.05), ('protocol_relative_l2',.01),
-                           ('packet_relative_l2',.005), ('forced_d8_relative_l2',.005)):
+                           ('packet_relative_l2',.005), ('forced_d8_relative_l2',D8_REFERENCE_L2_LIMIT)):
             require(math.isfinite(row[key]) and 0 <= row[key] <= limit, 'MAV2 codec numerical gate failed')
         d = row['diagnostics']; total = 7*expected_shape[0]*expected_shape[1]//128
         require(d['total'] == total and d['d8'] + d['h8'] == total and min(d['d8'],d['h8']) >= 0 and
@@ -195,8 +218,14 @@ def verify(record, library, rank):
         require(row['passed'] and row['finite'] and row['shape'] == expected_shape and
                 row['ordered_bf16_fold_equal'] and row['formal_equals_diagnostic'] and
                 row['policy'] == 'd8' and row['quality_selection'] is False and
-                row['h8_fallback_allowed'] is False, 'Incomplete formal D8 evidence')
-        for key,limit in (('relative_l2',.05),('protocol_relative_l2',.005),('packet_relative_l2',.005)):
+                row['h8_fallback_allowed'] is False and row['budget_vs_reference'] == D8_REFERENCE_L2_LIMIT,
+                'Incomplete formal D8 evidence')
+        if row['case'] == 'rounding_midpoint':
+            require(row['rounding_midpoint'] == dict(scale_exact=True, payload_exact=True, reference_equal=True),
+                    'D8 scale/FP8 midpoint rounding changed')
+        else:
+            require(row['rounding_midpoint'] is None, 'Unexpected rounding-midpoint evidence')
+        for key,limit in (('relative_l2',.05),('protocol_relative_l2',D8_REFERENCE_L2_LIMIT),('packet_relative_l2',.005)):
             require(math.isfinite(row[key]) and 0 <= row[key] <= limit, 'Formal D8 numerical gate failed')
         d = row['diagnostics']; total = 7*expected_shape[0]*expected_shape[1]//128
         require(d['total'] == d['d8'] == total and d['h8'] == 0 and d['nonfinite'] == d['invalid_tags'] == 0 and

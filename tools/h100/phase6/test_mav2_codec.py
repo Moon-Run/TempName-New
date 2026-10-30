@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 import mav2_build as build
 import mav2_codec as codec
 import mav2_reference as reference
@@ -17,7 +18,63 @@ def packet(q, qs, tag):
         tag.contiguous().view(torch.uint8).reshape(chunks,-1)), dim=1)
 
 
+class CudaScalarDivisionOnCPU(TorchDispatchMode):
+    """Model PyTorch 2.6 CUDA's CPU-scalar divisor optimization on a CPU test."""
+    def __init__(self):
+        super().__init__(); self.scalar_divisions = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if (func in (torch.ops.aten.div.Tensor, torch.ops.aten.div.Scalar) and
+                len(args) >= 2 and isinstance(args[0], torch.Tensor) and
+                args[0].dtype == torch.float32 and isinstance(args[1], (int,float))):
+            self.scalar_divisions += 1
+            reciprocal = torch.tensor(1.0/args[1], dtype=torch.float32, device=args[0].device)
+            return args[0]*reciprocal
+        return func(*args, **(kwargs or {}))
+
+
+def midpoint_fixture(device='cpu'):
+    # Exact BF16 values: x/scale = 368 is the E4M3 tie between 352 and 384.
+    # RN-even picks 384; a one-ULP larger scale moves the value below the tie.
+    x=torch.full((1,128),2.0563602447509766e-6,dtype=torch.bfloat16,device=device)
+    x[:,0]=2.5033950805664062e-6
+    return x
+
+
 class ReferenceTests(unittest.TestCase):
+    def assert_midpoint_protocol(self, device='cpu'):
+        x=midpoint_fixture(device)
+        _,_,q,s,y=reference._direct_quantize(x)
+        expected_scale=torch.full_like(s,3.0*2.**-29)
+        expected_q=torch.full(q.shape,384.0,dtype=torch.float32,device=device)
+        expected_q[:,:,0]=448.0; expected_q=expected_q.to(torch.float8_e4m3fn)
+        expected_y=torch.full_like(x,2.1457672119140625e-6); expected_y[:,0]=x[:,0]
+        self.assertTrue(torch.equal(s.view(torch.int32),expected_scale.view(torch.int32)))
+        self.assertTrue(torch.equal(q.view(torch.uint8),expected_q.view(torch.uint8)))
+        self.assertTrue(torch.equal(y.reshape_as(x).view(torch.int16),expected_y.view(torch.int16)))
+
+    def test_cuda_scalar_division_emulation_reproduces_old_midpoint_bug(self):
+        x=midpoint_fixture(); g=x.float().reshape(1,1,128)
+        with CudaScalarDivisionOnCPU() as emulated:
+            old_scale=g.abs().amax(-1)/448
+            old_q=(g/old_scale.unsqueeze(-1)).to(torch.float8_e4m3fn)
+        self.assertEqual(emulated.scalar_divisions,1)
+        self.assertEqual(float(old_q[0,0,1]),352.0)
+        self.assertGreater(float(old_scale),3.0*2.**-29)
+        old_y=(old_q.float()*old_scale.unsqueeze(-1)).to(torch.bfloat16).reshape_as(x)
+        expected=torch.full_like(x,2.1457672119140625e-6); expected[:,0]=x[:,0]
+        self.assertGreater(float((old_y.double()-expected.double()).norm()/x.double().norm()),.005)
+
+    def test_direct_reference_survives_cuda_scalar_division_behavior(self):
+        with CudaScalarDivisionOnCPU() as emulated:
+            self.assert_midpoint_protocol()
+        # The old scalar-divisor reference fails both this and the exact payload check.
+        self.assertEqual(emulated.scalar_divisions,0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA device unavailable')
+    def test_cuda_direct_reference_uses_rn_scale_at_fp8_midpoint(self):
+        self.assert_midpoint_protocol('cuda')
+
     def test_zero_group_is_direct_and_has_positive_scale(self):
         x = torch.zeros(3,256,dtype=torch.bfloat16)
         q,s,y,d = reference.direct(x)

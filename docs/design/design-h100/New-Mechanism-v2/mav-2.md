@@ -93,7 +93,7 @@ H8 的两个 scale 保持原含义；D8 用第一槽保存直接 scale，第二�
 | codec 输入 | zeros、small、outliers、极小 BF16、D8/H8 混合、真实远端形状；覆盖八个来源排列 |
 | 强制 H8 | 与原编码包逐位一致，并检查原接收解码语义 |
 | 强制 D8／混合包 | 用独立 tensor 参考与实际包字节解码参考交叉检查 |
-| codec 重建误差 | 相对 BF16 L2 ≤5%，相对该策略参考 ≤1%，相对实际包参考 ≤0.5% |
+| codec 重建误差 | 相对 BF16 L2 ≤5%；选择性参考 ≤1%，强制 D8 参考 **≤0.8%**；实际包参考 ≤0.5% |
 | 来源归约 | 与先逐来源解码到 BF16、再按原顺序逐次 BF16 相加逐位一致 |
 | 真实模型投影 | 沿用 smoke 的相对 BF16 5%／相对本策略 codec 1% 门槛；mav2 参考支持 D8/H8，d8 使用纯 D8 参考 |
 | 跨臂 loss | 每点绝对差 ≤`0.05 + 0.05 × abs(basic)`，含初始、预热末步和正式轨迹 |
@@ -154,3 +154,29 @@ python tools/h100/phase6/mav2.py report <批次目录>/compare1 --offline
 三组协议为 `h100-mav2-selective-transform-three-arm-v2`，与先前双臂记录分开，不合并窗口或复用旧批次。
 
 若 D8 占比不低但完整步没有变快，结果说明本版选择成本、编码或融合接收开销抵消了变换节省；应保留该负结果，不将 D8 占比当作性能收益。
+
+## 6. 回传 smoke 报错修复与 D8 参考门槛更新
+
+回传批次 `mav2-three-arm-1x-50steps-20261030-215237-552847` 的 Flux 和 codec 构建均完成，首个 `smoke-basic` 在模型初始化之前的 codec 自测失败，正式训练窗口为 **0**。[worker 原始日志](../../../../../Load/logs/mav2-three-arm-1x-50steps-20261030-215237-552847/compare1/results/smoke-basic/process.log)记录 rank 3 的 `small` 用例：D8 相对 BF16 误差为 **2.5446%**，相对参考误差为 **0.513869%**，实际包解码参考误差为 **0**，按来源顺序的 BF16 累加及强制 D8 入口一致性均通过。因此 `compare1-controller.log` 中的进程退出异常只是 worker 自测失败的上层报错，不能当作编译或完整训练失败。
+
+参考原来使用 `amax / 448`。PyTorch 2.6 的 CUDA 标量除法会改为乘 FP32 倒数，而本实现用 `__fdiv_rn(amax, 448.f)`；这两者的 scale 可能差 1 ULP。[PyTorch 对应源码](https://github.com/pytorch/pytorch/blob/v2.6.0/aten/src/ATen/native/cuda/BinaryDivTrueKernel.cu#L32-L44)明确实现了该特化。本地构造的 BF16 小值反例会将 E4M3 中点 `368` 移到中点下方，使 payload 从 `384` 变为 `352`。该反例复现了误差放大机制；回传没有实际输入和 packet dump，不能声称已逐元素重演原 rank 3 样本。
+
+本次修改：
+
+- `mav2_reference.py` 改用同设备、同 dtype 的 Tensor 常量 `448` 作除数，使参考执行 FP32 除法。正式 CUDA codec 路径未改。
+- 按用户要求，D8 **相对参考**误差门槛从 **0.5% 更新为 0.8%**，由 `D8_REFERENCE_L2_LIMIT = .008` 统一控制 GPU 自测与报告证据校验，并将门槛写入自测记录。回传的 `0.513869%` 在新门槛内。
+- 实际包解码门槛仍为 0.5%，输入重建门槛仍为 5%，投影参考门槛仍为 1%，选择性变换的 2.5% 组级选择规则不变。
+- 增加确定性 `rounding_midpoint` GPU 用例，独立要求 scale、FP8 payload 和参考重建精确一致；另增加 CPU 模拟 CUDA 标量除法的回归，以及 0.8% 边界和其他误差门槛未变化的检查。
+
+本次本地回归共 **49 项通过、1 项因无 CUDA 设备跳过**，包含 build、完整三组 harness 和 launcher；没有重新编译未改动的 CUDA kernel。修复记录见 [validation.json](../../../../outputs/h100/phase6/mav2-d8-reference-fix-20261030/validation.json)，构建协议／harness／启动器的 29 项回归输出见 [tests.log](../../../../outputs/h100/phase6/mav2-d8-reference-fix-20261030/harness-build-launcher-tests.log)。GPU 中点检查及原 rank 3 失败是否消失，仍需上机确认。
+
+同步修复后的源码到 H100 后，创建新批次重跑。可以复用本次已成功的 Flux 构建，避免重复编译 GEMM；codec 的来源身份含参考和验证脚本，因此让启动器重新构建 codec，不传旧 `--codec-build`：
+
+```bash
+# 在 H100 的 TempName-New 仓库根目录执行
+bash tools/h100/phase6/run_mav2.sh \
+  --flux-build logs/h100/phase6/mav2-three-arm-1x-50steps-20261030-215237-552847/flux-build \
+  --execute
+```
+
+原回传日志及失败批次保留。本机仍无 GPU，修复后的 H100 smoke 和完整三组性能需要以上新批次确认。
