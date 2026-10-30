@@ -4,7 +4,7 @@
 
 **当前状态：代码改为不依赖 P2P 的 NCCL staging v2，尚无 RTX 5090 训练实测结果。** 2026-10-30 用户回传的官方 `nvcr.io/nvidia/pytorch:25.06-py3` 临时容器检查确认，8 张 RTX 5090 均为 SM120 / 170 SM，但全部 56 条跨卡有向 peer-access 链路不可用。新的投影路径为 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**，不再把其他 GPU 的地址交给 CUDA kernel。P2P 矩阵仍记录在预检证据中，但不再要求链路可用。
 
-本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。2026-10-30 目标机回传日志已确认七组原生构建、硬件/NCCL 预检、worker 生成及 native mapping 检查完成；MA11 原生传输 smoke 在 Python 前端初始化处因缺失 `self.rank` 中止。当前已修复此缺陷并提供旧构建自动更新流程；传输数值检查、完整模型检查及正式计时仍待目标机执行，不把 H100 耗时填作 5090 耗时。
+本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。2026-10-30 目标机回传已确认七组原生构建、硬件/NCCL 预检、native mapping 及八组 TACO 原生传输 smoke 通过。随后完整模型 MA11 worker 因遗留的跨卡 P2P 断言在初始化阶段中止；当前已修复九组 worker 的这一门禁，完整模型检查及正式计时仍待目标机执行，不把 H100 耗时填作 5090 耗时。
 
 ## 1. 对比目标与 H100 参考
 
@@ -84,7 +84,9 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 普通 NCCL 通信可在不能使用 P2P 时使用主机共享内存等传输方式；`NCCL_P2P_DISABLE=1` 仅禁用 NCCL 的 P2P transport，不会改写应用中自定义 CUDA kernel 的远端指针访问。[NCCL 环境变量说明](https://docs.nvidia.com/deeplearning/nccl/archives/nccl_2276/user-guide/docs/env.html#nccl-p2p-disable)
 
-新的统一入口已把八卡 NCCL 集合通信作为正式前置检查。`Flux＋基础量化` 保留 GemmOnly＋独立编码＋NCCL All-to-All＋接收端融合 v2；其余八组使用本地 fused producer 和 staging 传输。回传批次 `baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-160138-770121` 已通过预检、旧构建验证、worker 生成和 mapping 检查，八个 rank 随后均报 `AttributeError: '_NativeRuntime' object has no attribute 'rank'`。错误发生在原生投影初始化前；两类投影路径尚无目标机 smoke 通过记录。
+新的统一入口已把八卡 NCCL 集合通信作为正式前置检查。`Flux＋基础量化` 保留 GemmOnly＋独立编码＋NCCL All-to-All＋接收端融合 v2；其余八组使用本地 fused producer 和 staging 传输。修复 `_NativeRuntime.rank` 后，用户回传批次 `baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-163211-193828` 已依次完成 MA11、MA89、MA8、MA9、CR3、R、C、A，打印 `TRANSPORT SMOKE PASSED`；证据位置为该批次的 `local-smoke-summary.json`。这是八组 TACO 算子的传输检查通过，尚不代表九组完整模型或 Flux＋基础量化模型 smoke 已通过。
+
+后续批次 `baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-163809-528885` 的完整模型 MA11 worker 在第 38 行 `assert all(torch.cuda.can_device_access_peer(...))` 失败。这是 H100 模板残留的 P2P 必需检查，不是 GPU 忙碌或显存耗尽错误；独立原生传输 smoke 不执行这段模型启动代码。5090 生成器现为九组统一移除该断言，仍通过 `runtime.check_topology` 检查八张独立 RTX 5090、SM120/170 SM 及冻结通信配置，并记录 P2P 矩阵。源码预检会拒绝重新引入 worker 直接 P2P 查询。此次仅修改生成 worker 的代码，可继续复用已编译构建；更新 `tools/5090/phase6/baseline_sources.py` 后新启动批次即可，历史批次不改写。
 
 ## 4. 一键执行
 

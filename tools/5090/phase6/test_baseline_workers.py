@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -97,6 +98,58 @@ def fixture(arm, mode='timing'):
 
 
 class Workers(unittest.TestCase):
+    def _run_worker_hardware_startup(self, arm, rank, mutate=None, environment=None):
+        devices = [SimpleNamespace(name='NVIDIA GeForce RTX 5090', major=12, minor=0,
+                                   multi_processor_count=170, uuid=f'CPU-FIXTURE-{i}') for i in range(8)]
+        cuda = SimpleNamespace(device_count=lambda: len(devices),
+                               get_device_properties=lambda index: devices[index],
+                               can_device_access_peer=lambda source, destination: False,
+                               set_device=lambda index: None)
+        if mutate is not None:
+            mutate(cuda, devices)
+        torch = SimpleNamespace(cuda=cuda, backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace())))
+        runtime = ModuleType('runtime')
+        runtime.TRANSPORT, runtime.TRANSPORT_ENV = p.TRANSPORT, p.TRANSPORT_ENV
+        exec(s.runtime_source(), runtime.__dict__)
+        source = s.worker_source(arm)
+        # Execute the shared hardware gate; the basic codec's separate GPU
+        # self-test precedes this region and is outside this CPU fixture.
+        startup = source[source.index('assert torch.cuda.device_count() == WORLD'):
+                         source.index('from megatron.training.initialize')]
+        namespace = dict(torch=torch, WORLD=8, local_rank=rank)
+        env = dict(p.TRANSPORT_ENV, RTX5090_TRANSPORT=p.TRANSPORT, LOCAL_RANK=str(rank))
+        env.update(environment or {})
+        with patch.dict(os.environ, env), patch.dict(sys.modules, {'torch': torch, 'runtime': runtime}):
+            exec(compile(startup, f'{arm}/worker-startup.py', 'exec'), namespace)
+        return namespace['hardware']
+
+    def test_all_nine_worker_startups_accept_zero_cross_gpu_peer_links(self):
+        for arm in p.ARMS:
+            for rank in range(8):
+                with self.subTest(arm=arm, rank=rank):
+                    hardware = self._run_worker_hardware_startup(arm, rank)
+                    self.assertEqual(hardware['local_rank'], rank)
+                    self.assertEqual(hardware['peer_access'], [[i == j for j in range(8)] for i in range(8)])
+                    self.assertEqual(hardware['transport'], p.TRANSPORT)
+            # The original H100 template still has its direct-peer requirement.
+            self.assertIn('assert all(torch.cuda.can_device_access_peer', s.parent(arm).worker_source())
+            with self.assertRaisesRegex(ValueError, 'peer access must remain diagnostic'):
+                s.validate_worker(s.worker_source(arm)+'\nassert torch.cuda.can_device_access_peer(0, 1)\n')
+
+    def test_worker_startup_still_rejects_wrong_hardware_and_transport(self):
+        mutations = [lambda cuda, devices: setattr(devices[0], 'major', 9),
+                     lambda cuda, devices: setattr(devices[0], 'name', 'NVIDIA H100'),
+                     lambda cuda, devices: setattr(devices[0], 'multi_processor_count', 132),
+                     lambda cuda, devices: setattr(devices[1], 'uuid', devices[0].uuid),
+                     lambda cuda, devices: devices.pop()]
+        for arm in p.ARMS:
+            for mutate in mutations:
+                with self.subTest(arm=arm, mutate=mutate), self.assertRaises((RuntimeError, AssertionError)):
+                    self._run_worker_hardware_startup(arm, 0, mutate=mutate)
+            for environment in ({'NCCL_P2P_DISABLE': '0'}, {'RTX5090_TRANSPORT': 'wrong-protocol'}):
+                with self.subTest(arm=arm, environment=environment), self.assertRaises(RuntimeError):
+                    self._run_worker_hardware_startup(arm, 0, environment=environment)
+
     def test_python312_ast_schema_preserves_frozen_training_hashes(self):
         parse = ast.parse
 

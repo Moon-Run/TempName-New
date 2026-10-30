@@ -113,6 +113,11 @@ def softmax_adapter_source(environment):
 
 def validate_worker(source):
     tree = ast.parse(source)
+    require(not any(isinstance(node, ast.Attribute) and node.attr == 'can_device_access_peer'
+                    for node in ast.walk(tree)),
+            'Worker peer access must remain diagnostic through runtime.check_topology')
+    require(sum(isinstance(node, ast.Assign) and ast.unparse(node) == 'hardware = check_topology(WORLD)'
+                for node in tree.body) == 1, 'Missing unique RTX5090 topology gate')
     # The frozen H100 fingerprints use Python 3.10's AST schema. Python 3.12
     # adds type_params=[] even to ordinary functions/classes. Normalize only
     # that empty field on this private tree, retaining nonempty type parameters
@@ -140,6 +145,12 @@ def worker_source(arm):
              'c': 'H100_MA2C_EXECUTE', 'a': 'H100_MA2C_EXECUTE',
              'flux-basic': 'H100_BASIC_QUANT_EXECUTE'}[arm]
     source = replace_once(source, guard, 'RTX5090_BASELINE_EXECUTE')
+    # The inherited model worker has a second P2P gate after check_topology.
+    # Only the RTX5090 overlay removes it: our runtime records peer access and
+    # enforces the device/protocol requirements for NCCL staging instead.
+    source = replace_once(source,
+        'assert all(torch.cuda.can_device_access_peer(i,j) for i in range(WORLD) for j in range(WORLD) if i != j)',
+        '# Peer access is diagnostic in hardware; NCCL staging requires no remote GPU pointers.')
     source = replace_once(source, "report['scope_definition'] = definition(POLICY)",
                           "report['scope_definition'] = PLAN['scope_definition']")
     if arm in CR3_FAMILY:
