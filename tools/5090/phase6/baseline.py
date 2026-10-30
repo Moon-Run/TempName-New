@@ -22,7 +22,8 @@ read, write, require, sha = p.read, p.write, p.require, p.sha
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(__doc__)
-    parser.add_argument('--out', type=Path)
+    parser.add_argument('--out', type=Path,
+                        help='Batch directory; default: ../Load-5090/logs/5090/phase6/<batch>')
     parser.add_argument('--python', type=Path, default=Path(sys.executable))
     parser.add_argument('--megatron', type=Path, default=REPO.parent/'Megatron-LM')
     parser.add_argument('--cuda-home', type=Path, default=Path('/usr/local/cuda'))
@@ -48,7 +49,8 @@ def arguments(argv=None):
     require(not args.inside or (args.out and args.execute and not args.preflight_only), 'Invalid supervisor invocation')
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO/'logs/5090/phase6'/f'baseline-nine-arm-nccl-staged-v2-{args.trials}x-50steps-{stamp}'
+        args.out = (REPO.parent/'Load-5090/logs/5090/phase6'/
+                    f'baseline-nine-arm-nccl-staged-v2-{args.trials}x-50steps-{stamp}')
     for name, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, name, value.expanduser().absolute() if name == 'python' else value.expanduser().resolve())

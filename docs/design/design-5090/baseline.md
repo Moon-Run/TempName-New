@@ -90,6 +90,10 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 在 `TempName-New` 仓库根目录、已准备好的 5090 Python 环境内执行：
 
+新启动的 5090 批次默认写入同级数据仓库 **`../Load-5090/logs/5090/phase6/<批次名>/`**；目标容器中的完整路径为 `/workspace/Load-5090/logs/5090/phase6/<批次名>/`。硬件预检、传输 smoke 和完整实验共用这个默认位置，后台日志、原始 rank 记录、profile、汇总报告及复核快照都保存在批次目录中。已有 `TempName-New/logs/5090/` 的结果和构建不搬迁，`--baseline-build` 仍可指向原位置；显式 `--out` 可以覆盖新默认值，历史批次仍按原路径执行 `--report`。
+
+`Load-5090/.gitignore` 保留实验 `.log`、JSON/CSV/Markdown、压缩 profile 和源码快照，排除本机 `build/`、CUDA 编译产物、Python 缓存及虚拟环境。这只改变后续 5090 结果的默认存放位置，不调整 H100 的输出路径，也不自动暂存或推送数据。
+
 官方 25.06 镜像沿用自身的 CUDA 12.9、Python 和 PyTorch；为运行新协议，需要更新完整仓库中的脚本和原生源码，不能只复制入口 shell。
 
 已有 `hjr/TempName-New` 和 `hjr/Megatron-LM` 时，在容器内的 `TempName-New` 根目录先运行环境配置脚本。它复用现有源码，创建继承镜像包的轻量 venv，补齐缺失依赖并执行八卡预检，不重装 PyTorch/CUDA/Apex，也不启动训练：
@@ -150,7 +154,7 @@ bash tools/5090/phase6/run_baseline.sh \
   --cuda-home /usr/local/cuda \
   --build-cuda-home /usr/local/cuda \
   --megatron /path/to/Megatron-LM \
-  --out logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-01
+  --out ../Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-01
 ```
 
 `--python` 也可指定 worker 解释器；`RTX5090_PYTHON` 决定入口解释器，建议二者使用同一个环境。默认 `--trials 1 --blocks 18`；可使用 `--trials 2` 独立重复，或将 `--blocks` 设置为 18 的正整数倍。`--jobs` 控制编译并发，`--worker-timeout` 控制单个八 rank worker 窗口的超时。
@@ -160,14 +164,14 @@ bash tools/5090/phase6/run_baseline.sh \
 ```bash
 bash tools/5090/phase6/run_baseline.sh \
   --execute --baseline-build /path/to/previous-batch/build \
-  --out logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-02
+  --out ../Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-02
 ```
 
 离线复核原始结果、重新分析 profile 并打印报告（不改写原结果文件）：
 
 ```bash
 bash tools/5090/phase6/run_baseline.sh \
-  --report --out logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-01
+  --report --out ../Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-01
 ```
 
 ## 5. 统一计时、正确性与结果文件

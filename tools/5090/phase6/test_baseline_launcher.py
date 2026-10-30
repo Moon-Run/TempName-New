@@ -26,6 +26,29 @@ preflight = module('rtx5090_preflight_test', 'baseline_preflight.py')
 
 
 class Launcher(unittest.TestCase):
+    def test_new_batches_default_to_sibling_data_repository_without_moving_old_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root/'TempName-New'
+            old = repo/'logs/5090/phase6/existing-batch'
+            old.mkdir(parents=True)
+            (old/'report.json').write_text('existing result\n')
+            with patch.object(launcher, 'REPO', repo):
+                for mode in ([], ['--preflight-only'], ['--transport-smoke-only']):
+                    args = launcher.arguments([*mode, '--baseline-build', str(old/'build')])
+                    self.assertEqual(args.out.parent, root/'Load-5090/logs/5090/phase6')
+                    self.assertTrue(args.out.name.startswith('baseline-nine-arm-nccl-staged-v2-1x-50steps-'))
+                    self.assertEqual(args.baseline_build, old/'build')
+            self.assertEqual((old/'report.json').read_text(), 'existing result\n')
+            self.assertFalse((root/'Load-5090').exists())
+
+    def test_explicit_output_and_historical_report_paths_remain_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp)/'TempName-New/logs/5090/phase6/old-batch'
+            for mode in ([], ['--report']):
+                args = launcher.arguments([*mode, '--out', str(old)])
+                self.assertEqual(args.out, old)
+
     def test_transport_smoke_shell_preview_does_not_read_or_repair_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
