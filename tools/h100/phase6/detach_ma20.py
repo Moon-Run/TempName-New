@@ -24,18 +24,36 @@ def arguments(argv=None):
     p.add_argument('--cuda-home',type=Path,default=Path('/usr/local/cuda-12.4'))
     p.add_argument('--nccl-root',type=Path);p.add_argument('--ma11-build',type=Path)
     p.add_argument('--ma20-build',type=Path,help='Reuse a verified complete seven-arm MA20 bank')
+    p.add_argument('--reuse-batch',type=Path,
+                   help='Reuse a completed operator calibration and its build; skip build and operator jobs')
+    p.add_argument('--candidate',choices=('Q0','Q7','Q14','Q28','Q56','Q112'),
+                   help='Manually choose the fullstep arm with --reuse-batch; preserve the original selection')
+    p.add_argument('--reuse-ma11',action='store_true',
+                   help='With --reuse-batch and --candidate, run only the candidate and compare to saved MA11 timing')
     p.add_argument('--jobs',type=int,default=2);p.add_argument('--worker-timeout',type=int,default=1800)
     p.add_argument('--execute',action='store_true');p.add_argument('--foreground',action='store_true')
     args=p.parse_args(argv)
     require(args.jobs>0 and args.worker_timeout>0,'Positive jobs and worker timeout required')
     require(not (args.ma11_build and args.ma20_build),'Specify only one reused build')
+    require(not args.candidate or args.reuse_batch,'--candidate requires --reuse-batch')
+    require(not args.reuse_ma11 or (args.reuse_batch and args.candidate),
+            '--reuse-ma11 requires --reuse-batch and --candidate')
+    require(not (args.reuse_batch and args.ma11_build),'--reuse-batch cannot use --ma11-build')
     if args.out is None:
         stamp=datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
         args.out=REPO/'logs/h100/phase6'/f'ma20-codec-first-{args.trials}x-50steps-{stamp}'
     for name,value in vars(args).items():
         if isinstance(value,Path):
             setattr(args,name,value.expanduser().absolute() if name=='python' else value.expanduser().resolve())
+    if args.reuse_batch:
+        require(not args.out.is_relative_to(args.reuse_batch),'Use a new output directory outside the reused batch')
+        if args.ma20_build is None:
+            args.ma20_build=args.reuse_batch/'build'
     return args
+
+
+def operator_selection(args):
+    return (args.reuse_batch or args.out)/'operator/selection.json'
 
 
 def commands(args,candidate=None):
@@ -43,6 +61,8 @@ def commands(args,candidate=None):
     bank=args.ma20_build or args.out/'build'
     tasks=[]
     if candidate is None:
+        if args.reuse_batch:
+            return tasks
         if args.ma20_build is None:
             options=[] if args.ma11_build is None else ['--ma11-build',str(args.ma11_build)]
             tasks.append(('build-prepare',cli('ma20_build.py')+['prepare','--out',str(bank),*options]))
@@ -54,9 +74,11 @@ def commands(args,candidate=None):
             '--python',str(args.python),'--cuda-home',str(args.cuda_home),
             '--worker-timeout',str(args.worker_timeout),'--execute']))
     else:
+        flags=['--manual-candidate'] if args.candidate else []
+        if args.reuse_ma11:flags+=['--reuse-ma11-from',str(args.reuse_batch/'fullstep')]
         tasks.append(('fullstep-prepare',cli('ma20_experiment.py')+['prepare',str(args.out/'fullstep'),
-            '--build',str(bank),'--selection',str(args.out/'operator/selection.json'),
-            '--candidate',candidate,'--megatron',str(args.megatron),'--trials',str(args.trials)]))
+            '--build',str(bank),'--selection',str(operator_selection(args)),
+            '--candidate',candidate,'--megatron',str(args.megatron),'--trials',str(args.trials),*flags]))
         for stage in ('preflight','profile','timing'):
             tasks.append(('fullstep-'+stage,cli('ma20_experiment.py')+['run',str(args.out/'fullstep'),
                 '--stage',stage,'--python',str(args.python),'--cuda-home',str(args.cuda_home),
@@ -79,6 +101,9 @@ def supervise(args):
     env.setdefault('CUDA_VISIBLE_DEVICES','0,1,2,3,4,5,6,7')
     state=dict(protocol=PROTOCOL,status='preparing',stage='build',candidate=None,
                fullstep_executed=False,increment_over_MA11_validated=False)
+    if args.reuse_batch:
+        state.update(stage='reuse-operator',reused_batch=str(args.reuse_batch),
+                     build_reused=True,operator_jobs_executed=False)
     def invoke(label,command):
         for path,digest in hashes.items():require(sha(path)==digest,'Controller changed: '+path)
         state.update(status='running',stage=label);write(args.out/'batch-state.json',state)
@@ -86,13 +111,14 @@ def supervise(args):
         for path,digest in hashes.items():require(sha(path)==digest,'Controller changed: '+path)
     try:
         for label,command in commands(args):invoke(label,command)
-        decision=read(args.out/'operator/selection.json')
+        selection=operator_selection(args)
+        decision=read(selection)
         import ma20_probe
-        require(ma20_probe.verify_selection(args.out/'operator') == decision,
+        require(ma20_probe.verify_selection(selection.parent) == decision,
                 'Saved operator selection differs from raw calibration/heldout evidence')
         require(decision.get('completed') is True,'Operator calibration/heldout did not complete')
-        candidate=decision.get('candidate')
-        state.update(candidate=candidate,operator_selection=str(args.out/'operator/selection.json'))
+        candidate=args.candidate or decision.get('candidate')
+        state.update(candidate=candidate,operator_selection=str(selection))
         if candidate is None:
             state.update(status='completed',stage='no_candidate',outcome='no_heldout_positive_candidate')
             write(args.out/'batch-state.json',state)
@@ -100,16 +126,20 @@ def supervise(args):
             return state
         import ma20_build
         require(candidate in ma20_build.VARIANTS and candidate!='MA11','Invalid calibrated candidate')
-        for label,command in commands(args,candidate):invoke(label,command)
         import ma20_experiment
+        state['candidate_selection']=ma20_experiment.candidate_selection(
+            decision,candidate,manual=bool(args.candidate))
+        for label,command in commands(args,candidate):invoke(label,command)
         result=ma20_experiment.report(args.out/'fullstep',save=False)
         require(result==read(args.out/'fullstep/report.json'),'Fullstep report differs from raw evidence')
-        require(result['formal_optimizer_steps']==args.trials*800 and
-                result['timing_rank_records']==args.trials*128,'Incomplete fullstep measurement')
+        arms=1 if args.reuse_ma11 else 2
+        require(result['formal_optimizer_steps']==args.trials*400*arms and
+                result['timing_rank_records']==args.trials*64*arms,'Incomplete fullstep measurement')
         state.update(status='completed',stage='done',fullstep_executed=True,
                      increment_over_MA11_validated=result['increment_over_MA11_validated'],
                      performance_increment_over_MA11_validated=result['performance_increment_over_MA11_validated'],
                      accuracy_equivalence_validated=False,
+                     comparison_mode=result.get('comparison_mode','paired'),
                      report=str(args.out/'fullstep/report.json'),
                      formal_optimizer_steps=result['formal_optimizer_steps'])
         write(args.out/'batch-state.json',state)
@@ -127,9 +157,18 @@ def main(argv=None):
     if not args.execute:
         print('PLAN ONLY: no directories, GPU queries, builds or workers.')
         for _,command in commands(args):print(shlex.join(command))
-        print('Only a candidate selected by training and independently confirmed by heldout proceeds:')
-        for _,command in commands(args,'SELECTED_Q'):print(shlex.join(command))
-        print(f'{args.trials} independent fullstep trial(s), 8 complete paired blocks/trial, '
+        if args.reuse_batch:
+            print('Reuse verified build and operator evidence:',args.reuse_batch)
+            print('No compilation or operator jobs.')
+        if args.reuse_ma11:
+            print('Run only',args.candidate,'; reuse saved MA11 timing for a descriptive cross-batch comparison.')
+        if args.candidate:
+            print('Manual fullstep candidate:',args.candidate,'; original operator selection is retained.')
+        else:
+            print('Only a candidate selected by training and independently confirmed by heldout proceeds:')
+        for _,command in commands(args,args.candidate or 'SELECTED_Q'):print(shlex.join(command))
+        windows='8 candidate-only windows/trial' if args.reuse_ma11 else '8 complete paired blocks/trial'
+        print(f'{args.trials} independent fullstep trial(s), {windows}, '
               '10 warmup + 50 measured optimizer steps/window. No candidate means stop with no_candidate; '
               'all negative fullstep windows are retained. Changed masks require independent codec checks; '
               'cross-mask bitwise equivalence is not assumed.')

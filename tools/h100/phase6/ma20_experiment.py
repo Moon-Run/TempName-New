@@ -64,7 +64,7 @@ def trace_projection_records(events, tuning):
     return result
 
 
-def schedule(candidate, trials=1):
+def schedule(candidate, trials=1, candidate_only=False):
     require(candidate in builder.VARIANTS and candidate != 'MA11', 'Unknown MA20 candidate')
     require(type(trials) is int and trials in (1, 2), 'Use one or two independent trials')
     arms = ('MA11', candidate)
@@ -73,7 +73,7 @@ def schedule(candidate, trials=1):
     return [dict(trial=t, block=b, round=1 if b < 4 else 2, index=2*b+i,
                  arm=arm, mode='timing', directory=f'compare{t}/block{b:02d}-{arm}')
             for t in range(1, trials+1) for b, order in enumerate(orders)
-            for i, arm in enumerate(order)]
+            for i, arm in enumerate(order) if not candidate_only or arm==candidate]
 
 
 def libraries(bank, arm):
@@ -95,27 +95,91 @@ def controller_inputs():
     return {str(p): sha(p) for p in sorted(paths)}
 
 
+def candidate_selection(decision,candidate,manual=False):
+    require(decision.get('completed') is True,'Operator calibration/heldout did not complete')
+    require(candidate in builder.VARIANTS and candidate!='MA11','Unknown MA20 candidate')
+    confirmed=decision.get('candidate')==candidate
+    require(manual or confirmed,'A completed independent operator selection must nominate this candidate')
+    return dict(mode='manual' if manual else 'calibrated',
+                operator_selected_candidate=decision.get('candidate'),
+                operator_confirmation_passed=confirmed)
+
+
+def reuse_ma11(source,bank,bundle,decision,trials):
+    """Validate saved MA11 records without rerunning or rewriting the old batch.
+
+    Historical controller hashes describe the old controller version. Validate
+    its frozen worker, native library and raw rank evidence, not those hashes
+    against newly installed launcher/report code.
+    """
+    source=Path(source).resolve();plan=read(source/'plan.json');result=read(source/'report.json')
+    require(plan['protocol']==PROTOCOL and plan['arms']==['MA11',plan['candidate']] and
+            plan['trials']==trials and plan['schedule']==schedule(plan['candidate'],trials) and
+            (plan['blocks'],plan['timed_steps'],plan['warmup_steps'])==(8,50,10),
+            'Reused MA11 requires a complete original paired batch with matching trials')
+    require(result['protocol']==PROTOCOL and result['completed'] is True and
+            result['run_id']==plan['run_id'] and result['formal_optimizer_steps']==trials*800 and
+            result['timing_rank_records']==trials*128,'Reused fullstep report is incomplete')
+    require(plan['bundle_sha256']==sha(bank/'ma20-plan.json')==sha(source/'ma20-plan.json') and
+            plan['selection_sha256']==sha(source/'operator-selection.json') and
+            read(source/'operator-selection.json')==decision,'Reused MA11 belongs to a different operator bank')
+    subroot=Path(plan['arm_roots']['MA11']);item=read(subroot/'plan.json')
+    require(sha(subroot/'plan.json')==plan['arm_plan_sha256']['MA11'] and
+            item['selection']==planner.selection_for(bundle,'MA11') and
+            item['libraries'][NATIVE_ARM]==libraries(bank,'MA11'),
+            'Reused MA11 plan, mask or library differs')
+    paths=[source/name for name in ('plan.json','report.json','ma20-plan.json','operator-selection.json')]
+    paths.append(subroot/'plan.json')
+    for name,digest in item['source_files'].items():
+        path=subroot/name
+        require(sha(path)==digest,'Reused MA11 worker changed: '+name)
+        paths.append(path)
+    ma20_worker.validate_sources((subroot/'scripts/worker.py').read_text())
+    samples=[];reference=None
+    for job in plan['schedule']:
+        if job['arm']!='MA11':continue
+        rows=window(source,plan,job)
+        for row in rows:validate_operator_identity(row,decision)
+        identity=full.identity(rows)
+        reference=identity if reference is None else reference
+        require(identity==reference,'Reused MA11 hardware/input identity changed')
+        sample=dict(job,ms_per_step=max(r['elapsed_seconds'] for r in rows)*1000/STEPS)
+        require(sum(saved==sample for saved in result['all_samples'])==1,
+                'Reused MA11 timing differs from raw rank records')
+        samples.append(sample)
+        for rank in range(8):
+            path=subroot/'results'/job['directory']/f'rank{rank}.json'
+            require(result['files'].get(str(path))==sha(path),'Reused MA11 rank record changed')
+            paths.append(path)
+    require(len(samples)==trials*BLOCKS,'Incomplete reused MA11 windows')
+    return dict(source=str(source),run_id=plan['run_id'],samples=samples,rank_identities=reference,
+                formal_optimizer_steps=len(samples)*STEPS,timing_rank_records=len(samples)*8,
+                files={str(path):sha(path) for path in paths})
+
+
 def prepare(args):
     root, bank = args.root.resolve(), args.build.resolve()
     builder.verify(bank, built=True)
     bundle = read(bank/'ma20-plan.json')
     decision = read(args.selection)
-    require(decision.get('completed') is True and decision.get('candidate') == args.candidate,
-            'A completed independent operator selection must nominate this candidate')
+    selection_metadata=candidate_selection(decision,args.candidate,manual=getattr(args,'manual_candidate',False))
     require(decision.get('bundle_sha256') == sha(bank/'ma20-plan.json') and
             decision.get('build_manifest_sha256') == sha(bank/builder.MANIFEST),
             'Operator selection belongs to a different plan or compiled bank')
     import ma20_probe
     require(ma20_probe.verify_selection(args.selection.parent) == decision,
             'Operator selection differs from the complete calibration/heldout evidence')
-    work = schedule(args.candidate, args.trials)
+    baseline_source=getattr(args,'reuse_ma11_from',None)
+    baseline=reuse_ma11(baseline_source,bank,bundle,decision,args.trials) if baseline_source else None
+    work = schedule(args.candidate, args.trials,candidate_only=baseline is not None)
     root.mkdir(parents=True, exist_ok=False)
     (root/'arms').mkdir()
     write(root/'ma20-plan.json', bundle)
     shutil.copy2(args.selection, root/'operator-selection.json')
+    if baseline is not None:write(root/'reused-ma11.json',baseline)
     megatron = full.snapshot_megatron(args.megatron.resolve(), root/'megatron')
     comm = communication.capture('0')
-    arms = ['MA11', args.candidate]
+    arms = [args.candidate] if baseline is not None else ['MA11', args.candidate]
     arm_roots = {}
     for arm in arms:
         subroot = root/'arms'/arm
@@ -170,6 +234,7 @@ def prepare(args):
         path = Path(arm_roots[arm])/'plan.json'
         item = read(path); item.update(run_id=run_id, trial_ids=trials); write(path,item)
     plan = dict(protocol=PROTOCOL, run_id=run_id, trial_ids=trials, candidate=args.candidate,
+                candidate_selection=selection_metadata,operator_selection_source=str(args.selection.resolve()),
                 arms=arms, arm_roots=arm_roots, trials=args.trials, blocks=BLOCKS,
                 timed_steps=STEPS, warmup_steps=10, schedule=work, build=str(bank),
                 bundle_sha256=sha(root/'ma20-plan.json'),
@@ -179,6 +244,9 @@ def prepare(args):
                 arm_plan_sha256={a:sha(Path(p)/'plan.json') for a,p in arm_roots.items()},
                 numerical_rule='Independent codec reference <=1%; BF16 <=5%; finite full-model trajectories; no bitwise cross-mask claim',
                 timing_rule='All eight paired blocks retained; max eight-rank wall time / 50; paired log-ratio bootstrap')
+    if baseline is not None:
+        plan.update(comparison_mode='historical_ma11',reused_ma11_sha256=sha(root/'reused-ma11.json'),
+                    timing_rule='Candidate only; eight windows per trial; descriptive mean-time ratio to saved MA11; no paired CI')
     write(root/'plan.json', plan)
     return root
 
@@ -186,11 +254,26 @@ def prepare(args):
 def verify(root, offline=False):
     root = Path(root).resolve()
     plan = read(root/'plan.json')
-    require(plan['protocol'] == PROTOCOL and plan['arms'] == ['MA11',plan['candidate']] and
-            plan['schedule'] == schedule(plan['candidate'],plan['trials']) and
+    reused=plan.get('comparison_mode')=='historical_ma11'
+    require(plan.get('comparison_mode','paired') in ('paired','historical_ma11'),'Unknown comparison mode')
+    expected_arms=[plan['candidate']] if reused else ['MA11',plan['candidate']]
+    require(plan['protocol'] == PROTOCOL and plan['arms'] == expected_arms and
+            plan['schedule'] == schedule(plan['candidate'],plan['trials'],candidate_only=reused) and
             (plan['blocks'],plan['timed_steps'],plan['warmup_steps']) == (8,50,10), 'Changed MA20 protocol')
+    if reused:
+        require(sha(root/'reused-ma11.json')==plan['reused_ma11_sha256'],'Reused MA11 snapshot changed')
+        for name,digest in read(root/'reused-ma11.json')['files'].items():
+            require(sha(name)==digest,'Reused MA11 evidence changed: '+name)
     require(sha(root/'ma20-plan.json') == plan['bundle_sha256'] and
             sha(root/'operator-selection.json') == plan['selection_sha256'], 'Frozen selection changed')
+    decision=read(root/'operator-selection.json')
+    selection=plan.get('candidate_selection')
+    if selection is None:
+        candidate_selection(decision,plan['candidate'])
+    else:
+        require(selection.get('mode') in ('manual','calibrated'),'Unknown candidate selection mode')
+        require(selection==candidate_selection(decision,plan['candidate'],selection['mode']=='manual'),
+                'Candidate selection provenance changed')
     bundle = read(root/'ma20-plan.json')
     for arm in plan['arms']:
         subroot = Path(plan['arm_roots'][arm])
@@ -248,6 +331,8 @@ def window(root,plan,job):
 
 def preflight(root,offline=False):
     root=Path(root);plan=verify(root,offline);reference=None;files={};numeric={}
+    if plan.get('comparison_mode')=='historical_ma11':
+        reference=read(root/'reused-ma11.json')['rank_identities']
     operator_selection=read(root/'operator-selection.json')
     for job in jobs(plan,'preflight'):
         rows=window(root,plan,job)
@@ -305,10 +390,24 @@ def trajectory_drift(a,b):
                             max(math.sqrt(sum(x*x for x in a)),1e-20))
 
 
+def timing_comparison(values,candidate,historical=False):
+    result=dict(mean_ms={a:statistics.mean(v) for a,v in values.items()},
+                median_ms={a:statistics.median(v) for a,v in values.items()})
+    if historical:
+        result.update(descriptive_percent=100*(1-result['mean_ms'][candidate]/result['mean_ms']['MA11']),
+                      positive_increment=False,
+                      limitation='Historical baseline; no concurrent pairing or performance significance claim.')
+    else:
+        paired=full.bench.paired(values[candidate],values['MA11'])
+        result.update(paired=paired,positive_increment=paired['percent']>0 and paired['ci95'][0]>0)
+    return result
+
+
 def report(root,offline=False,save=True):
     root=Path(root);plan=verify(root,offline);gate=preflight(root,offline)
     evidence=profile_summary(root,offline)
     operator_selection=read(root/'operator-selection.json')
+    baseline=read(root/'reused-ma11.json') if plan.get('comparison_mode')=='historical_ma11' else None
     rows_by_block={};samples=[];files=dict(gate['files']);numerics=defaultdict(list)
     for job in jobs(plan,'timing'):
         rows=window(root,plan,job)
@@ -325,16 +424,16 @@ def report(root,offline=False,save=True):
         selected=[s for s in samples if s['trial']==trial]
         values={arm:[s['ms_per_step'] for s in sorted(selected,key=lambda s:s['block']) if s['arm']==arm]
                 for arm in plan['arms']}
-        paired=full.bench.paired(values[plan['candidate']],values['MA11'])
-        comparisons[f'compare{trial}']=dict(mean_ms={a:statistics.mean(v) for a,v in values.items()},
-            median_ms={a:statistics.median(v) for a,v in values.items()},paired=paired,
-            positive_increment=paired['percent']>0 and paired['ci95'][0]>0)
+        if baseline is not None:
+            values['MA11']=[s['ms_per_step'] for s in baseline['samples'] if s['trial']==trial]
+        comparisons[f'compare{trial}']=timing_comparison(values,plan['candidate'],historical=baseline is not None)
+        if baseline is not None:continue
         for block in range(BLOCKS):
-            baseline=rows_by_block[trial,block,'MA11'];candidate=rows_by_block[trial,block,plan['candidate']]
+            baseline_row=rows_by_block[trial,block,'MA11'];candidate=rows_by_block[trial,block,plan['candidate']]
             drift.append(dict(trial=trial,block=block,
-                loss=trajectory_drift(baseline['losses'],candidate['losses']),
-                grad_norm=trajectory_drift(baseline['grad_norms'],candidate['grad_norms']),
-                final_parameters_identical=baseline['ma11_final_parameters_sha256']==candidate['ma11_final_parameters_sha256']))
+                loss=trajectory_drift(baseline_row['losses'],candidate['losses']),
+                grad_norm=trajectory_drift(baseline_row['grad_norms'],candidate['grad_norms']),
+                final_parameters_identical=baseline_row['ma11_final_parameters_sha256']==candidate['ma11_final_parameters_sha256']))
     positive=all(c['positive_increment'] for c in comparisons.values())
     result=dict(protocol=PROTOCOL,run_id=plan['run_id'],completed=True,candidate=plan['candidate'],
                 independent_codec_reference_validated=True,execution_validated=evidence['execution_validated'],
@@ -348,23 +447,45 @@ def report(root,offline=False,save=True):
                 formal_optimizer_steps=len(samples)*STEPS,timing_rank_records=len(samples)*8,
                 selected_configuration=read(root/'ma20-plan.json')['configurations'][plan['candidate']],
                 exploratory=plan['trials']==1,files=files)
+    if 'candidate_selection' in plan:
+        result['candidate_selection']=plan['candidate_selection']
+        result['operator_selection_source']=plan['operator_selection_source']
+        result['exploratory']=result['exploratory'] or plan['candidate_selection']['mode']=='manual'
+    if baseline is not None:
+        result.update(comparison_mode='historical_ma11',executed_arms=plan['arms'],exploratory=True,
+                      reused_ma11=dict(source=baseline['source'],run_id=baseline['run_id'],
+                          formal_optimizer_steps=baseline['formal_optimizer_steps'],
+                          timing_rank_records=baseline['timing_rank_records'],
+                          evidence_sha256=plan['reused_ma11_sha256']),
+                      comparison_limitation='Only the candidate was run in this batch. MA11 times are historical; mean-time differences are descriptive, with no paired CI or validated performance increment.')
     if save:
         path=root/'report.json'
         if path.exists():require(read(path)==result,'Saved report differs from evidence')
         else:write(path,result)
-        lines=['# MA20 vs MA11','',f"Candidate: `{plan['candidate']}`; complete optimizer steps: {len(samples)*STEPS}.",'',
-               '| Trial | MA11 ms | MA20 ms | Paired speedup %, 95% CI |','| --- | ---: | ---: | --- |']
+        lines=['# MA20 vs MA11','',f"Candidate: `{plan['candidate']}`; complete optimizer steps: {len(samples)*STEPS}."]
+        if 'candidate_selection' in plan:
+            selection=plan['candidate_selection']
+            lines.extend(['',f"Candidate selection mode: {selection['mode']}; original operator-selected candidate: "
+                          f"`{selection['operator_selected_candidate']}`; operator confirmation for this candidate: "
+                          f"{selection['operator_confirmation_passed']}."])
+        metric='Descriptive time reduction %' if baseline is not None else 'Paired speedup %, 95% CI'
+        if baseline is not None:lines.extend(['',result['comparison_limitation']])
+        lines.extend(['',f'| Trial | MA11 ms | MA20 ms | {metric} |','| --- | ---: | ---: | --- |'])
         for label,c in comparisons.items():
-            p=c['paired'];lines.append(f"| {label} | {c['mean_ms']['MA11']:.3f} | {c['mean_ms'][plan['candidate']]:.3f} | {p['percent']:.3f} [{p['ci95'][0]:.3f}, {p['ci95'][1]:.3f}] |")
+            if baseline is not None:estimate=f"{c['descriptive_percent']:.3f}"
+            else:
+                p=c['paired'];estimate=f"{p['percent']:.3f} [{p['ci95'][0]:.3f}, {p['ci95'][1]:.3f}]"
+            lines.append(f"| {label} | {c['mean_ms']['MA11']:.3f} | {c['mean_ms'][plan['candidate']]:.3f} | {estimate} |")
         lines.extend(['',f"Performance increment validated: {result['performance_increment_over_MA11_validated']}.",'',
                       '| Arm | Mean loss | Final loss | Final gradient norm |',
                       '| --- | ---: | ---: | ---: |'])
         for arm,item in result['training_summary'].items():
             lines.append(f"| {arm} | {item['mean_loss']:.8g} | {item['final_loss']:.8g} | {item['final_grad_norm']:.8g} |")
-        lines.extend(['','| Paired trajectory drift across all blocks | Maximum absolute difference | Maximum relative L2 |',
-                      '| --- | ---: | ---: |'])
-        for key in ('loss','grad_norm'):
-            lines.append(f"| {key} | {max(d[key]['max_abs'] for d in drift):.8g} | {max(d[key]['relative_l2'] for d in drift):.8g} |")
+        if drift:
+            lines.extend(['','| Paired trajectory drift across all blocks | Maximum absolute difference | Maximum relative L2 |',
+                          '| --- | ---: | ---: |'])
+            for key in ('loss','grad_norm'):
+                lines.append(f"| {key} | {max(d[key]['max_abs'] for d in drift):.8g} | {max(d[key]['relative_l2'] for d in drift):.8g} |")
         lines.extend(['','Accuracy equivalence validated: False. No short-run drift threshold is inferred.',
                       '',result['numerical_limitation']])
         (root/'report.md').write_text('\n'.join(lines)+'\n')
@@ -411,6 +532,10 @@ def main(argv=None):
     parser=argparse.ArgumentParser(__doc__);sub=parser.add_subparsers(dest='action',required=True)
     p=sub.add_parser('prepare');p.add_argument('root',type=Path);p.add_argument('--build',type=Path,required=True)
     p.add_argument('--selection',type=Path,required=True);p.add_argument('--candidate',required=True)
+    p.add_argument('--manual-candidate',action='store_true',
+                   help='Explicit fullstep experiment; verify prior operator evidence without requiring its winner')
+    p.add_argument('--reuse-ma11-from',type=Path,
+                   help='Read MA11 from a completed fullstep directory and execute only --candidate')
     p.add_argument('--megatron',type=Path,required=True);p.add_argument('--trials',type=int,choices=(1,2),default=1)
     p=sub.add_parser('run');p.add_argument('root',type=Path)
     p.add_argument('--stage',choices=('preflight','profile','timing'),required=True)

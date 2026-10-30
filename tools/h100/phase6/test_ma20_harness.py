@@ -131,6 +131,192 @@ assert m.ARMS[-1]=='F4-cache-zcount-csoftmax'
             self.assertIn('PLAN ONLY',output.getvalue())
             self.assertIn('--stage profile',output.getvalue())
 
+    def test_reuse_preview_only_launches_fullstep_for_the_manual_candidate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old=Path(temp)/'old';out=Path(temp)/'new'
+            argv=['--out',str(out),'--reuse-batch',str(old),'--candidate','Q112','--reuse-ma11']
+            args=launcher.arguments(argv)
+            self.assertEqual(args.ma20_build,old/'build')
+            self.assertEqual(launcher.commands(args),[])
+            commands=launcher.commands(args,'Q112')
+            self.assertEqual([name for name,_ in commands],
+                             ['fullstep-prepare','fullstep-preflight','fullstep-profile','fullstep-timing'])
+            prepare=commands[0][1]
+            self.assertIn('--manual-candidate',prepare)
+            self.assertEqual(prepare[prepare.index('--reuse-ma11-from')+1],str(old/'fullstep'))
+            self.assertEqual(prepare[prepare.index('--selection')+1],str(old/'operator/selection.json'))
+            with patch.object(launcher,'controller_hashes',side_effect=AssertionError('execute path')), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                launcher.main(argv)
+            self.assertIn('Run only Q112',output.getvalue())
+            self.assertFalse(out.exists())
+            self.assertFalse(old.exists())
+
+    def test_reuse_flags_cannot_silently_skip_normal_selection(self):
+        for argv,message in [(['--candidate','Q112'],'--candidate requires'),
+                             (['--reuse-ma11'],'--reuse-ma11 requires'),
+                             (['--reuse-batch','/tmp/old','--ma11-build','/tmp/bank'],'cannot use'),
+                             (['--reuse-batch','/tmp/old','--out','/tmp/old/nested'],'outside')]:
+            with self.subTest(argv=argv),self.assertRaisesRegex(ValueError,message):
+                launcher.arguments(argv)
+        decision=dict(completed=True,candidate='Q0')
+        with self.assertRaisesRegex(ValueError,'must nominate'):
+            experiment.candidate_selection(decision,'Q112')
+        self.assertEqual(experiment.candidate_selection(decision,'Q112',manual=True),
+                         dict(mode='manual',operator_selected_candidate='Q0',operator_confirmation_passed=False))
+
+    def test_manual_prepare_keeps_q0_evidence_and_runs_only_q112(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp);bank=base/'bank';bank.mkdir();root=base/'fullstep'
+            write(bank/'ma20-plan.json',self.bundle)
+            write(bank/'tuning.json',experiment.full.bench.validate_tuning(None))
+            write(bank/experiment.builder.MANIFEST,{})
+            decision=dict(completed=True,candidate='Q0',bundle_sha256=sha(bank/'ma20-plan.json'),
+                          build_manifest_sha256=sha(bank/experiment.builder.MANIFEST))
+            selection=base/'selection.json';write(selection,decision);original=selection.read_bytes()
+            args=argparse.Namespace(root=root,build=bank,selection=selection,candidate='Q112',
+                megatron=base/'megatron',trials=1,manual_candidate=True,reuse_ma11_from=base/'old/fullstep')
+            with patch.object(experiment.builder,'verify'), \
+                 patch.object(experiment,'libraries',side_effect=lambda bank,arm:dict(root='/synthetic/'+arm,files={})), \
+                 patch.object(experiment.full,'snapshot_megatron',return_value={}), \
+                 patch.object(experiment,'reuse_ma11',return_value=dict(files={})), \
+                 patch('ma20_probe.verify_selection',return_value=decision):
+                experiment.prepare(args)
+            plan=experiment.verify(root,offline=True)
+            self.assertEqual(plan['arms'],['Q112'])
+            self.assertEqual(plan['candidate_selection'],dict(mode='manual',operator_selected_candidate='Q0',
+                                                             operator_confirmation_passed=False))
+            self.assertEqual(read(root/'operator-selection.json'),decision)
+            self.assertEqual(selection.read_bytes(),original)
+            self.assertFalse((root/'arms/MA11').exists())
+            actual=read(root/'arms/Q112/scripts/selection-plan.json')
+            self.assertEqual(actual,planner.selection_for(self.bundle,'Q112'))
+            for stage,count in (('preflight',1),('profile',1),('timing',8)):
+                work=list(experiment.jobs(plan,stage))
+                self.assertEqual(len(work),count)
+                self.assertEqual({j['arm'] for j in work},{'Q112'})
+            plan['candidate_selection']['operator_confirmation_passed']=True
+            write(root/'plan.json',plan)
+            with self.assertRaisesRegex(ValueError,'provenance changed'):
+                experiment.verify(root,offline=True)
+
+    def test_historical_comparison_never_bootstraps_or_claims_validation(self):
+        values={'MA11':[500.]*8,'Q112':[450.]*8}
+        with patch.object(experiment.full.bench,'paired',side_effect=AssertionError('not paired')):
+            result=experiment.timing_comparison(values,'Q112',historical=True)
+        self.assertAlmostEqual(result['descriptive_percent'],10.)
+        self.assertNotIn('paired',result)
+        self.assertFalse(result['positive_increment'])
+
+    def test_candidate_only_report_counts_only_new_work_and_labels_old_ma11(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);subroot=root/'Q112';subroot.mkdir()
+            plan=dict(run_id='new',candidate='Q112',arms=['Q112'],trials=1,
+                      schedule=experiment.schedule('Q112',candidate_only=True),
+                      comparison_mode='historical_ma11',arm_roots={'Q112':str(subroot)},
+                      candidate_selection=dict(mode='manual',operator_selected_candidate='Q0',
+                                               operator_confirmation_passed=False),
+                      operator_selection_source='/old/operator/selection.json',reused_ma11_sha256='fixture')
+            write(root/'operator-selection.json',{})
+            write(root/'ma20-plan.json',self.bundle)
+            write(root/'reused-ma11.json',dict(source='/old/fullstep',run_id='old',
+                  samples=[dict(trial=1,ms_per_step=500.) for _ in range(8)],
+                  formal_optimizer_steps=400,timing_rank_records=64))
+            rows=[dict(elapsed_seconds=22.5,losses=[1.]*50,grad_norms=[2.]*50) for _ in range(8)]
+            with patch.object(experiment,'verify',return_value=plan), \
+                 patch.object(experiment,'preflight',return_value=dict(files={},rank_identities=[])), \
+                 patch.object(experiment,'profile_summary',return_value=dict(execution_validated=True)), \
+                 patch.object(experiment,'window',return_value=rows), \
+                 patch.object(experiment,'validate_operator_identity'), \
+                 patch.object(experiment.full,'identity',return_value=[]), \
+                 patch.object(experiment.full.bench,'paired',side_effect=AssertionError('not paired')):
+                result=experiment.report(root)
+            self.assertEqual(result['formal_optimizer_steps'],400)
+            self.assertEqual(result['timing_rank_records'],64)
+            self.assertEqual(result['executed_arms'],['Q112'])
+            self.assertEqual(result['reused_ma11']['formal_optimizer_steps'],400)
+            self.assertEqual(result['paired_trajectory_drift'],[])
+            self.assertFalse(result['performance_increment_over_MA11_validated'])
+            self.assertIn('MA11 times are historical',(root/'report.md').read_text())
+            self.assertNotIn('Paired speedup',(root/'report.md').read_text())
+
+    def test_normal_two_trial_report_retains_paired_statistics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            plan=dict(run_id='new',candidate='Q112',arms=['MA11','Q112'],trials=2,
+                      schedule=experiment.schedule('Q112',trials=2),
+                      arm_roots={arm:str(root/arm) for arm in ('MA11','Q112')})
+            write(root/'operator-selection.json',{})
+            write(root/'ma20-plan.json',self.bundle)
+            def rows(root,plan,job):
+                return [dict(elapsed_seconds=25. if job['arm']=='MA11' else 22.5,
+                             losses=[1.]*50,grad_norms=[2.]*50,ma11_final_parameters_sha256='fixture')
+                        for _ in range(8)]
+            with patch.object(experiment,'verify',return_value=plan), \
+                 patch.object(experiment,'preflight',return_value=dict(files={},rank_identities=[])), \
+                 patch.object(experiment,'profile_summary',return_value=dict(execution_validated=True)), \
+                 patch.object(experiment,'window',side_effect=rows), \
+                 patch.object(experiment,'validate_operator_identity'), \
+                 patch.object(experiment.full,'identity',return_value=[]):
+                result=experiment.report(root)
+            self.assertEqual(result['formal_optimizer_steps'],1600)
+            self.assertEqual(len(result['paired_trajectory_drift']),16)
+            self.assertTrue(result['performance_increment_over_MA11_validated'])
+            self.assertNotIn('reused_ma11',result)
+            self.assertTrue(all('paired' in c for c in result['comparisons'].values()))
+            self.assertIn('Paired speedup',(root/'report.md').read_text())
+
+    def test_reused_ma11_requires_complete_unchanged_raw_timing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);bank=root/'bank';source=root/'old';subroot=source/'arms/MA11'
+            bank.mkdir();(subroot/'scripts').mkdir(parents=True)
+            decision=dict(completed=True,candidate='Q0')
+            write(bank/'ma20-plan.json',self.bundle);write(source/'ma20-plan.json',self.bundle)
+            write(source/'operator-selection.json',decision)
+            (subroot/'scripts/worker.py').write_text(worker.worker_source())
+            libs=dict(root='/synthetic/MA11',files={})
+            write(subroot/'plan.json',dict(selection=planner.selection_for(self.bundle,'MA11'),
+                  libraries={experiment.NATIVE_ARM:libs},
+                  source_files={'scripts/worker.py':sha(subroot/'scripts/worker.py')}))
+            plan=dict(protocol=experiment.PROTOCOL,run_id='old',arms=['MA11','Q0'],candidate='Q0',
+                      trials=1,schedule=experiment.schedule('Q0'),blocks=8,timed_steps=50,warmup_steps=10,
+                      bundle_sha256=sha(bank/'ma20-plan.json'),selection_sha256=sha(source/'operator-selection.json'),
+                      arm_roots={'MA11':str(subroot)},arm_plan_sha256={'MA11':sha(subroot/'plan.json')})
+            write(source/'plan.json',plan)
+            result=dict(protocol=experiment.PROTOCOL,run_id='old',completed=True,formal_optimizer_steps=800,
+                        timing_rank_records=128,all_samples=[],files={})
+            for job in plan['schedule']:
+                if job['arm']!='MA11':continue
+                result['all_samples'].append(dict(job,ms_per_step=500.))
+                for rank in range(8):
+                    path=subroot/'results'/job['directory']/f'rank{rank}.json'
+                    path.parent.mkdir(parents=True,exist_ok=True)
+                    write(path,dict(elapsed_seconds=25.))
+                    result['files'][str(path)]=sha(path)
+            write(source/'report.json',result)
+            def rows(root,plan,job):
+                return [read(subroot/'results'/job['directory']/f'rank{rank}.json') for rank in range(8)]
+            with patch.object(experiment,'libraries',return_value=libs), \
+                 patch.object(experiment,'window',side_effect=rows), \
+                 patch.object(experiment,'validate_operator_identity'), \
+                 patch.object(experiment.full,'identity',return_value=[]):
+                snapshot=experiment.reuse_ma11(source,bank,self.bundle,decision,1)
+                self.assertEqual(len(snapshot['samples']),8)
+                self.assertEqual(snapshot['timing_rank_records'],64)
+                path=Path(next(iter(result['files'])))
+                raw=path.read_bytes()
+                write(path,dict(elapsed_seconds=26.))
+                with self.assertRaisesRegex(ValueError,'timing differs'):
+                    experiment.reuse_ma11(source,bank,self.bundle,decision,1)
+                path.write_bytes(raw)
+                path.write_bytes(raw+b'\n')
+                with self.assertRaisesRegex(ValueError,'rank record changed'):
+                    experiment.reuse_ma11(source,bank,self.bundle,decision,1)
+                path.write_bytes(raw)
+                result['completed']=False;write(source/'report.json',result)
+                with self.assertRaisesRegex(ValueError,'report is incomplete'):
+                    experiment.reuse_ma11(source,bank,self.bundle,decision,1)
+
     def test_no_candidate_stops_without_fullstep_or_success_claim(self):
         with tempfile.TemporaryDirectory() as temp:
             out=Path(temp);(out/'handoff').mkdir();(out/'operator').mkdir()
