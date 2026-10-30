@@ -1,0 +1,13 @@
+{
+  "implementation": "a800-fused-v2-cta-v1",
+  "source": "outputs/a800/phase4/taco-fused-warp-20261003/taco",
+  "verified_against": "outputs/a800/phase6/tp8-quant-measure-20261006/build/manifest.json",
+  "files": {
+    "src/gemm_rs/taco_runtime.h": "63b15670cdb99e29156e073b5e03cfe32be56a4f89f77116240443341c483d6c",
+    "src/gemm_rs/taco_runtime.cu": "bd89ecb31462dbaee83326d859c2fdd7e0bef364f3a7dcef018a98231b6dbe79",
+    "src/gemm_rs/taco_codec.cuh": "e5b7c704974bf58b334e67b5c7436bbd7d5fa65d1a1331aab5d89da6c7c159e9",
+    "src/gemm_rs/epilogue_evt.hpp": "a4fda8820e46b729fe096b74b9b6e6e369e5954f7cb31df6113ed66d28cfe7a7",
+    "src/gemm_rs/ths_op/gemm_reduce_scatter.cc": "b4854a106fcad3fcb1b62d735c72ef50edde5cd7afa06b5223e05461a606e25c",
+    "python/flux/gemm_rs_taco.py": "ab9071ae88bdd7f3e74b0a29f5139176d282f5eb85e22092285b2397033dc4b2"
+  }
+}

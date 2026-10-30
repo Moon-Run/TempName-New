@@ -113,9 +113,19 @@ def softmax_adapter_source(environment):
 
 def validate_worker(source):
     tree = ast.parse(source)
+    # The frozen H100 fingerprints use Python 3.10's AST schema. Python 3.12
+    # adds type_params=[] even to ordinary functions/classes. Normalize only
+    # that empty field on this private tree, retaining nonempty type parameters
+    # and every executable node in the original hash contract.
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and getattr(node, 'type_params', None) == []):
+            node._fields = tuple(field for field in node._fields if field != 'type_params')
     functions = {node.name: hashlib.sha256(ast.dump(node).encode()).hexdigest()
                  for node in tree.body if isinstance(node, ast.FunctionDef)}
-    require(functions == ma11_fullstep.BASELINE_FUNCTIONS, 'Original training functions changed')
+    changed = sorted(name for name in functions.keys() | ma11_fullstep.BASELINE_FUNCTIONS.keys()
+                     if functions.get(name) != ma11_fullstep.BASELINE_FUNCTIONS.get(name))
+    require(not changed, 'Original training functions changed: ' + ', '.join(changed))
     timing = [node for node in tree.body if isinstance(node, ast.If)
               and ast.unparse(node.test) == "MODE == 'profile'"]
     require(len(timing) == 1 and hashlib.sha256(ast.dump(timing[0]).encode()).hexdigest()

@@ -6,6 +6,7 @@ import random
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('rtx5090_nccl_transport_tested', HERE/'nccl_transport.py')
@@ -113,6 +114,39 @@ def exchange(stage=None, reconfigure=False, profile=False):
                            t.wire_layout(None, 3), 'TP8', 3, 1729,
                            reconfigure=reconfigure, profile=profile)
     return instance, tensors, log
+
+
+class NativeInitialization(unittest.TestCase):
+    def test_all_eight_ranks_reach_native_create_with_matching_device(self):
+        for rank in range(8):
+            for k_local in (512, 2048):
+                for cache in (False, True):
+                    with self.subTest(rank=rank, k_local=k_local, cache=cache):
+                        library = Mock()
+                        library.rtx5090_local_protocol_version.return_value = 1
+                        library.rtx5090_local_create.return_value = 0
+                        torch = SimpleNamespace(cuda=SimpleNamespace(current_device=lambda: rank))
+                        buffers = {name: SimpleNamespace(data_ptr=lambda: 1234) for name in
+                                   ('tx_bf16', 'tx_packets', 'rx_bf16', 'rx_packets',
+                                    'tx_offsets', 'rx_offsets', 'tx_wire', 'rx_wire')}
+                        layout = t.wire_layout(None, rank)
+                        with patch.object(t.ctypes, 'CDLL', return_value=library):
+                            runtime = t._NativeRuntime('CPU-FIXTURE.so', torch, rank, k_local,
+                                                       cache, None, buffers, layout, 1729)
+                        self.assertEqual((runtime.rank, runtime.device), (rank, rank))
+                        arguments = library.rtx5090_local_create.call_args.args
+                        self.assertEqual(arguments[1:4], (rank, k_local, int(cache)))
+                        self.assertEqual(arguments[4:13], (None, *([1234]*8)))
+                        self.assertEqual(arguments[13:], (layout['tx_bytes'], layout['rx_bytes'], 1729))
+                        library.rtx5090_local_create.assert_called_once()
+
+    def test_wrong_device_is_rejected_before_loading_native_library(self):
+        for rank in range(8):
+            torch = SimpleNamespace(cuda=SimpleNamespace(current_device=lambda: (rank+1) % 8))
+            with patch.object(t.ctypes, 'CDLL') as library:
+                with self.subTest(rank=rank), self.assertRaisesRegex(RuntimeError, 'matching CUDA device'):
+                    t._NativeRuntime('unused.so', torch, rank, 512, True, None, {}, {}, 1729)
+                library.assert_not_called()
 
 
 class Layout(unittest.TestCase):

@@ -1,0 +1,65 @@
+{
+  "protocol": "rtx5090-nccl-staged-collectives-v2",
+  "run_id": "63ac2a0a97d54770af60e9e9ac53ac09",
+  "rank": 6,
+  "local_rank": 6,
+  "world": 8,
+  "completed": true,
+  "host": "SL3061",
+  "gpu_uuid": "f3236115-d02e-e8dc-4c6a-a57ccccf0dfe",
+  "environment": {
+    "python": "/workspace/venvs/tempname-5090/bin/python",
+    "torch": "2.8.0a0+5228986c39.nv25.06",
+    "cuda": "12.9",
+    "nccl": [
+      2,
+      27,
+      3
+    ]
+  },
+  "communication": {
+    "environment": {
+      "NCCL_P2P_DISABLE": "1",
+      "NCCL_VERSION": "2.27.3",
+      "TORCH_NCCL_USE_COMM_NONBLOCKING": "0",
+      "NCCL_SHM_DISABLE": "0",
+      "NCCL_NVLS_ENABLE": "0",
+      "NCCL_DEBUG": "WARN",
+      "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1"
+    },
+    "config_files": {
+      "/etc/nccl.conf": null,
+      "/root/.nccl.conf": null
+    },
+    "nvls_request": "0"
+  },
+  "iterations": 3,
+  "non_default_stream": true,
+  "async_work_waits": 12,
+  "collectives": {
+    "all_gather": true,
+    "all_reduce": true,
+    "reduce_scatter": true,
+    "all_to_all_bytes": true
+  },
+  "input_split_sizes": [
+    160,
+    224,
+    128,
+    192,
+    256,
+    160,
+    0,
+    128
+  ],
+  "output_split_sizes": [
+    192,
+    224,
+    256,
+    128,
+    160,
+    192,
+    0,
+    256
+  ]
+}

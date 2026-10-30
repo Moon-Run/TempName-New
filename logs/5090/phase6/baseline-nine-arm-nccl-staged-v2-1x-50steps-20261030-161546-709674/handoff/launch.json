@@ -1,0 +1,18 @@
+{
+  "out": "/workspace/TempName-New/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-161546-709674",
+  "python": "/workspace/venvs/tempname-5090/bin/python",
+  "megatron": "/workspace/Megatron-LM",
+  "cuda_home": "/usr/local/cuda-12.9",
+  "build_cuda_home": "/usr/local/cuda-12.9",
+  "baseline_build": "/workspace/TempName-New/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-151053-241177/build",
+  "trials": 1,
+  "blocks": 18,
+  "jobs": 2,
+  "worker_timeout": 3600,
+  "execute": true,
+  "foreground": true,
+  "preflight_only": false,
+  "transport_smoke_only": true,
+  "report": false,
+  "inside": false
+}

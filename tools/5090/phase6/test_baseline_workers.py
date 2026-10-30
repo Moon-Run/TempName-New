@@ -1,11 +1,14 @@
 """CPU-only synthetic records: no fixture value is a GPU measurement."""
+import ast
 import copy
+import hashlib
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from rtx5090_loader import load
 
@@ -94,6 +97,52 @@ def fixture(arm, mode='timing'):
 
 
 class Workers(unittest.TestCase):
+    def test_python312_ast_schema_preserves_frozen_training_hashes(self):
+        parse = ast.parse
+
+        def parse312(*args, **kwargs):
+            tree = parse(*args, **kwargs)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if 'type_params' not in node._fields:
+                        node._fields = (*node._fields, 'type_params')
+                    node.type_params = []
+            return tree
+
+        # Exercise the target schema even when CI runs Python 3.10. The old
+        # direct ast.dump comparison must fail; all nine generated workers
+        # must pass after normalization, without accepting real code changes.
+        class_fields = ast.FunctionDef._fields
+        with patch.object(ast, 'parse', side_effect=parse312):
+            for arm in p.ARMS:
+                with self.subTest(arm=arm):
+                    source = s.worker_source(arm)
+                    tree = ast.parse(source)
+                    functions = {node.name: hashlib.sha256(ast.dump(node).encode()).hexdigest()
+                                 for node in tree.body if isinstance(node, ast.FunctionDef)}
+                    self.assertTrue(all(functions[name] != value
+                                        for name, value in s.ma11_fullstep.BASELINE_FUNCTIONS.items()))
+                    s.validate_worker(source)
+                    changed = source.replace('def clear_gradients():',
+                                             'def clear_gradients():\n    raise RuntimeError("changed")')
+                    self.assertNotEqual(changed, source)
+                    with self.assertRaisesRegex(ValueError, 'training functions changed: clear_gradients'):
+                        s.validate_worker(changed)
+                    with self.assertRaisesRegex(ValueError, 'timing loop changed'):
+                        s.validate_worker(source.replace('time.perf_counter()', 'time.monotonic()'))
+        self.assertEqual(ast.FunctionDef._fields, class_fields)
+
+    def test_nonempty_type_parameters_are_not_ignored(self):
+        source = s.worker_source('ma11')
+        tree = ast.parse(source)
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+        if 'type_params' not in function._fields:
+            function._fields = (*function._fields, 'type_params')
+        function.type_params = [ast.Name(id='T', ctx=ast.Load())]
+        with patch.object(ast, 'parse', return_value=tree):
+            with self.assertRaisesRegex(ValueError, 'training functions changed: ' + function.name):
+                s.validate_worker(source)
+
     def test_real_prepared_sources_form_complete_worker_packages(self):
         builder = load('build')
         with tempfile.TemporaryDirectory(prefix='rtx5090-workers-cpu-') as tmp:

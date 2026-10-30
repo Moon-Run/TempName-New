@@ -1,0 +1,16 @@
+{
+  "environment": {
+    "NCCL_P2P_DISABLE": "1",
+    "NCCL_VERSION": "2.27.3",
+    "TORCH_NCCL_USE_COMM_NONBLOCKING": "0",
+    "NCCL_SHM_DISABLE": "0",
+    "NCCL_NVLS_ENABLE": "0",
+    "NCCL_DEBUG": "WARN",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1"
+  },
+  "config_files": {
+    "/etc/nccl.conf": null,
+    "/root/.nccl.conf": null
+  },
+  "nvls_request": "0"
+}

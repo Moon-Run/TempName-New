@@ -78,6 +78,7 @@ def wire_layout(selected, rank):
 class _NativeRuntime:
     """Checked C ABI. All communication buffers remain owned by Python."""
     def __init__(self, library, torch, rank, k_local, cache, selected, buffers, layout, stream):
+        self.rank = rank
         self.torch, self.device = torch, torch.cuda.current_device()
         require(self.device == self.rank, 'Bind each local torchrun rank to its matching CUDA device')
         self.lib = ctypes.CDLL(str(library))

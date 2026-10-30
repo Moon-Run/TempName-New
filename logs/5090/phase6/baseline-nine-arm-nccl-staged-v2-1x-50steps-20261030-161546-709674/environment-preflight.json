@@ -1,0 +1,459 @@
+{
+  "completed": true,
+  "environment_probe_passed": true,
+  "collective_probe_passed": true,
+  "host": "SL3061",
+  "devices": [
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "4eaa69af-8d93-18a4-4204-f0d489eac16d",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "bbeb3985-8f87-493b-4665-f951fcc84d11",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "47c531f1-3cdf-6618-dffa-d3791f57c474",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "45331692-1cbe-95c4-7c96-0f8d61255fbf",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "7bcd5575-3386-f89f-a7c7-ae18bf0a2343",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "36b8a3a6-1945-f4d3-999b-6bfa97d4ee4d",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "f3236115-d02e-e8dc-4c6a-a57ccccf0dfe",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "uuid": "1904ccaa-c7d8-c73e-b136-49a6de3a08ff",
+      "capability": [
+        12,
+        0
+      ],
+      "sm_count": 170,
+      "total_memory_bytes": 33670758400
+    }
+  ],
+  "peer_access": [
+    [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ],
+    [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  ],
+  "unavailable_peer_links": [
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      0,
+      3
+    ],
+    [
+      0,
+      4
+    ],
+    [
+      0,
+      5
+    ],
+    [
+      0,
+      6
+    ],
+    [
+      0,
+      7
+    ],
+    [
+      1,
+      0
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      1,
+      4
+    ],
+    [
+      1,
+      5
+    ],
+    [
+      1,
+      6
+    ],
+    [
+      1,
+      7
+    ],
+    [
+      2,
+      0
+    ],
+    [
+      2,
+      1
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      2,
+      4
+    ],
+    [
+      2,
+      5
+    ],
+    [
+      2,
+      6
+    ],
+    [
+      2,
+      7
+    ],
+    [
+      3,
+      0
+    ],
+    [
+      3,
+      1
+    ],
+    [
+      3,
+      2
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      5
+    ],
+    [
+      3,
+      6
+    ],
+    [
+      3,
+      7
+    ],
+    [
+      4,
+      0
+    ],
+    [
+      4,
+      1
+    ],
+    [
+      4,
+      2
+    ],
+    [
+      4,
+      3
+    ],
+    [
+      4,
+      5
+    ],
+    [
+      4,
+      6
+    ],
+    [
+      4,
+      7
+    ],
+    [
+      5,
+      0
+    ],
+    [
+      5,
+      1
+    ],
+    [
+      5,
+      2
+    ],
+    [
+      5,
+      3
+    ],
+    [
+      5,
+      4
+    ],
+    [
+      5,
+      6
+    ],
+    [
+      5,
+      7
+    ],
+    [
+      6,
+      0
+    ],
+    [
+      6,
+      1
+    ],
+    [
+      6,
+      2
+    ],
+    [
+      6,
+      3
+    ],
+    [
+      6,
+      4
+    ],
+    [
+      6,
+      5
+    ],
+    [
+      6,
+      7
+    ],
+    [
+      7,
+      0
+    ],
+    [
+      7,
+      1
+    ],
+    [
+      7,
+      2
+    ],
+    [
+      7,
+      3
+    ],
+    [
+      7,
+      4
+    ],
+    [
+      7,
+      5
+    ],
+    [
+      7,
+      6
+    ]
+  ],
+  "peer_access_required": false,
+  "topology": "\t\u001b[4mGPU0\tGPU1\tGPU2\tGPU3\tGPU4\tGPU5\tGPU6\tGPU7\tNIC0\tNIC1\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u001b[0m\nGPU0\t X \tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\t0-31,64-95\t0\t\tN/A\nGPU1\tNODE\t X \tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\t0-31,64-95\t0\t\tN/A\nGPU2\tNODE\tNODE\t X \tNODE\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\t0-31,64-95\t0\t\tN/A\nGPU3\tNODE\tNODE\tNODE\t X \tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\t0-31,64-95\t0\t\tN/A\nGPU4\tSYS\tSYS\tSYS\tSYS\t X \tNODE\tNODE\tNODE\tSYS\tSYS\t32-63,96-127\t1\t\tN/A\nGPU5\tSYS\tSYS\tSYS\tSYS\tNODE\t X \tNODE\tNODE\tSYS\tSYS\t32-63,96-127\t1\t\tN/A\nGPU6\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\t X \tNODE\tSYS\tSYS\t32-63,96-127\t1\t\tN/A\nGPU7\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\t X \tSYS\tSYS\t32-63,96-127\t1\t\tN/A\nNIC0\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\t X \tPIX\t\t\t\t\nNIC1\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tPIX\t X \t\t\t\t\n\nLegend:\n\n  X    = Self\n  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)\n  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node\n  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)\n  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)\n  PIX  = Connection traversing at most a single PCIe bridge\n  NV#  = Connection traversing a bonded set of # NVLinks\n\nNIC Legend:\n\n  NIC0: mlx5_0\n  NIC1: mlx5_1\n\n",
+  "nvidia_smi": "index, name, uuid, driver_version, memory.total [MiB]\n0, NVIDIA GeForce RTX 5090, GPU-4eaa69af-8d93-18a4-4204-f0d489eac16d, 595.84, 32607 MiB\n1, NVIDIA GeForce RTX 5090, GPU-bbeb3985-8f87-493b-4665-f951fcc84d11, 595.84, 32607 MiB\n2, NVIDIA GeForce RTX 5090, GPU-47c531f1-3cdf-6618-dffa-d3791f57c474, 595.84, 32607 MiB\n3, NVIDIA GeForce RTX 5090, GPU-45331692-1cbe-95c4-7c96-0f8d61255fbf, 595.84, 32607 MiB\n4, NVIDIA GeForce RTX 5090, GPU-7bcd5575-3386-f89f-a7c7-ae18bf0a2343, 595.84, 32607 MiB\n5, NVIDIA GeForce RTX 5090, GPU-36b8a3a6-1945-f4d3-999b-6bfa97d4ee4d, 595.84, 32607 MiB\n6, NVIDIA GeForce RTX 5090, GPU-f3236115-d02e-e8dc-4c6a-a57ccccf0dfe, 595.84, 32607 MiB\n7, NVIDIA GeForce RTX 5090, GPU-1904ccaa-c7d8-c73e-b136-49a6de3a08ff, 595.84, 32607 MiB\n",
+  "cuda_visible_devices": "0,1,2,3,4,5,6,7",
+  "build_toolkit": {
+    "root": "/usr/local/cuda-12.9",
+    "version": "12.9",
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Tue_May_27_02:21:03_PDT_2025\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0"
+  },
+  "runtime_toolkit": {
+    "root": "/usr/local/cuda-12.9",
+    "version": "12.9",
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Tue_May_27_02:21:03_PDT_2025\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0"
+  },
+  "environment": {
+    "torch": "2.8.0a0+5228986c39.nv25.06",
+    "cuda": "12.9",
+    "nccl": [
+      2,
+      27,
+      3
+    ],
+    "python": "/workspace/venvs/tempname-5090/bin/python",
+    "python_version": "3.12.3 (main, Feb  4 2025, 14:48:35) [GCC 13.3.0]",
+    "cxx11_abi": true
+  },
+  "bf16_and_apex_probe_passed": true,
+  "transport": "rtx5090-nccl-staged-v2",
+  "limitation": "Environment/Apex probes alone do not validate distributed communication or native model kernels",
+  "communication": {
+    "environment": {
+      "NCCL_P2P_DISABLE": "1",
+      "NCCL_VERSION": "2.27.3",
+      "TORCH_NCCL_USE_COMM_NONBLOCKING": "0",
+      "NCCL_SHM_DISABLE": "0",
+      "NCCL_NVLS_ENABLE": "0",
+      "NCCL_DEBUG": "WARN",
+      "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1"
+    },
+    "config_files": {
+      "/etc/nccl.conf": null,
+      "/root/.nccl.conf": null
+    },
+    "nvls_request": "0"
+  },
+  "collective_probe": {
+    "protocol": "rtx5090-nccl-staged-collectives-v2",
+    "run_id": "5e398e4a59f149dbb068a0b3cf7d61a4",
+    "completed": true,
+    "evidence_files": {
+      "nccl-preflight/rank0.json": "c7ee5d371323127a1424e5a220ac70a66499b4d495be9ad964e8aefb1f716743",
+      "nccl-preflight/rank1.json": "3a2656a8ead6debb3e6c520267e247796480ce4e12ccbc3c79961ca0a6126580",
+      "nccl-preflight/rank2.json": "05a77b8ccdf0e79227833daf033f3d50bd2b6b016073d3eb94629dd4478ed059",
+      "nccl-preflight/rank3.json": "37e0af87071c929dd4cd37a19bf2c9e376280244bc87668ccaf7ef2e19404ebd",
+      "nccl-preflight/rank4.json": "62e617ce38cab8aad84889af87075d068bcc7f0daa6c36858ebf9a722117b41d",
+      "nccl-preflight/rank5.json": "7afa6dbefd01c6cc7ed11bcec8a507a4b524692db77976961a1d65e1e1db654a",
+      "nccl-preflight/rank6.json": "429aafa75fc2ce6260a443522f1b2fe149335ad1936d1ca9510cb9191c53808f",
+      "nccl-preflight/rank7.json": "6dd01be02c32412bd715ea91cd45ce474b9788593b9969bf8861e32ac9114f5a",
+      "nccl-preflight/process.log": "83f9debafa67768753a1f2b7fc3d457dbb9de9aa1241d5ead0f75aa2839ebc06",
+      "nccl-preflight/command.json": "1c82e178640ea5e0d08c62dcf9524e7f6c29250341d61774c6d2042356f8b3e5",
+      "preflight-communication.json": "aba91470c579302e12734920d8245d552c023622f8973bf826f07f3832098c61"
+    }
+  }
+}
