@@ -218,26 +218,28 @@ bash tools/h100/phase6/run_mav2.sh \
 
 本地验证：MAV2 全集 **53 项通过、1 项因无 CUDA 跳过**，覆盖默认拒绝、显式放行后的完整 36 窗口控制流程、预检失败保留、两次比较的失败状态汇总及来源冻结；脚本语法与只读预览通过，预览未创建批次。测试中的窗口是 CPU 模拟数据，不是 H100 性能结果。记录见 [validation.json](../../../../outputs/h100/phase6/mav2-quality-continuation-20261031/validation.json)、[tests.log](../../../../outputs/h100/phase6/mav2-quality-continuation-20261031/tests.log)；48 份真实回传记录的质量重算见 [returned-quality.json](../../../../outputs/h100/phase6/mav2-quality-continuation-20261031/returned-quality.json)。
 
-## 8. 后台依次运行 MAV2 和 MA14–MA18
+## 8. 后台依次运行 MAV2 和 MA14–MA20
 
-在 H100 的 `TempName-New` 仓库根目录执行新脚本：
+在 H100 的 `TempName-New` 仓库根目录执行兼容入口（文件名保留，内部已扩展到 MA20）：
 
 ```bash
 bash tools/h100/phase6/run_mav2_then_ma14_ma15_ma16_ma17_ma18.sh --execute
 ```
 
-默认已配置第 7 节的 Flux 构建路径、`--allow-quality-failure` 和每个实验一次比较。执行顺序固定为 **MAV2 → MA14 → MA15 → MA16 → MA17 → MA18**。MAV2 以前台模式运行在后台 supervisor 下，完整计时、profile 和报告结束后，才调用原 `run_ma14_ma15_ma16_ma17_ma18.sh --execute`；原脚本继续等待每个 MA 实验完成，不会与 MAV2 并发占用 GPU。
+默认已配置第 7 节的 Flux 构建路径、`--allow-quality-failure` 和每个实验一次比较。执行顺序固定为 **MAV2 → MA14 → MA15 → MA16 → MA17 → MA18 → MA19 → MA20**。MAV2 以前台模式运行在后台 supervisor 下，完整计时、profile 和报告结束后，才调用`run_ma14_ma15_ma16_ma17_ma18_ma19_ma20.sh --execute`；原脚本继续等待每个 MA 实验完成，不会与 MAV2 并发占用 GPU。
+
+MA14/MA15 保留 MA11 完整训练对照；MA16–MA20 仅测候选完整训练，MA20 保留必要算子校准。单组测量不输出相对 MA11 的加速比，详见 [串行运行说明](../../../../tools/h100/phase6/README-ma14-ma20.md)。
 
 外层 supervisor 双重 fork、创建独立会话、重定向标准输入输出，并确认归属容器 PID 1。终端显示 `Detached and started` 后即可关闭终端或 VS Code，无需额外 `nohup` 或 `&`；容器与机器须保持运行。默认仅预览，加 `--execute` 才会后台执行。
 
-启动时打印总日志目录 `logs/h100/phase6/mav2-then-ma14-ma18-<时间>/`：
+启动时打印总日志目录 `logs/h100/phase6/mav2-then-ma14-ma20-<时间>/`：
 
 - `batch-state.json`：整个队列的状态和当前阶段。
 - `handoff/container-supervisor.log`、`handoff/supervisor.json`：后台进程日志及 PID／会话身份。
 - `mav2.log`、`mav2/`：MAV2 的启动日志和完整批次。
-- `ma14-ma18.log`：原 MA14–MA18 顺序脚本的输出，其中打印各 MA 独立批次的日志目录。
+- `ma14-ma20.log`：原 MA14–MA20 顺序脚本的输出，其中打印各 MA 独立批次的日志目录。
 
-MAV2 的 `completed_with_quality_failure` 会继续启动 MA14–MA18，并保留在最终队列状态中；进程异常或 MAV2 批次未真正完成时停止后续任务，记录失败阶段和退出码，不自动重试。
+MAV2 的 `completed_with_quality_failure` 会继续启动 MA14–MA20，并保留在最终队列状态中；进程异常或 MAV2 批次未真正完成时停止后续任务，记录失败阶段和退出码，不自动重试。
 
 可用 `--out <新目录>` 指定总日志目录、`--flux-build <目录>` 覆盖 MAV2 构建路径、`--trials 2` 让每个实验运行两次比较。`--foreground` 仅供前台诊断，此时关闭终端不再受后台托管保证。
 

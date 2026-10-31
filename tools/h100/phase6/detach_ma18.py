@@ -31,6 +31,8 @@ def arguments(argv=None):
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--trials', type=int, choices=(1, 2), default=1)
+    parser.add_argument('--candidate-only', action='store_true',
+                        help='Measure only this candidate; retain full-model smoke/profile, no MA11 comparison')
     parser.add_argument('--python', type=Path, default=Path(sys.executable))
     parser.add_argument('--megatron', type=Path, default=REPO.parent/'Megatron-LM')
     parser.add_argument('--build-cuda-home', type=Path, default=Path('/usr/local/cuda-12.8'))
@@ -54,6 +56,7 @@ def arguments(argv=None):
 
 
 def controller_hashes():
+    import candidate_fullstep
     import ma18_build
     import ma18_bench
     import ma18_fullstep
@@ -90,6 +93,16 @@ def commands(args):
     runtime = ['--python', str(args.python), '--cuda-home', str(args.cuda_home),
                '--worker-timeout', str(args.worker_timeout)]
     operator, train = args.out/'operator', args.out/'fullstep'
+    if getattr(args, 'candidate_only', False):
+        tasks += [
+            ('fullstep-prepare', cli('candidate_fullstep.py') + ['prepare', str(train),
+                '--experiment', 'ma18', '--build', str(build), '--megatron', str(args.megatron),
+                '--trials', str(args.trials)]),
+            ('fullstep-run', cli('candidate_fullstep.py') + ['run', str(train),
+                '--stage', 'all', *runtime, '--execute']),
+            ('fullstep-profile', cli('candidate_fullstep.py') + ['run', str(train),
+                '--stage', 'profile', *runtime, '--execute'])]
+        return tasks
     tasks += [
         ('operator-prepare', cli('ma18_bench.py') + ['prepare', str(operator), '--build', str(build), '--blocks', str(BLOCKS)]),
         ('operator-timing', cli('ma18_bench.py') + ['run', str(operator), *runtime, '--execute']),
@@ -148,7 +161,12 @@ def check_fullstep(root, trials, profile=False):
 
 def supervise(args):
     hashes = read(args.out/'handoff/controllers.json')
-    windows = args.trials * BLOCKS * len(ARMS)
+    candidate_only = getattr(args, 'candidate_only', False)
+    if candidate_only:
+        from candidate_fullstep import check_complete as check
+    else:
+        check = check_fullstep
+    windows = args.trials * BLOCKS * (1 if candidate_only else len(ARMS))
     state = dict(protocol=PROTOCOL, status='preparing', trials=args.trials, arms=list(ARMS),
         main_contrasts=['F4-cache-zcount-csoftmax-ipcag/F4-cache-zcount-csoftmax'], tuning=tuning(args),
         activation_policy='owned_forward_activation_cache', zero_count_policy='common_fused_optimizer_zero_count',
@@ -159,6 +177,11 @@ def supervise(args):
         increment_over_MA11_validated={arm: False for arm in ARMS[1:]},
         expected_timing_windows=windows, expected_formal_optimizer_steps=windows * STEPS, reports={})
     state_path = args.out/'batch-state.json'
+    state.update(comparison_mode='candidate_only' if candidate_only else 'paired',
+                 standalone_operator_executed=not candidate_only)
+    if candidate_only:
+        state.update(arms=[ARMS[1]], main_contrasts=[], target_percent=None,
+                     softmax_policy='original_ma11_in_candidate')
     env = dict(os.environ, PYTHONNOUSERSITE='1', NCCL_NVLS_ENABLE='0')
     env.setdefault('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7')
     try:
@@ -173,11 +196,11 @@ def supervise(args):
                 state.update(operator_correctness_validated=True, operator_execution_path_validated=True)
                 state['reports']['operator'] = str(args.out/'operator/report.json')
             elif label == 'fullstep-run':
-                result = check_fullstep(args.out/'fullstep', args.trials)
+                result = check(args.out/'fullstep', args.trials)
                 state.update(timing_report_verified=True, statistical_acceptance_status=result['acceptance_status'])
                 state['reports']['fullstep'] = str(args.out/'fullstep/report.json')
             elif label == 'fullstep-profile':
-                result = check_fullstep(args.out/'fullstep', args.trials, profile=True)
+                result = check(args.out/'fullstep', args.trials, profile=True)
                 state.update(fullstep_execution_path_validated=True, acceptance_status=result['acceptance_status'],
                     target_evaluated=result['target_evaluated'], target_validated=result['target_validated'],
                     target_point_observed=result['target_point_observed'],
@@ -201,6 +224,11 @@ def main(argv=None):
         print('PLAN ONLY: no directories, GPU queries, builds or workers.')
         for _, command in commands(args):
             print(shlex.join(command))
+        if getattr(args, 'candidate_only', False):
+            print(f'{ARMS[1]} only; {args.trials*8} windows, {args.trials*400} formal optimizer steps. '
+                  '10 warmup + 50 measured steps/window; candidate full-model smoke and profile retained. '
+                  'No MA11 control, paired-equivalence claim, speedup CI or 2% target.')
+            return
         print(f'F4-cache-zcount-csoftmax / F4-cache-zcount-csoftmax-ipcag only; MA11 in both arms; '
               f'original MA11 softmax in both arms; IPC DMA column AllGather only in candidate; '
               f'{args.trials} trial(s), {args.trials*16} windows, '

@@ -1,5 +1,7 @@
 # H100 单节点 Phase6
 
+MA14–MA20 串行运行使用 [run_ma14_ma15_ma16_ma17_ma18_ma19_ma20.sh](run_ma14_ma15_ma16_ma17_ma18_ma19_ma20.sh)。仅 MA14/MA15 重跑 MA11 完整训练对照，MA16–MA20 仅测候选；MA20 保留必要的算子校准。命令、窗口数及报告口径见 [串行运行说明](README-ma14-ma20.md)。
+
 **MLP＋Attention 五组量化消融使用 [`ablation4.py`](ablation4.py)：[消融实验 4](../../../docs/design/design-h100/消融实验/消融实验4.md)。** Megatron＋量化、固定 Flux 融合 v2、同融合 v2 实现的 A/B，以及消融 3 双缓冲完整版 C；默认单轮 25 个正式窗口。75 的消融 3 五套结果见 [汇总与 74 历史封存](../../../docs/design/design-h100/消融实验/base-phase6-ablation3.md)。
 
 **native＋G0–G6 消融实验使用独立入口：[README-ablation.md](README-ablation.md)。** 它固定 GPT 6.7B/TP8，分别测量 remote_first 与 interleaved，显式支持 BF16、定向、随机同数量及全远端模式。下文仍是原六策略协议，不将其 72 窗口或 4% 验收套用到单项消融。

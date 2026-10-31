@@ -155,6 +155,56 @@ class GraphProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stream changed'):
             self.check(events)
 
+    def test_bounded_cupti_graph_timestamp_overlap_is_reported(self):
+        events = fixture()
+        first = find(events, GEMM)
+        second = find(events, profile.FORWARD_KERNEL)
+        first['dur'] = 1.1
+        second['dur'] = 2.5
+        # The fixture's following nodes must still follow softmax completion.
+        correlation = first['args']['correlation']
+        for event in events:
+            if event['cat'] in profile.DEVICE_CATEGORIES and event['args'].get('correlation') == correlation:
+                event['args'].update(device=2, context=1)
+                if event['ts'] > second['ts']:
+                    event['ts'] += 3
+        # 40 ns is below both the 500 ns absolute and 5% relative bounds.
+        first['dur'] = second['ts'] - first['ts'] + .04
+        result = self.check(events)['timestamp_order_check']
+        self.assertEqual(result['tolerated_overlap_count'], 1)
+        self.assertAlmostEqual(result['max_observed_overlap_us'], .04)
+
+    def test_observed_graph_pair_accepts_95ns_but_rejects_real_overlap(self):
+        # Geometry/time scale from the failing rank2 graph replay; no GPU run.
+        def pair(overlap):
+            args = dict(stream=7, device=2, context=1, correlation=2098006)
+            return [dict(cat='kernel', name=GEMM, ts=1000, dur=19.04, args=args.copy()),
+                    dict(cat='kernel', name=SCALE, ts=1019.04-overlap, dur=2.592, args=args.copy())]
+        work = pair(.095)
+        stream, recorded = profile._same_stream_order(work, work)
+        self.assertEqual(stream, 7)
+        self.assertAlmostEqual(recorded[0]['observed_overlap_us'], .095)
+        for overlap in (.14, 1.0):
+            work = pair(overlap)
+            with self.assertRaisesRegex(ValueError, 'dependency order'):
+                profile._same_stream_order(work, work)
+
+    def test_timestamp_exception_cannot_cross_launch_or_device_or_staging(self):
+        args = dict(stream=7, device=2, context=1, correlation=10)
+        original = [dict(cat='kernel', name=GEMM, ts=0, dur=20, args=args.copy()),
+                    dict(cat='kernel', name=SCALE, ts=19.9, dur=3, args=args.copy())]
+        for key in ('correlation', 'device', 'context', 'stream'):
+            events = copy.deepcopy(original)
+            events[1]['args'][key] += 1
+            with self.assertRaises(ValueError):
+                profile._same_stream_order(events, events)
+        events = copy.deepcopy(original)
+        events[1]['cat'] = 'gpu_memcpy'
+        with self.assertRaises(ValueError):
+            profile._same_stream_order(events, events)
+        with self.assertRaises(ValueError):
+            profile._same_stream_order(original, [original[0]])
+
     def test_missing_clone_is_not_free_performance(self):
         events = fixture()
         events.remove(find(events, 'aten::clone'))

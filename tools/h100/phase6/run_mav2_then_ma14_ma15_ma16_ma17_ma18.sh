@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# One detached supervisor owns MAV2, then the existing MA14 -> MA18 sequence.
+# Compatibility filename: one detached supervisor owns MAV2, then MA14 -> MA20.
 mav2_sequence_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 if [[ -f "$mav2_sequence_repo/outputs/h100/container-recovery/env.sh" ]]; then
     source "$mav2_sequence_repo/outputs/h100/container-recovery/env.sh"

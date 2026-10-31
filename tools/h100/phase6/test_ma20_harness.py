@@ -208,6 +208,64 @@ assert m.ARMS[-1]=='F4-cache-zcount-csoftmax'
         self.assertNotIn('paired',result)
         self.assertFalse(result['positive_increment'])
 
+    def test_single_candidate_keeps_operator_selection_and_has_no_baseline(self):
+        args=launcher.arguments(['--candidate-only'])
+        self.assertIn('operator-calibrate',dict(launcher.commands(args)))
+        self.assertIn('--candidate-only',dict(launcher.commands(args,'Q28'))['fullstep-prepare'])
+        with self.assertRaisesRegex(ValueError,'does not borrow'):
+            launcher.arguments(['--candidate-only','--reuse-ma11','--reuse-batch','/tmp/old','--candidate','Q28'])
+        with tempfile.TemporaryDirectory() as temp:
+            base=Path(temp);bank=base/'bank';bank.mkdir();root=base/'fullstep'
+            write(bank/'ma20-plan.json',self.bundle)
+            write(bank/'tuning.json',experiment.full.bench.validate_tuning(None))
+            write(bank/experiment.builder.MANIFEST,{})
+            decision=dict(completed=True,candidate='Q28',bundle_sha256=sha(bank/'ma20-plan.json'),
+                          build_manifest_sha256=sha(bank/experiment.builder.MANIFEST))
+            selection=base/'selection.json';write(selection,decision)
+            args=argparse.Namespace(root=root,build=bank,selection=selection,candidate='Q28',
+                                    megatron=base/'megatron',trials=2,candidate_only=True)
+            with patch.object(experiment.builder,'verify'), \
+                 patch.object(experiment,'libraries',side_effect=lambda bank,arm:dict(root='/CPU-FIXTURE/'+arm,files={})), \
+                 patch.object(experiment.full,'snapshot_megatron',return_value={}), \
+                 patch('ma20_probe.verify_selection',return_value=decision):
+                experiment.prepare(args)
+            plan=experiment.verify(root,offline=True)
+            self.assertEqual(plan['comparison_mode'],'candidate_only')
+            self.assertEqual(plan['arms'],['Q28'])
+            self.assertFalse((root/'arms/MA11').exists())
+            self.assertFalse((root/'reused-ma11.json').exists())
+            for stage,count in [('preflight',1),('profile',1),('timing',16)]:
+                work=list(experiment.jobs(plan,stage))
+                self.assertEqual(len(work),count)
+                self.assertEqual({job['arm'] for job in work},{'Q28'})
+
+    def test_single_candidate_report_has_no_speedup_or_borrowed_ma11(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            plan=dict(run_id='CPU-FIXTURE',candidate='Q28',arms=['Q28'],trials=1,
+                      schedule=experiment.schedule('Q28',candidate_only=True),
+                      comparison_mode='candidate_only',arm_roots={'Q28':str(root/'Q28')})
+            write(root/'operator-selection.json',{})
+            write(root/'ma20-plan.json',self.bundle)
+            rows=[dict(elapsed_seconds=22.5,losses=[1.]*50,grad_norms=[2.]*50) for _ in range(8)]
+            with patch.object(experiment,'verify',return_value=plan), \
+                 patch.object(experiment,'preflight',return_value=dict(files={},rank_identities=[])), \
+                 patch.object(experiment,'profile_summary',return_value=dict(execution_validated=True)), \
+                 patch.object(experiment,'window',return_value=rows), \
+                 patch.object(experiment,'validate_operator_identity'), \
+                 patch.object(experiment.full,'identity',return_value=[]), \
+                 patch.object(experiment.full.bench,'paired',side_effect=AssertionError('not paired')):
+                result=experiment.report(root)
+            self.assertEqual(result['formal_optimizer_steps'],400)
+            self.assertEqual(result['timing_rank_records'],64)
+            self.assertEqual(result['executed_arms'],['Q28'])
+            self.assertNotIn('reused_ma11',result)
+            self.assertFalse(result['performance_increment_over_MA11_validated'])
+            self.assertEqual(result['paired_trajectory_drift'],[])
+            self.assertEqual(result['comparisons']['compare1']['mean_ms'],{'Q28':450.})
+            self.assertNotIn('paired',result['comparisons']['compare1'])
+            self.assertNotIn('MA11 ms',(root/'report.md').read_text())
+
     def test_candidate_only_report_counts_only_new_work_and_labels_old_ma11(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);subroot=root/'Q112';subroot.mkdir()

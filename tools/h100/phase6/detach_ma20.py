@@ -30,6 +30,8 @@ def arguments(argv=None):
                    help='Manually choose the fullstep arm with --reuse-batch; preserve the original selection')
     p.add_argument('--reuse-ma11',action='store_true',
                    help='With --reuse-batch and --candidate, run only the candidate and compare to saved MA11 timing')
+    p.add_argument('--candidate-only',action='store_true',
+                   help='Keep operator calibration, but run only the selected fullstep candidate without an MA11 comparison')
     p.add_argument('--jobs',type=int,default=2);p.add_argument('--worker-timeout',type=int,default=1800)
     p.add_argument('--execute',action='store_true');p.add_argument('--foreground',action='store_true')
     args=p.parse_args(argv)
@@ -38,6 +40,8 @@ def arguments(argv=None):
     require(not args.candidate or args.reuse_batch,'--candidate requires --reuse-batch')
     require(not args.reuse_ma11 or (args.reuse_batch and args.candidate),
             '--reuse-ma11 requires --reuse-batch and --candidate')
+    require(not (args.reuse_ma11 and args.candidate_only),
+            '--candidate-only does not borrow historical MA11 timing')
     require(not (args.reuse_batch and args.ma11_build),'--reuse-batch cannot use --ma11-build')
     if args.out is None:
         stamp=datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
@@ -76,6 +80,7 @@ def commands(args,candidate=None):
     else:
         flags=['--manual-candidate'] if args.candidate else []
         if args.reuse_ma11:flags+=['--reuse-ma11-from',str(args.reuse_batch/'fullstep')]
+        if getattr(args,'candidate_only',False):flags+=['--candidate-only']
         tasks.append(('fullstep-prepare',cli('ma20_experiment.py')+['prepare',str(args.out/'fullstep'),
             '--build',str(bank),'--selection',str(operator_selection(args)),
             '--candidate',candidate,'--megatron',str(args.megatron),'--trials',str(args.trials),*flags]))
@@ -101,6 +106,8 @@ def supervise(args):
     env.setdefault('CUDA_VISIBLE_DEVICES','0,1,2,3,4,5,6,7')
     state=dict(protocol=PROTOCOL,status='preparing',stage='build',candidate=None,
                fullstep_executed=False,increment_over_MA11_validated=False)
+    if getattr(args,'candidate_only',False):
+        state.update(comparison_mode='candidate_only',ma11_fullstep_executed=False)
     if args.reuse_batch:
         state.update(stage='reuse-operator',reused_batch=str(args.reuse_batch),
                      build_reused=True,operator_jobs_executed=False)
@@ -132,7 +139,7 @@ def supervise(args):
         for label,command in commands(args,candidate):invoke(label,command)
         result=ma20_experiment.report(args.out/'fullstep',save=False)
         require(result==read(args.out/'fullstep/report.json'),'Fullstep report differs from raw evidence')
-        arms=1 if args.reuse_ma11 else 2
+        arms=1 if args.reuse_ma11 or getattr(args,'candidate_only',False) else 2
         require(result['formal_optimizer_steps']==args.trials*400*arms and
                 result['timing_rank_records']==args.trials*64*arms,'Incomplete fullstep measurement')
         state.update(status='completed',stage='done',fullstep_executed=True,
@@ -162,12 +169,15 @@ def main(argv=None):
             print('No compilation or operator jobs.')
         if args.reuse_ma11:
             print('Run only',args.candidate,'; reuse saved MA11 timing for a descriptive cross-batch comparison.')
+        if args.candidate_only:
+            print('Keep MA20 operator calibration/heldout; run only the selected fullstep candidate. '
+                  'No MA11 fullstep, historical timing, paired CI or speedup claim.')
         if args.candidate:
             print('Manual fullstep candidate:',args.candidate,'; original operator selection is retained.')
         else:
             print('Only a candidate selected by training and independently confirmed by heldout proceeds:')
         for _,command in commands(args,args.candidate or 'SELECTED_Q'):print(shlex.join(command))
-        windows='8 candidate-only windows/trial' if args.reuse_ma11 else '8 complete paired blocks/trial'
+        windows='8 candidate-only windows/trial' if args.reuse_ma11 or args.candidate_only else '8 complete paired blocks/trial'
         print(f'{args.trials} independent fullstep trial(s), {windows}, '
               '10 warmup + 50 measured optimizer steps/window. No candidate means stop with no_candidate; '
               'all negative fullstep windows are retained. Changed masks require independent codec checks; '

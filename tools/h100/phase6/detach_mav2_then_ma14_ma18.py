@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run MAV2 with quality-failure continuation, then MA14 -> MA15 -> MA16 -> MA17 -> MA18.
+"""Run MAV2 with quality-failure continuation, then MA14 through MA20.
 
 Preview unless --execute. One supervisor detaches under container PID 1 and
 waits for each foreground child to finish, including its profiles and reports.
@@ -20,8 +20,8 @@ from common import HERE, REPO, read, require, write
 
 DEFAULT_FLUX_BUILD = REPO/'logs/h100/phase6/mav2-three-arm-1x-50steps-20261030-215237-552847/flux-build'
 MAV2_SCRIPT = HERE/'run_mav2.sh'
-MA_SCRIPT = HERE/'run_ma14_ma15_ma16_ma17_ma18.sh'
-ORDER = ['mav2', 'ma14', 'ma15', 'ma16', 'ma17', 'ma18']
+MA_SCRIPT = HERE/'run_ma14_ma15_ma16_ma17_ma18_ma19_ma20.sh'
+ORDER = ['mav2', 'ma14', 'ma15', 'ma16', 'ma17', 'ma18', 'ma19', 'ma20']
 
 
 def arguments(argv=None):
@@ -36,7 +36,7 @@ def arguments(argv=None):
     args = p.parse_args(argv)
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO/'logs/h100/phase6'/('mav2-then-ma14-ma18-'+stamp)
+        args.out = REPO/'logs/h100/phase6'/('mav2-then-ma14-ma20-'+stamp)
     args.out = args.out.expanduser().resolve()
     args.flux_build = args.flux_build.expanduser().resolve()
     return args
@@ -48,7 +48,7 @@ def commands(args):
                   '--allow-quality-failure', '--foreground', '--trials', str(args.trials),
                   '--out', str(args.out/'mav2'), '--execute']),
         # This script already runs every MA child with --foreground and waits.
-        ('ma14-ma18', ['bash', str(MA_SCRIPT), '--trials', str(args.trials), '--execute']),
+        ('ma14-ma20', ['bash', str(MA_SCRIPT), '--trials', str(args.trials), '--execute']),
     ]
 
 
@@ -73,7 +73,7 @@ def supervise(args):
                 require(child['status'] in ('completed', 'completed_with_quality_failure') and
                         child['stage'] == 'done' and child['allow_quality_failure'] is True and
                         child['trials'] == args.trials,
-                        'MAV2 did not finish its full batch; MA14-MA18 will not start')
+                        'MAV2 did not finish its full batch; MA14-MA20 will not start')
                 stage.update(status=child['status'], quality_within_pairs=child['quality_within_pairs'])
             write(state_path, state)
         status = state['stages']['mav2']['status']
@@ -115,7 +115,7 @@ def main(argv=None):
         print('Detached and started. You may close the terminal/VS Code; keep the container and host running.', flush=True)
         print('Status:', args.out/'batch-state.json', flush=True)
         print('MAV2 log:', args.out/'mav2.log', flush=True)
-        print('MA14-MA18 log:', args.out/'ma14-ma18.log', flush=True)
+        print('MA14-MA20 log:', args.out/'ma14-ma20.log', flush=True)
     except Exception as error:
         state = read(args.out/'batch-state.json')
         state.update(status='failed', error=f'{type(error).__name__}: {error}')

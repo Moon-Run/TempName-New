@@ -96,31 +96,51 @@ class SequenceTests(unittest.TestCase):
             sequence.main(self.argv())
         self.assertFalse(self.out.exists())
         self.assertIn('--allow-quality-failure --foreground', output.getvalue())
-        self.assertIn('mav2 -> ma14 -> ma15 -> ma16 -> ma17 -> ma18', output.getvalue())
+        self.assertIn('mav2 -> ma14 -> ma15 -> ma16 -> ma17 -> ma18 -> ma19 -> ma20', output.getvalue())
 
     def test_defaults_match_requested_commands(self):
         args = sequence.arguments([])
         self.assertEqual(args.flux_build, sequence.DEFAULT_FLUX_BUILD)
         self.assertEqual(args.trials, 1)
         steps = sequence.commands(args)
-        self.assertEqual([name for name, _ in steps], ['mav2', 'ma14-ma18'])
+        self.assertEqual([name for name, _ in steps], ['mav2', 'ma14-ma20'])
         self.assertIn('--foreground', steps[0][1])
-        self.assertNotIn('--foreground', steps[1][1])  # The suite applies it to all five children.
+        self.assertNotIn('--foreground', steps[1][1])  # The suite applies it to all seven children.
 
-    def test_all_six_finish_in_order(self):
+    def test_all_eight_finish_in_order(self):
         result = self.run_foreground()
         self.assertEqual(result['status'], 'completed')
         self.assertEqual([(e['role'], e['phase']) for e in self.events()],
                          [(role, phase) for role in sequence.ORDER for phase in ('start', 'end')])
         self.assertTrue((self.out/'mav2.log').is_file())
-        self.assertTrue((self.out/'ma14-ma18.log').is_file())
+        self.assertTrue((self.out/'ma14-ma20.log').is_file())
+        for event in self.events():
+            if event['role'].startswith('ma') and event['role'] != 'mav2':
+                number = int(event['role'][2:])
+                self.assertEqual('--candidate-only' in event['args'], number >= 16)
+
+    def test_ma19_failure_stops_before_ma20(self):
+        self.env['SEQUENCE_TEST_FAIL'] = 'ma19'
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_foreground()
+        self.assertEqual(self.events()[-1]['role'], 'ma19')
+        self.assertFalse(any(event['role'] == 'ma20' for event in self.events()))
+
+    def test_old_ma_sequence_name_forwards_to_the_new_seven_experiment_entry(self):
+        old = self.ma.with_name('run_ma14_ma15_ma16_ma17_ma18.sh')
+        shutil.copyfile(sequence.HERE / old.name, old)
+        result = subprocess.run(['bash', str(old), '--execute'],
+                                env=dict(os.environ, **self.env), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([event['role'] for event in self.events() if event['phase'] == 'start'],
+                         sequence.ORDER[1:])
 
     def test_quality_failure_still_runs_all_ma_experiments(self):
         self.env['SEQUENCE_TEST_QUALITY'] = 'failed'
         result = self.run_foreground()
         self.assertEqual(result['status'], 'completed_with_quality_failure')
-        self.assertEqual(result['stages']['ma14-ma18']['status'], 'completed')
-        self.assertEqual(self.events()[-1]['role'], 'ma18')
+        self.assertEqual(result['stages']['ma14-ma20']['status'], 'completed')
+        self.assertEqual(self.events()[-1]['role'], 'ma20')
 
     def test_mav2_process_failure_stops_before_ma14(self):
         self.env['SEQUENCE_TEST_FAIL'] = 'mav2'
@@ -129,7 +149,7 @@ class SequenceTests(unittest.TestCase):
         state = read(self.out/'batch-state.json')
         self.assertEqual(state['status'], 'failed')
         self.assertEqual(state['stages']['mav2']['exit_code'], 7)
-        self.assertEqual(state['stages']['ma14-ma18']['status'], 'pending')
+        self.assertEqual(state['stages']['ma14-ma20']['status'], 'pending')
 
     def test_incomplete_mav2_is_not_mistaken_for_completion(self):
         self.env['SEQUENCE_TEST_INCOMPLETE'] = '1'
@@ -141,8 +161,8 @@ class SequenceTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError): self.run_foreground()
         self.assertEqual(self.events()[-1]['role'], 'ma16')
         state = read(self.out/'batch-state.json')
-        self.assertEqual(state['stage'], 'ma14-ma18')
-        self.assertEqual(state['stages']['ma14-ma18']['exit_code'], 7)
+        self.assertEqual(state['stage'], 'ma14-ma20')
+        self.assertEqual(state['stages']['ma14-ma20']['exit_code'], 7)
 
     def test_detach_failure_is_recorded(self):
         with mock.patch.object(sequence.launcher, 'detach', side_effect=RuntimeError('readiness failed')), \

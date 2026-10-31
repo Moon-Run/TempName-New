@@ -16,6 +16,13 @@ BACKWARD_MARKER = 'ma15.attention.graph.backward'
 FORWARD_KERNEL = ma11_profile.FORWARD_KERNEL
 BACKWARD_KERNEL = ma11_profile.BACKWARD_KERNEL
 DEVICE_CATEGORIES = ('kernel', 'gpu_memcpy', 'gpu_memset')
+# CUPTI end-timestamp collection can show sub-microsecond apparent overlap
+# even for ordered kernels in one stream. NVIDIA describes overlaps normally
+# below 500 ns: https://forums.developer.nvidia.com/t/73333/2
+# Keep this exception local to nodes owned by the SAME graph launch, with
+# matching device/context/stream. Staging and replay boundaries stay strict.
+GRAPH_KERNEL_TIMESTAMP_TOLERANCE_US = .5
+GRAPH_KERNEL_TIMESTAMP_MAX_FRACTION = .05
 
 
 def interval_union_ms(events):
@@ -58,9 +65,34 @@ def _family(event):
     return 'unexpected'
 
 
-def _same_stream_order(work):
+def _same_stream_order(work, graph):
     work = sorted(work, key=lambda e: e['ts'])
-    return ma11_profile._stream_path(work, 'MA15 attention graph and staging copies')
+    message = 'MA15 attention graph and staging copies'
+    require(bool(work), message + ': no GPU work')
+    stream = work[0]['args'].get('stream')
+    require(stream is not None and all(e['args'].get('stream') == stream for e in work),
+            message + ': compute stream changed')
+    graph_ids = {id(e) for e in graph}
+    tolerated = []
+    for left, right in zip(work, work[1:]):
+        overlap = end(left) - right['ts']
+        if overlap <= .01:
+            continue
+        a, b = left.get('args', {}), right.get('args', {})
+        limit = min(GRAPH_KERNEL_TIMESTAMP_TOLERANCE_US,
+                    GRAPH_KERNEL_TIMESTAMP_MAX_FRACTION * min(left['dur'], right['dur']))
+        same_launch = (id(left) in graph_ids and id(right) in graph_ids and
+                       left['cat'] == right['cat'] == 'kernel' and
+                       a.get('correlation') is not None and a.get('correlation') == b.get('correlation') and
+                       all(a.get(key) is not None and a.get(key) == b.get(key)
+                           for key in ('device', 'context')))
+        require(same_launch and left['ts'] < right['ts'] and overlap <= limit,
+                message + ': GPU dependency order changed')
+        tolerated.append(dict(correlation=a['correlation'], device=a['device'], context=a['context'],
+                              stream=stream, predecessor=left['name'], successor=right['name'],
+                              predecessor_ts_us=left['ts'], successor_ts_us=right['ts'],
+                              observed_overlap_us=overlap, allowed_overlap_us=limit))
+    return stream, tolerated
 
 
 def _rng_replay_prologue(index, scope, launch):
@@ -133,7 +165,7 @@ def trace_attention_graph_records(events, arm):
             'Attention four-microbatch forward/backward order changed')
     index = Index(events)
     seen_launch, seen_work, graph_work, staging_work, streams = set(), set(), [], [], set()
-    rng_cpu, rng_work = [], []
+    rng_cpu, rng_work, timestamp_overlaps = [], [], []
     phase_counts, signatures = {}, {}
     for scope, phase in phases:
         owned_launches = [e for e in launches if contains(scope, e)]
@@ -199,7 +231,9 @@ def trace_attention_graph_records(events, arm):
         require(max(end(e) for e in input_work) <= min(e['ts'] for e in fill_work) + .01 and
                 max(end(e) for e in fill_work) <= graph[0]['ts'] + .01,
                 'RNG replay prologue device fills must follow input copies and precede graph execution')
-        streams.add(_same_stream_order(work))
+        stream, overlaps = _same_stream_order(work, graph)
+        streams.add(stream)
+        timestamp_overlaps.extend(dict(item, phase=phase) for item in overlaps)
         require(not (seen_work & {id(e) for e in work}), 'Attention GPU work was attributed twice')
         seen_work.update(id(e) for e in work)
         graph_work.extend(graph)
@@ -227,6 +261,15 @@ def trace_attention_graph_records(events, arm):
                 original_softmax_calls=0, original_softmax_backward_calls=0,
                 attention_view_replays=0, copy_slices_calls=4,
                 graph_nodes_per_replay=phase_counts, kernel_signatures=signatures,
+                timestamp_order_check=dict(
+                    strict_boundary_tolerance_us=.01,
+                    graph_kernel_tolerance_us=GRAPH_KERNEL_TIMESTAMP_TOLERANCE_US,
+                    max_fraction_of_shorter_kernel=GRAPH_KERNEL_TIMESTAMP_MAX_FRACTION,
+                    tolerated_overlap_count=len(timestamp_overlaps),
+                    max_observed_overlap_us=max((e['observed_overlap_us'] for e in timestamp_overlaps), default=0),
+                    tolerated_overlaps=timestamp_overlaps,
+                    note='Bounded CUPTI timestamp overlap within one correlated graph launch; '
+                         'not evidence of physical kernel concurrency. Staging/RNG/replay boundaries remain strict.'),
                 graph_gpu_work_ms=sum(e['dur'] for e in graph_work) / 1000,
                 staging_gpu_work_ms=sum(e['dur'] for e in staging_work) / 1000,
                 graph_and_staging_gpu_union_ms=interval_union_ms(graph_work + staging_work),
