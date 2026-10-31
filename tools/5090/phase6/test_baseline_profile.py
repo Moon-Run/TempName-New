@@ -9,9 +9,15 @@ profile = load('profile')
 
 GEMM = ('cutlass::Kernel2<flux_bf16_bf16_void_bf16_fp32_fp32_sm80_a100_'
         'reducescatter_rcr_gemmv2_false_false_intranode>')
+TE_NORM = ('void transformer_engine::normalization::ln_fwd_tuned_kernel<'
+           'transformer_engine::normalization::Kernel_traits<__nv_bfloat16, '
+           '__nv_bfloat16, __nv_bfloat16, float, unsigned int, 4096u, '
+           '1u, 1u, 4u, 16u, transformer_engine::normalization::Kernel_traits_base<'
+           '4096u, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, float, unsigned int, '
+           '128u> > >(transformer_engine::normalization::ForwardKernelParams)')
 
 
-def fixture(arm='ma11', memcpy=False, multiple_nccl=False):
+def fixture(arm='ma11', memcpy=False, multiple_nccl=False, te_final=False):
     events = []
     correlation = 0
     fused = arm in p.CR3_FAMILY
@@ -77,8 +83,11 @@ def fixture(arm='ma11', memcpy=False, multiple_nccl=False):
                 device(cpu+64+offset*4, next_gpu, 'vectorized_elementwise_kernel<AddFunctor<c10::BFloat16>>',
                        external=external)
                 next_gpu += 2
-        host('cpu_op', 'FusedLayerNormAffineFunction', cpu+71, 4, 40000+number)
-        device(cpu+72, next_gpu, 'cuApplyLayerNorm<c10::BFloat16>', duration=2, external=40000+number)
+        final_norm = te_final and role == 'mlp' and (number+1) % 32 == 0
+        host('cpu_op', '_OperationFuserAutogradFunction' if final_norm else
+             'FusedLayerNormAffineFunction', cpu+71, 4, 40000+number)
+        device(cpu+72, next_gpu, TE_NORM if final_norm else 'cuApplyLayerNorm<c10::BFloat16>',
+               duration=2, external=40000+number)
     return events
 
 
@@ -119,6 +128,55 @@ class StagedProfiles(unittest.TestCase):
         result = profile.staged_projection_records(fixture(memcpy=True, multiple_nccl=True), 'ma11', 0)
         self.assertEqual(result['attn']['nccl_memcpy_events'], 256)
         self.assertEqual(result['attn']['nccl_kernels'], 256)
+
+    def test_te_final_layernorm_preserves_all_eight_consumer_paths(self):
+        for arm in p.ARMS[:-1]:
+            with self.subTest(arm=arm):
+                result = profile.staged_projection_records(fixture(arm, te_final=True), arm, 0)
+                self.assertEqual(result['attn']['layernorm_backends'], {'apex': 128})
+                self.assertEqual(result['mlp']['layernorm_backends'],
+                                 {'apex': 124, 'transformer_engine': 4})
+
+    def test_te_final_layernorm_requires_bf16_4096_forward_kernel(self):
+        for old, new in [('ln_fwd_tuned_kernel', 'ln_bwd_tuned_kernel'),
+                         ('ln_fwd_tuned_kernel', 'rmsnorm_fwd_tuned_kernel'),
+                         ('__nv_bfloat16', 'float'), ('4096u', '2048u')]:
+            with self.subTest(mutation=new):
+                events = fixture(te_final=True)
+                norm = find(events, 'ln_fwd_tuned_kernel')
+                norm['name'] = norm['name'].replace(old, new)
+                with self.assertRaisesRegex(ValueError, 'immediately feed LayerNorm'):
+                    profile.staged_projection_records(events, 'ma11', 0)
+
+    def test_te_layernorm_cannot_replace_an_inner_norm(self):
+        for role in ('attn', 'mlp'):
+            events = fixture(te_final=True)
+            norms = [event for event in events if event['cat'] == 'kernel' and
+                     'cuApplyLayerNorm' in event['name']]
+            norms[0 if role == 'attn' else 128]['name'] = TE_NORM
+            with self.subTest(role=role), self.assertRaisesRegex(ValueError, 'final MLP'):
+                profile.staged_projection_records(events, 'ma11', 0)
+
+    def test_te_final_layernorm_requires_exact_owner_and_launch(self):
+        for mutation in ('name', 'external', 'launch', 'extra_work'):
+            events = fixture(te_final=True)
+            norm = find(events, 'ln_fwd_tuned_kernel')
+            owner = find(events, '_OperationFuserAutogradFunction', 'cpu_op')
+            if mutation == 'name':
+                owner['name'] = 'FusedLayerNormAffineFunction'
+            elif mutation == 'external':
+                norm['args']['External id'] += 1
+            elif mutation == 'launch':
+                launch = next(event for event in events if event['cat'] == 'cuda_runtime'
+                              and event['args']['correlation'] == norm['args']['correlation'])
+                launch['ts'] = owner['ts'] + owner['dur'] + 1
+            else:
+                extra = copy.deepcopy(norm)
+                extra.update(name='unexpected_fused_work', ts=norm['ts']+3)
+                events.append(extra)
+            message = 'unexpected device work' if mutation == 'extra_work' else 'CPU/launch association'
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, message):
+                profile.staged_projection_records(events, 'ma11', 0)
 
     def test_missing_marker_or_pack_rejected(self):
         for token, cat in ((profile.PRODUCE, 'user_annotation'), (profile.EXCHANGE, 'user_annotation'),

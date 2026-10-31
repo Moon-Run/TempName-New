@@ -2,9 +2,9 @@
 
 更新：2026-10-31。目标机器为**单机 8×RTX 5090，TP8、DP1**。本页定义九组同场对比，并提供与 `bash tools/h100/phase6/run_ma19.sh --execute` 相同使用方式的 [5090 入口](../../../tools/5090/phase6/run_baseline.sh)。
 
-**当前状态：代码改为不依赖 P2P 的 NCCL staging v2，尚无 RTX 5090 训练实测结果。** 2026-10-30 用户回传的官方 `nvcr.io/nvidia/pytorch:25.06-py3` 临时容器检查确认，8 张 RTX 5090 均为 SM120 / 170 SM，但全部 56 条跨卡有向 peer-access 链路不可用。新的投影路径为 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**，不再把其他 GPU 的地址交给 CUDA kernel。P2P 矩阵仍记录在预检证据中，但不再要求链路可用。
+**当前状态：NCCL staging v2 已通过 RTX 5090 九组完整模型 smoke，尚无正式计时结果。** 2026-10-30 用户回传的官方 `nvcr.io/nvidia/pytorch:25.06-py3` 临时容器检查确认，8 张 RTX 5090 均为 SM120 / 170 SM，但全部 56 条跨卡有向 peer-access 链路不可用。新的投影路径为 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**，不再把其他 GPU 的地址交给 CUDA kernel。P2P 矩阵仍记录在预检证据中，但不再要求链路可用。
 
-本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。**最新回传 `20261031-210050-693717` / `20261031-210455-861085` 已通过独立 MA11 softmax 逐位自检及八组 TACO 原生传输 smoke，随后在完整模型 MA11 首轮前向发生 CUDA OOM。** 当前增加同 stream 临时 staging scratch 复用和严格旧构建迁移；修复后的完整模型检查和正式计时仍待目标机执行，不把 H100 耗时填作 5090 耗时。
+本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。**最新回传 `20261031-215027-387404` 已通过独立 MA11 softmax 逐位自检、八组 TACO 原生传输 smoke 和九组完整模型 smoke；MA11 profile 的八个 GPU worker 也已完成，随后 CPU 端 profile 检查器误拒绝最终 LayerNorm。此次不是 CUDA OOM。** 之前两批 OOM 与共享 scratch 修复见下文；正式计时仍待目标机完成，不把 smoke/profile 或 H100 耗时填作 5090 正式耗时。
 
 ## 1. 对比目标与 H100 参考
 
@@ -111,7 +111,38 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 原生 smoke 新增两个实例的连续交替提交检查：核对五项 scratch 共享、双 slot 分离、接收 packet/mask/native handle 私有、先前输出不被覆盖，以及关闭一个实例后另一实例仍能正确执行。逐卡预检新增 CUDA free/total/used 和本进程 Torch allocated/reserved；后续预检失败仍保留已采集快照。`nvidia-smi` 的计算进程列表为空不能单独证明显存空闲，快照也只是当时观测。
 
-本次修复在无 GPU 的开发环境执行 `python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**93 项测试全部通过**，另通过入口预览与 `git diff --check`。测试覆盖冻结训练/计时 AST、九组报告、SM120 softmax 编译、共享 scratch 生命周期以及旧构建迁移/回滚。**尚未在目标 RTX 5090 上运行新的共享 scratch smoke 或完整模型**，实际可运行性及峰值以重跑结果为准。
+该次共享 scratch 修复在无 GPU 的开发环境执行 `python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**93 项测试全部通过**，另通过入口预览与 `git diff --check`。测试覆盖冻结训练/计时 AST、九组报告、SM120 softmax 编译、共享 scratch 生命周期以及旧构建迁移/回滚。当时尚未实机执行；后续 `20261031-215027-387404` 已通过共享 scratch 原生 smoke 和九组完整模型检查，结果如下。
+
+### 最新 profile 检查器兼容性故障（2026-10-31）
+
+证据目录为 `Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261031-215027-387404/`。`preflight.json` 的 `completed=true` 且九组均为 `true`；九组 smoke 共 72 个 rank 记录和 MA11 profile 的 8 个 rank 记录全部 `passed=true`、`completed=true`。离线重新执行逐 rank 校验、初始硬件/软件/权重/RNG/输入身份检查及同量化策略组的 loss、梯度、参数轨迹比较，也全部通过。没有正式 timing 窗口。
+
+`handoff/supervisor.log` 在 `STAGE profile-ma11` 后报 `ValueError: Decoder/consumer does not immediately feed LayerNorm`。实际 trace 中，每 rank 的 256 次投影后有 252 次接 Apex `cuApplyLayerNorm`；另外 4 次是每个 microbatch 最后一层 MLP，接 Transformer Engine `transformer_engine::normalization::ln_fwd_tuned_kernel`，实际 CPU owner 为 `_OperationFuserAutogradFunction`。旧检查器只认识 Apex 的 kernel 名和 `FusedLayerNormAffineFunction` owner，所以在 GPU worker 正常完成后拒绝了最终 LayerNorm。这是检查器兼容问题，不是 decoder 少算 LayerNorm，也不是显存分配失败。
+
+继续离线重放还发现两项旧 H100 检查条件不适用于当前目标环境：
+
+- **同步 NCCL 的 stream：** 目标 PyTorch `5228986c39` 将 `asyncOp=false` 的集合通信提交到当前计算 stream，异步调用仍使用独立 NCCL stream；这与本批 trace 一致。[对应版本 ProcessGroupNCCL 源码](https://github.com/pytorch/pytorch/blob/5228986c39/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp#L3186) 因此仅在 5090 私有分析器中，要求同步 forward/head/row AllGather 和零统计 AllReduce 与计算同 stream，保留异步 backward AllGather、ReduceScatter 和 staged All-to-All 的独立 stream、实际 launch 归属与完成顺序检查。
+- **cuBLAS split-K：** 本批 Attention row backward 的 dgrad GEMM 带有 `cublasLt::splitKreduce_kernel` 后处理；旧分析器按 `reduce_kernel` 子串把它误计为第二个 bias 归约，并假定每次反向只有四个 kernel。5090 分析器单独核对该归约属于对应 `aten::mm`，验证 GEMM→归约→后续计算的依赖并记录数量，不忽略额外 GPU 工作。
+
+这批实测显存如下，均为八个 rank 的最大值，单位 GiB；来自各 `results/smoke-<arm>/rank*.json`，不是正式计时窗口：
+
+| 组 | Torch allocated 峰值 | Torch reserved 峰值 | TACO native workspace | allocated＋native |
+| --- | ---: | ---: | ---: | ---: |
+| MA11 | 18.751 | 18.904 | 2.656 | 21.408 |
+| MA89 | 18.711 | 18.904 | 2.656 | 21.367 |
+| MA8 | 18.712 | 18.896 | 2.656 | 21.368 |
+| MA9 | 17.715 | 17.900 | 2.656 | 20.372 |
+| CR3 | 17.715 | 17.900 | 2.656 | 20.371 |
+| R | 17.018 | 17.213 | 1.328 | 18.346 |
+| C | 17.716 | 17.893 | 2.656 | 20.372 |
+| A | 17.018 | 17.213 | 1.328 | 18.346 |
+| Flux＋基础量化 | 17.481 | 17.686 | 0 | 17.481 |
+
+MA11 profile 的 allocated＋native 最大为 **21.384 GiB**。最后一列逐 rank 相加后取最大值，不把 allocated 和 reserved 重复相加，也不包含 CUDA context、NCCL 等内部占用。它与全部 worker 正常完成一起说明这批已越过先前 OOM 阶段；长窗口正式计时仍须重新运行。
+
+修复后的验证：在无 GPU 的开发环境执行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**116 项测试全部通过**；入口预览、shell 语法和 `git diff --check` 均通过。另对本批 `results/profile-ma11/rank0-profile.json.gz` 至 `rank7-profile.json.gz` 逐一执行完整 `analyze()`，八个 rank 的投影、激活缓存、反向、零统计、softmax 五项审计全部通过。每 rank 均确认 252 次 Apex＋4 次 TE LayerNorm、128 次 Attention dgrad split-K 归约。这里是对原始 GPU trace 的离线复核，未修改原 trace 或失败状态；其余八组 profile 和全套正式计时仍需在目标机新批次验证。
+
+这次仅修复 5090 的 profile 分析及回归测试，保留训练代码、模型尺寸、数值门禁和全部九组机制。更新整个 `tools/5090/phase6/` 后，可继续使用原 `--baseline-build` 路径，不需重编译 Flux/TACO；入口仍会编译独立 MA11 兼容小库并重复完整门禁。使用原命令启动新批次，不向失败批次追加结果；`--report` 只适用于完整批次，不能续跑这次未完成的实验。
 
 ## 4. 一键执行
 

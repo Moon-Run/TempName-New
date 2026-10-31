@@ -5,6 +5,7 @@ from pathlib import Path
 from statistics import median
 from types import ModuleType
 
+from baseline_profile_nccl import pytorch28_profiles
 from rtx5090_loader import load
 
 p = load('protocol')
@@ -16,11 +17,13 @@ import ma9_profile
 import ma11_profile as h100_ma11_profile
 from ma9_profile import Index, contains, end, require
 
+ma8_profile, ma9_profile = pytorch28_profiles(ma8_profile, ma9_profile)
+
 
 def _pytorch28_ma11_profile():
     # 2048-element BF16 forward uses PyTorch 2.8's persistent warp kernel.
-    # Preserve the entire H100 ownership/order audit, adapting only its exact
-    # control-kernel predicate in this private module; do not alter H100 code.
+    # Preserve the attention ownership/order audit, adapting its exact
+    # control-kernel predicate. Composed audits use the target NCCL policy.
     source = Path(h100_ma11_profile.__file__).read_text()
     old = "'cunn_SoftMaxForwardSmem' in kernel['name']"
     new = "'softmax_warp_forward' in kernel['name']"
@@ -28,6 +31,7 @@ def _pytorch28_ma11_profile():
     module = ModuleType('rtx5090_pytorch28_ma11_profile')
     module.__file__ = h100_ma11_profile.__file__
     exec(compile(source.replace(old, new), module.__file__, 'exec'), module.__dict__)
+    module.ma8_profile, module.ma9_profile = ma8_profile, ma9_profile
     return module
 
 
@@ -66,6 +70,23 @@ def _clone_work(event):
     return (event.get('cat') == 'gpu_memcpy' and ('dtod' in name or 'device -> device' in name)
             and event.get('args', {}).get('bytes') == 256*4096*2
             or event.get('cat') == 'kernel' and 'copy' in name and 'bfloat16' in name)
+
+
+def _layernorm_backend(event):
+    if event.get('cat') != 'kernel':
+        return None
+    name = event.get('name', '')
+    # NGC 25.06 uses TE for GPT's final LayerNorm; other projection
+    # successors still use Apex. Match its forward BF16/4096 entry,
+    # not arbitrary normalization work or the generic TE autograd owner.
+    te_prefix = ('voidtransformer_engine::normalization::ln_fwd_tuned_kernel<'
+                 'transformer_engine::normalization::Kernel_traits<'
+                 '__nv_bfloat16,__nv_bfloat16,__nv_bfloat16,float,unsignedint,4096u,')
+    if ''.join(name.split()).startswith(te_prefix):
+        return 'transformer_engine'
+    if any(token in name.lower() for token in ('layernorm', 'layer_norm')):
+        return 'apex'
+    return None
 
 
 def staged_projection_records(events, arm, rank=None):
@@ -126,6 +147,7 @@ def staged_projection_records(events, arm, rank=None):
     claimed, claimed_markers, compute_streams = set(), set(), set()
     records = defaultdict(list)
     for scope in sorted(scopes, key=lambda event: (event['tid'], event['ts'])):
+        role = scope['name'].split('.')[1]
         stages = [event for event in markers if contains(scope, event)]
         require(not claimed_markers.intersection(map(id, stages)), 'Transport marker attributed to two projections')
         claimed_markers.update(map(id, stages))
@@ -230,12 +252,21 @@ def staged_projection_records(events, arm, rank=None):
         for event in adds:
             actual_cpu_owner(event, 'aten::add')
         norm = successors[-1]
-        require(norm['cat'] == 'kernel' and any(token in norm['name'].lower() for token in ('layernorm', 'layer_norm')),
+        norm_backend = _layernorm_backend(norm)
+        require(norm_backend is not None,
                 'Decoder/consumer does not immediately feed LayerNorm')
-        actual_cpu_owner(norm, 'FusedLayerNormAffineFunction')
+        if norm_backend == 'transformer_engine':
+            require(role == 'mlp' and (len(records[role])+1) % 32 == 0,
+                    'Transformer Engine LayerNorm must follow the final MLP of a microbatch')
+            owner = actual_cpu_owner(norm, '_OperationFuserAutogradFunction')
+            require([id(event) for event in index.work(owner)[0]] == [id(norm)],
+                    'Final LayerNorm owner contains unexpected device work')
+        else:
+            actual_cpu_owner(norm, 'FusedLayerNormAffineFunction')
         for first, second in zip([decoder]+successors, successors):
             _before(first, second, 'Projection consumer stream order changed')
-        records[scope['name'].split('.')[1]].append(dict(cpu_us=call['dur'], decoder_us=decoder['dur'],
+        records[role].append(dict(cpu_us=call['dur'], decoder_us=decoder['dur'],
+            layernorm_backend=norm_backend,
             decoder_start_to_layernorm_end_us=end(norm)-decoder['ts'],
             producer_end_to_layernorm_end_us=end(norm)-end(gemm),
             exchange_kernels=len(comm_kernels),
@@ -255,6 +286,7 @@ def staged_projection_records(events, arm, rank=None):
                        native_ipc_barriers=0, original_peer_overlap_preserved=False,
                        output_clones=128*int(arm == 'a'), per_call_reconfigurations=128*int(arm == 'a'),
                        consumer_add_kernels=128*(0 if fused else 2), layernorm_successors=128,
+                       layernorm_backends=dict(Counter(row['layernorm_backend'] for row in rows)),
                        fused_consumer=fused, compute_stream=next(iter(compute_streams)),
                        **{key: median(row[key] for row in rows) for key in
                           ('cpu_us', 'decoder_us', 'decoder_start_to_layernorm_end_us',
