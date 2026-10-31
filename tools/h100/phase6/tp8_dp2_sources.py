@@ -16,8 +16,8 @@ def worker_source(arm):
     guard = {'ma11': 'H100_MA11_EXECUTE', 'flux-basic': 'H100_BASIC_QUANT_EXECUTE',
              'megatron-cuda': 'H100_BASELINE_EXECUTE'}[arm]
     source = replace_once(source, guard, 'H100_TP8_DP2_EXECUTE')
-    source = replace_once(source, 'local_rank * len(allowed_cpus) // WORLD',
-                          'local_rank * len(allowed_cpus) // 8')
+    # Workers inherit the launcher's local CPU set; no WORLD-based pinning
+    # needs rewriting when adapting a single-node worker to TP8/DP2.
     source = replace_once(source, "assert WORLD == CASE['tp']", "assert WORLD == 16 and CASE['tp'] == 8")
     source = replace_once(source, 'assert torch.cuda.device_count() == WORLD',
                           'assert torch.cuda.device_count() == 8')

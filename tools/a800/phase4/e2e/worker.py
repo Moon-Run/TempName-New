@@ -12,8 +12,7 @@ import time
 
 local_rank = int(os.environ['LOCAL_RANK'])
 WORLD = int(os.environ['WORLD_SIZE'])
-allowed_cpus = sorted(os.sched_getaffinity(0))
-os.sched_setaffinity(0, {allowed_cpus[local_rank * len(allowed_cpus) // WORLD]})
+# Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
 import torch
 import torch.distributed as dist
 
@@ -71,6 +70,7 @@ report = dict(case=CASE['name'],model=SPEC['model'],world_size=WORLD,policy=POLI
     padded_vocab_size=args.padded_vocab_size, scope=SPEC['scope'], sampling=False,
     profiling=MODE == 'profile', block=int(os.environ.get('E2E_BLOCK','-1')),
     window=int(os.environ.get('E2E_WINDOW','-1')), losses=[], grad_norms=[], skips=0)
+report.update(cpu_affinity_policy='inherit', cpu_affinity=sorted(os.sched_getaffinity(0)))
 if POLICY != 'native':
     for lib in ['libflux_cuda.so', 'libflux_cuda_ths_op.so']:
         expected = (Path(os.environ['E2E_BUILD']) / POLICY / lib).resolve()

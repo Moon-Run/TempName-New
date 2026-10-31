@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 from model_config import read_model, mlp_shape
+from worker_affinity import prepare_worker_affinity
 
 SHAPES=[[8192,512,2048],[8192,1024,4096],[8192,2048,8192],[8192,4096,2048]]
 POLICIES=['remote_first','interleaved','interleaved_remote']
@@ -42,6 +43,7 @@ def main(out,sampler,group_sampler=None,large=False,model_path=None,world=4,job_
         shutil.copy2(model_path,out/'model-profile.json')
     else:
         shutil.copy2(source,out/'calibration-scripts/worker.py')
+    affinity = prepare_worker_affinity(out/'calibration-scripts/worker.py')
     shapes=[mlp_shape(model)] if model else [[65536,512,2048],[32768,1024,4096],[16384,2048,8192]] if large else SHAPES
     cfg=dict(shapes=shapes,repeats=0,warmup=100,trials=3,iters=50,sample_warmup=10)
     (out/'calibration-scripts/config.json').write_text(json.dumps(cfg,indent=2)+'\n')
@@ -50,7 +52,8 @@ def main(out,sampler,group_sampler=None,large=False,model_path=None,world=4,job_
               sampler_root=str(Path(sampler_root or default_root).resolve()),world_size=world,job_id=job_id,
               shapes=shapes,policies=['remote_first','interleaved'] if model else POLICIES+(['interleaved_remote_group'] if group_sampler else []),
               rationale='Fresh per-base BF16 arrival measurements for the selected model; no reuse of old shape tables.',
-              source_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+              source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+              cpu_affinity=affinity)
     if group_sampler:info['group_sampler']=str(group_sampler.resolve())
     (out/'plan.json').write_text(json.dumps(info,indent=2)+'\n')
     shutil.copy2(Path(__file__).with_name('calibration_driver.py'),out/'driver.py')

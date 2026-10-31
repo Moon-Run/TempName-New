@@ -32,6 +32,7 @@ def create(out,source):
  for name in ['verification.json','acceptance.json','acceptance.md']:
   if (source/name).exists():shutil.copy2(source/name,out/('source-'+name))
  shutil.copy2(Path(__file__),out/'archive.py')
+ shutil.copy2(Path(__file__).with_name('worker_affinity.py'),out/'worker_affinity.py')
  protected={}
  for p in [*REPO.glob('src/gemm_rs/taco*'),REPO/'src/gemm_rs/epilogue_evt.hpp',REPO/'src/gemm_rs/ths_op/gemm_reduce_scatter.cc',REPO/'python/flux/gemm_rs_taco.py',*REPO.glob('tools/a800/phase5/e2e/*.py'),*REPO.glob('tools/a800/phase6/*.py')]:
   if p.is_file() and p.resolve()!=Path(__file__).resolve():protected[str(p)]=sha(p)
@@ -57,11 +58,14 @@ def audit(root,originals=False):
  print('TP4 archive verified:',len(m['files']),'files; originals checked:',originals)
  return m
 def prepare(root,out,job):
+ from worker_affinity import prepare_worker_affinity
  root,out=root.resolve(),out.resolve();m=audit(root);assert not out.exists()
  shutil.copytree(root/'template',out);(out/'results').mkdir()
+ affinity=prepare_worker_affinity(out/'scripts/worker.py')
  info=json.loads((root/'source-submission.json').read_text());info.update(job_id=job,repo=m['repo'],artifact_root=str(root/'artifacts'),archive_root=str(root),source_campaign=info['original_campaign'],original_campaign=str(out))
  info['files']={str(p.relative_to(out)):sha(p) for p in out.rglob('*') if p.is_file()}
  info['build_manifest_sha256']=sha(root/'artifacts/build/manifest.json')
+ info['cpu_affinity']=affinity
  (out/'submission.json').write_text(json.dumps(info,indent=2)+'\n');print(out)
 if __name__=='__main__':
  p=argparse.ArgumentParser();sub=p.add_subparsers(dest='action',required=True)

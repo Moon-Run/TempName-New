@@ -3,7 +3,7 @@ import ctypes as C
 import datetime,json,os,random,statistics
 from pathlib import Path
 world=int(os.environ['WORLD_SIZE']);rank=int(os.environ['RANK']);local=int(os.environ['LOCAL_RANK'])
-cpus=sorted(os.sched_getaffinity(0));os.sched_setaffinity(0,{cpus[local*len(cpus)//world]})
+# Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
 import torch
 import torch.distributed as dist
 import flux
@@ -27,6 +27,7 @@ for name in ['libflux_cuda.so','libflux_cuda_ths_op.so']:
  assert loaded=={library.with_name(name)},(loaded,library)
 report=dict(job_id=os.environ['SLURM_JOB_ID'],policy=policy,kind=kind,block=block,rank=rank,world_size=world,
             gpu_uuid=str(torch.cuda.get_device_properties(local).uuid),library=str(library),smoke=smoke,sample_warmup=sample_warmup,shapes=[])
+report.update(cpu_affinity_policy='inherit', cpu_affinity=sorted(os.sched_getaffinity(0)))
 ROWS,FRAGS,FIELDS=2048,16,8;SLOTS=ROWS*FRAGS
 opt=flux.ReduceScatterOption()
 for k,v in dict(use_1d_ring=True,use_p2p_read=True,use_cudaMemcpyAsync=False,use_gemmk=False,

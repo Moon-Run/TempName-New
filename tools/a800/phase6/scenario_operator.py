@@ -17,7 +17,7 @@ from taco_support import check_taco_output
 @torch.no_grad()
 def main(args):
     rank=int(os.environ['RANK']);torch.cuda.set_device(rank);torch.set_num_threads(1)
-    cpus=sorted(os.sched_getaffinity(0));os.sched_setaffinity(0,{cpus[rank*len(cpus)//4]})
+    # Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
     torch.backends.cuda.matmul.allow_tf32=False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction=False
     dist.init_process_group('nccl',timeout=datetime.timedelta(minutes=5))
@@ -64,10 +64,10 @@ def main(args):
         rows.append(dict(shape=[m,n,k],local_k=k//4,remote_bf16_bytes=2*m*n*3//4,
                          selected_per_source=[sum(r) for r in mask] if mask is not None else None,
                          error=error,samples=samples,median_wall_us=statistics.median(r['wall_us'] for r in samples)))
-        (args.out/f'rank{rank}.json').write_text(json.dumps(dict(rank=rank,policy=args.policy,completed=False,rows=rows),indent=2)+'\n')
+        (args.out/f'rank{rank}.json').write_text(json.dumps(dict(cpu_affinity_policy='inherit',cpu_affinity=sorted(os.sched_getaffinity(0)),rank=rank,policy=args.policy,completed=False,rows=rows),indent=2)+'\n')
         if rank==0:print(args.policy,[m,n,k],rows[-1]['median_wall_us'],flush=True)
         dist.barrier();torch.cuda.synchronize();del op
-    (args.out/f'rank{rank}.json').write_text(json.dumps(dict(rank=rank,policy=args.policy,completed=True,rows=rows),indent=2)+'\n')
+    (args.out/f'rank{rank}.json').write_text(json.dumps(dict(cpu_affinity_policy='inherit',cpu_affinity=sorted(os.sched_getaffinity(0)),rank=rank,policy=args.policy,completed=True,rows=rows),indent=2)+'\n')
     dist.destroy_process_group()
 
 

@@ -1,8 +1,7 @@
 """One uninstrumented static-policy window. The sbatch balances six policy orders."""
 import datetime,json,os,statistics
 from pathlib import Path
-allowed=sorted(os.sched_getaffinity(0))
-os.sched_setaffinity(0,{allowed[int(os.environ['LOCAL_RANK'])*len(allowed)//2]})
+# Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
 import torch
 import torch.distributed as dist
 import flux
@@ -29,6 +28,7 @@ report=dict(job_id=os.environ['SLURM_JOB_ID'],policy=policy,block=block,window=w
  M=m,N=n,K_global=k,K_local=k//2,world_size=2,flux_module=flux.__file__,loaded_libraries=sorted(loaded),
  torch=torch.__version__,cpu_affinity=sorted(os.sched_getaffinity(0)),checks=[],trials_us=[],
  warmup_initial=500,warmup_per_trial=30,iters=100,trial_count=12,sampling=False)
+report.update(cpu_affinity_policy='inherit', cpu_affinity=sorted(os.sched_getaffinity(0)))
 @torch.no_grad()
 def run():
  global a,b

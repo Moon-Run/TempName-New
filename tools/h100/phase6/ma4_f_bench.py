@@ -267,11 +267,11 @@ def worker(args):
     root=args.root.resolve();plan=verify(root);job=json.loads(args.job)
     allowed=stage_jobs('profile' if args.profile else 'preflight') if args.profile or args.preflight else plan['schedule']
     require(job in allowed and not(args.profile and args.preflight),'Unregistered worker')
+    # Preserve the launcher's CPU set for this rank and its helper threads.
+    cpu_affinity=sorted(os.sched_getaffinity(0))
     import torch
     import torch.distributed as dist
     rank=int(os.environ['LOCAL_RANK'])
-    allowed_cpus=sorted(os.sched_getaffinity(0))
-    os.sched_setaffinity(0,{allowed_cpus[rank*len(allowed_cpus)//8]})
     torch.cuda.set_device(rank)
     require(torch.cuda.device_count()==8,'Need eight GPUs')
     dist.init_process_group('nccl');group=dist.group.WORLD
@@ -304,6 +304,7 @@ def worker(args):
                 completed=True,preflight=args.preflight,profiling=args.profile,roles={},loaded_libraries=libs,
                 hardware=dict(host=os.uname().nodename,devices=devices),
                 software=dict(torch=torch.__version__,cuda=torch.version.cuda,nccl=list(torch.cuda.nccl.version())))
+    result.update(cpu_affinity_policy='inherit',cpu_affinity=cpu_affinity)
     def gather(value):
         out=torch.empty((value.shape[0]*8,*value.shape[1:]),device=value.device,dtype=value.dtype)
         dist.all_gather_into_tensor(out,value.contiguous(),group=group);return out

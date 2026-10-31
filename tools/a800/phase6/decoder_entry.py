@@ -1,4 +1,4 @@
-"""Run the frozen worker without importing CUDA before its CPU-affinity setup."""
+"""Run the frozen worker in its normal initialization order and inherited CPU set."""
 import json
 import os
 from pathlib import Path

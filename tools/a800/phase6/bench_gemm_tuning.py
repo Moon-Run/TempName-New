@@ -24,8 +24,7 @@ def main(args):
     rank = int(os.environ['RANK'])
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
-    cpus = sorted(os.sched_getaffinity(0))
-    os.sched_setaffinity(0, {cpus[rank * len(cpus) // 4]})
+    # Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     dist.init_process_group('nccl', timeout=datetime.timedelta(minutes=5))
@@ -44,6 +43,7 @@ def main(args):
     args.out.mkdir(parents=True, exist_ok=True)
     report = dict(rank=rank, completed=False, policy=args.policy, shape=[m,n,k],
                   gpu_uuid=str(torch.cuda.get_device_properties(rank).uuid), conditions={})
+    report.update(cpu_affinity_policy='inherit', cpu_affinity=sorted(os.sched_getaffinity(0)))
     partial = a @ w.t()
     first = None
     for stages, sms in conditions:

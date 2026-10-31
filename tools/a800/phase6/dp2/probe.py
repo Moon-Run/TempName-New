@@ -7,8 +7,7 @@ import socket
 import time
 
 rank, local = int(os.environ['RANK']), int(os.environ['LOCAL_RANK'])
-allowed = sorted(os.sched_getaffinity(0))
-os.sched_setaffinity(0, {allowed[local*len(allowed)//4]})
+# Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
 import torch
 import torch.distributed as dist
 
@@ -29,7 +28,7 @@ torch.cuda.synchronize()
 elapsed = time.perf_counter()-start
 assert bool((payload == 8).all())
 out = Path(os.environ['E2E_PROCESS_OUT'])
-(out/f'rank{rank}.json').write_text(json.dumps(dict(passed=True, rank=rank, local_rank=local,
+(out/f'rank{rank}.json').write_text(json.dumps(dict(cpu_affinity_policy='inherit',cpu_affinity=sorted(os.sched_getaffinity(0)),passed=True, rank=rank, local_rank=local,
     host=socket.gethostname(), gpu_uuid=str(torch.cuda.get_device_properties(local).uuid),
     allreduce_64mib_seconds=elapsed), indent=2)+'\n')
 dist.barrier()

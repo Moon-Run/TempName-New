@@ -337,13 +337,14 @@ def worker(args):
     root = args.root.resolve(); plan = verify(root); job = json.loads(args.job)
     require(job in smoke_jobs() + schedule(), 'Unregistered MA20 probe job')
     require(all(os.environ.get(k) == v for k, v in ENVIRONMENT.items()), 'Changed MA20 worker environment')
+    # Preserve the launcher's CPU set for this rank and its helper threads.
+    cpu_affinity = sorted(os.sched_getaffinity(0))
     import torch
     import torch.distributed as dist
     from codec_reference import check_consumer_output
     rank, local, world = (int(os.environ[k]) for k in ('RANK', 'LOCAL_RANK', 'WORLD_SIZE'))
     require(world == 8 and rank == local and torch.cuda.device_count() == 8, 'Need local TP8')
     torch.cuda.set_device(local); torch.set_num_threads(1)
-    cpus = sorted(os.sched_getaffinity(0)); os.sched_setaffinity(0, {cpus[rank * len(cpus) // 8]})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     devices = []
@@ -370,6 +371,7 @@ def worker(args):
                   environment=ENVIRONMENT, hardware=dict(host=os.uname().nodename, devices=devices),
                   software=dict(torch=torch.__version__, cuda=torch.version.cuda,
                                 nccl=list(torch.cuda.nccl.version()), python=sys.version), roles={})
+    result.update(cpu_affinity_policy='inherit', cpu_affinity=cpu_affinity)
     def tensor_hash(tensor):
         return hashlib.sha256(tensor.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()).hexdigest()
     def extra(shape, seed):

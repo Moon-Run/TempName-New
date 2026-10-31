@@ -24,6 +24,7 @@ def sha(path):
 
 
 def prepare(args):
+    from worker_affinity import prepare_worker_affinity
     source, root = args.source.resolve(), args.root.resolve()
     info = json.loads((source/'submission.json').read_text())
     repo = Path(info['repo'])
@@ -36,7 +37,9 @@ def prepare(args):
     assert args.blocks >= len(conditions) and args.blocks % len(conditions) == 0
     root.mkdir(parents=True, exist_ok=False)
     shutil.copytree(source/'scripts', root/'scripts', ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+    affinity = prepare_worker_affinity(root/'scripts/worker.py')
     shutil.copy2(__file__, root/'run.py')
+    shutil.copy2(Path(__file__).with_name('worker_affinity.py'), root/'worker_affinity.py')
     command = json.loads((source/'results/model-1/commands.json').read_text())[0]['command']
     worker = next(i for i, arg in enumerate(command) if arg.endswith('/worker.py'))
     frozen = {}
@@ -64,10 +67,11 @@ def prepare(args):
             order.reverse()
         orders.append(order)
     manifest = dict(source=str(source), repo=str(repo), builds=frozen, orders=orders,
-        model_args=command[worker+1:], job_id=args.job_id,
+        model_args=command[worker+1:], job_id=args.job_id, cpu_affinity=affinity,
         scope='Paired complete optimizer steps, identical model/order/mask; implementation ablation only.',
         files={str(p.relative_to(root)):sha(p) for p in (root/'scripts').rglob('*') if p.is_file()})
     manifest['files']['run.py'] = sha(root/'run.py')
+    manifest['files']['worker_affinity.py'] = sha(root/'worker_affinity.py')
     (root/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     print(root)
 

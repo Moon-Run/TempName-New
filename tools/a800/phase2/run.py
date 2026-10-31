@@ -2,10 +2,7 @@
 import ctypes as C
 import datetime,json,os,random,statistics
 from pathlib import Path
-# Pin each launcher to its half of the allocated CPU set; keep GPU visibility unchanged.
-_allowed_cpus=sorted(os.sched_getaffinity(0))
-_cpu=_allowed_cpus[int(os.environ['LOCAL_RANK'])*len(_allowed_cpus)//2]
-os.sched_setaffinity(0,{_cpu})
+# Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
 import torch
 import torch.distributed as dist
 import flux
@@ -26,6 +23,7 @@ for k,v in dict(use_1d_ring=True,use_p2p_read=True,use_cudaMemcpyAsync=False,use
 opt.ring_mode=flux.RingMode.Ring1D
 report=dict(kind=kind,rank=rank,job_id=os.environ['SLURM_JOB_ID'],flux_module=flux.__file__,
             torch=torch.__version__,cpu_affinity=sorted(os.sched_getaffinity(0)),protocol='epilogue-callback publication v2',shapes=[])
+report.update(cpu_affinity_policy='inherit', cpu_affinity=sorted(os.sched_getaffinity(0)))
 def gather(x):
     values=[None,None];dist.all_gather_object(values,x,group=pg);return values
 

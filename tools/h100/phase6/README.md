@@ -8,6 +8,8 @@
 
 新服务器首次部署请按 [单机八卡 H100 部署指南](../../../docs/design/design-h100/deploy-tp8.md) 配置环境、重新编译并运行。
 
+2026-10-31 起，新生成的 worker 统一继承启动环境的 CPU affinity，不再按逻辑 CPU 编号强制绑定单核。MA11、MA14、MAV2、基础量化等入口通过共同模板生效；必须新建输出目录并重新 prepare。原因、报告字段与串行复测命令见 [CPU affinity 修复说明](../../../docs/design/design-h100/cpu-affinity.md)。
+
 **默认模型为GPT 6.7B。** 执行端先读[测试与交付说明](../../../docs/design/design-h100/instruction-h100.md)，开发端先读[数据与源码索引](../../../docs/design/design-h100/instruction.md)。截至提交 `e7a0c49`，旧0.64B、6.7B前次续跑及最新完整复测均有报告，具体状态和证据见开发端索引。下文命令用于按任务执行新会话；`calibrate.py run` 和 `run.py` 没有 `--execute` 时只打印命令。
 
 ## 算法与 baseline

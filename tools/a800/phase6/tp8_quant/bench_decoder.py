@@ -8,11 +8,8 @@ from pathlib import Path
 import statistics
 import time
 
-# Match model-worker initialization: driver threads inherit the rank's CPU.
-_rank = int(os.environ['LOCAL_RANK'])
-_cpus = sorted(os.sched_getaffinity(0))
 assert int(os.environ['WORLD_SIZE']) == 8
-os.sched_setaffinity(0, {_cpus[_rank * len(_cpus) // 8]})
+# Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
 
 import torch
 import torch.distributed as dist
@@ -25,8 +22,7 @@ def main(args):
     rank = int(os.environ['RANK'])
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
-    cpus = sorted(os.sched_getaffinity(0))
-    os.sched_setaffinity(0, {cpus[rank * len(cpus) // 8]})
+    # Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     dist.init_process_group('nccl', timeout=datetime.timedelta(minutes=5))
@@ -34,6 +30,7 @@ def main(args):
     plan = json.loads(args.plan.read_text())
     args.out.mkdir(parents=True, exist_ok=True)
     report = dict(rank=rank, completed=False, policy=args.policy, rows=[])
+    report.update(cpu_affinity_policy='inherit', cpu_affinity=sorted(os.sched_getaffinity(0)))
     for entry in plan['policies'][args.policy]:
         m, n, k = entry['M'], entry['N'], entry['K_local']
         torch.manual_seed(817 + rank)

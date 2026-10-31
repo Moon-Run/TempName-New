@@ -2,8 +2,7 @@
 import datetime,gc,json,os,statistics
 from pathlib import Path
 world=int(os.environ['WORLD_SIZE'])
-allowed=sorted(os.sched_getaffinity(0))
-os.sched_setaffinity(0,{allowed[int(os.environ['LOCAL_RANK'])*len(allowed)//world]})
+# Preserve the launcher's CPU set; do not pin ranks by logical CPU number.
 import torch
 import torch.distributed as dist
 import flux
@@ -45,6 +44,7 @@ def run_shape(m,n,k):
   diagnostic_only=os.environ.get('PHASE3_DIAGNOSTIC_ONLY')=='1',
   gpu_uuid=str(torch.cuda.get_device_properties(rank).uuid),
   cuda=torch.version.cuda,nccl=torch.cuda.nccl.version())
+ report.update(cpu_affinity_policy='inherit', cpu_affinity=sorted(os.sched_getaffinity(0)))
  @torch.no_grad()
  def run():
 

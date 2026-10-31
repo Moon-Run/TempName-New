@@ -17,6 +17,7 @@ sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 
 
 def prepare(source, root, blocks, variants=(0,3), build_override=None, job_id=179147):
+    from worker_affinity import prepare_worker_affinity
     source, root = source.resolve(), root.resolve()
     info = json.loads((source/'submission.json').read_text())
     repo = Path(info['repo'])
@@ -30,10 +31,11 @@ def prepare(source, root, blocks, variants=(0,3), build_override=None, job_id=17
         assert sha(source/name) == digest, name
     root.mkdir(parents=True, exist_ok=False)
     shutil.copytree(source/'scripts', root/'scripts', ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+    affinity = prepare_worker_affinity(root/'scripts/worker.py')
     shutil.copy2(Path(__file__).with_name('decoder_entry.py'), root/'scripts/decoder_entry.py')
     shutil.copy2(Path(__file__).with_name('decoder_control.py'), root/'scripts/decoder_control.py')
     # Add the diagnostic hook only to the new snapshot, before sealing hashes.
-    # The standard worker pins its CPU before importing Torch/CUDA as usual.
+    # The worker inherits the launcher's CPU set before importing Torch/CUDA.
     support = root/'scripts/taco_support.py'
     text = support.read_text()
     anchor = '        self.codec = GemmRSTaco('
@@ -42,6 +44,7 @@ def prepare(source, root, blocks, variants=(0,3), build_override=None, job_id=17
         '        from decoder_control import configure_decoder_variant\n'
         '        configure_decoder_variant()\n'+anchor))
     shutil.copy2(__file__, root/'run.py')
+    shutil.copy2(Path(__file__).with_name('worker_affinity.py'), root/'worker_affinity.py')
     commands = json.loads((source/'results/model-1/commands.json').read_text())
     command = commands[0]['command']
     worker_index = next(i for i, arg in enumerate(command) if arg.endswith('/worker.py'))
@@ -56,7 +59,7 @@ def prepare(source, root, blocks, variants=(0,3), build_override=None, job_id=17
     manifest = dict(source=str(source), repo=str(repo), build=str(build), variants=list(variants),
                     build_override=bool(build_override),cuda_initialization='standard worker order; variant set at warmup codec construction',
                     build_manifest_sha256=sha(build/'manifest.json'),
-                    model_args=command[worker_index+1:], orders=orders,
+                    model_args=command[worker_index+1:], orders=orders, cpu_affinity=affinity,
                     job_id=job_id, scope='Full optimizer-step paired decoder ablation; same GEMM, base order, arrival table, physical mask and numerical protocol. Not a new baseline acceptance campaign.',
                     files={str(p.relative_to(root)):sha(p) for p in root.rglob('*') if p.is_file()})
     (root/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
