@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Repair the known missing-rank Python frontend in an already compiled build.
+"""Upgrade registered staging Python frontends in an already compiled build.
 
-Both revisions receive the full build verification. CUDA sources and binaries
+The source and destination receive full build verification. CUDA sources and binaries
 are unchanged; original frontend files/manifests are retained under repairs/.
 """
 import argparse
@@ -19,6 +19,8 @@ from rtx5090_loader import load
 
 builder = load('build')
 LEGACY_SHA256 = '61bb8c847e41774648629cc1cffcb35729601bd6ad64e6fa9f73a8d6c0ebab22'
+FIXED_RANK_SHA256 = 'ba668cc182904040bce8592d5d98840e0a286dde9dbcec4742874ddbd65eca8c'
+LEGACY_FRONTEND_SHA256 = frozenset((LEGACY_SHA256, FIXED_RANK_SHA256))
 RANK_INITIALIZATION = '        self.rank = rank\n'
 FRONTEND = 'python/flux/gemm_rs_taco.py'
 
@@ -43,12 +45,15 @@ def atomic_write(path, data):
             temporary.unlink(missing_ok=True)
 
 
-def legacy_source():
-    current = (builder.HERE/'nccl_transport.py').read_text()
+def legacy_source(identity=LEGACY_SHA256):
+    builder.require(identity in LEGACY_FRONTEND_SHA256, 'Unregistered legacy staging frontend')
+    current = (builder.HERE/'legacy_nccl_transport_v2.txt').read_text()
+    builder.require(digest(current.encode()) == FIXED_RANK_SHA256,
+                    'Frozen staging frontend fixture changed')
     builder.require(current.count(RANK_INITIALIZATION) == 1, 'Expected exactly the native rank initialization fix')
-    original = current.replace(RANK_INITIALIZATION, '', 1)
-    builder.require(digest(original.encode()) == LEGACY_SHA256,
-                    'This repair accepts only the registered missing-rank revision and its one-line fix')
+    original = current.replace(RANK_INITIALIZATION, '', 1) if identity == LEGACY_SHA256 else current
+    builder.require(digest(original.encode()) == identity,
+                    'This repair accepts only the registered staging frontend revisions')
     return original
 
 
@@ -75,14 +80,15 @@ def legacy_verifier(directory, original):
 def repair(root, *, require_built=True):
     # False is used only for CPU source-tree tests; status is never promoted.
     root = Path(root).resolve()
-    original = legacy_source()
     transport_sha = builder.sha(builder.HERE/'nccl_transport.py')
     record = builder.read(root/'baseline-build.json')
-    if record['transport_inputs']['nccl_transport.py'] == transport_sha:
+    previous_sha = record['transport_inputs']['nccl_transport.py']
+    if previous_sha == transport_sha:
         builder.verify(root, built=require_built)
         return dict(status='already_repaired', build=str(root))
-    builder.require(record['transport_inputs']['nccl_transport.py'] == LEGACY_SHA256,
-                    'Build does not contain the registered missing-rank frontend')
+    builder.require(previous_sha in LEGACY_FRONTEND_SHA256,
+                    'Build does not contain a registered staging frontend')
+    original = legacy_source(previous_sha)
     with tempfile.TemporaryDirectory(prefix='rtx5090-rank-verifier-') as tmp:
         legacy_verifier(Path(tmp), original).verify(root, built=require_built)
 
@@ -109,6 +115,7 @@ def repair(root, *, require_built=True):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     receipt = dict(status='repairing', build=str(root), backup=str(backup),
+                   previous_frontend_sha256=previous_sha, frontend_sha256=transport_sha,
                    old_sha256={name: digest(data) for name, data in originals.items()},
                    new_sha256={name: digest(data) for name, data in updates.items()},
                    native_binaries_verified=False, gpu_validated=False)

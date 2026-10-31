@@ -425,14 +425,14 @@ def worker_source_preflight():
 
 
 def reuse_build(args, build, stage):
-    """Migrate only the registered Python defect under the campaign lock."""
-    from repair_native_rank import LEGACY_SHA256, repair
+    """Migrate registered Python frontends under the campaign lock."""
+    from repair_native_rank import LEGACY_FRONTEND_SHA256, repair
     builder = load('build')
     record = read(build/'baseline-build.json')
     environment = builder.environment_identity(args.build_cuda_home)
     require(record.get('environment') == environment, 'Build Python/CUDA/ABI environment changed')
-    if record.get('transport_inputs', {}).get('nccl_transport.py') == LEGACY_SHA256:
-        stage('repair-native-rank')
+    if record.get('transport_inputs', {}).get('nccl_transport.py') in LEGACY_FRONTEND_SHA256:
+        stage('repair-transport-frontend')
         receipt = repair(build)
         write(args.out/'build-frontend-repair.json', receipt)
         print('FRONTEND REPAIR PASSED', receipt['backup'], flush=True)

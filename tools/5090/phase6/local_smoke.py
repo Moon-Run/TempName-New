@@ -26,6 +26,8 @@ ROLES = {'attn': 512, 'mlp': 2048}
 CASES = ('zero', 'random', 'outlier')
 PACKET_BYTES = 8192*136
 CHUNK_BYTES = 256*4096*2
+SCRATCH_POLICY = 'fixed-stream-shared-scratch-private-packets-v1'
+SHARED_BUFFERS = ('tx_bf16', 'tx_packets', 'rx_bf16', 'tx_wire', 'rx_wire')
 
 
 def require(ok, message):
@@ -159,6 +161,132 @@ def current_slot(op):
     return op.slots[op.next_slot ^ 1] if hasattr(op, 'slots') else op
 
 
+def shared_scratch_probe(torch, dist, frontend, reference, arm, role, selected):
+    """Exercise two live model-like instances, including reuse and owner cleanup."""
+    constructor = frontend.GemmRSTacoDoubleBuffered if selected is not None else frontend.GemmRSTaco
+    options = dict(placement='fused')
+    if selected is not None:
+        options.update(selected=selected, quantization_mode='targeted')
+    operators = []
+    try:
+        for _ in range(2):
+            operators.append(constructor(dist.group.WORLD, 2048, 4096, ROLES[role], **options))
+        slots = [op.slots if hasattr(op, 'slots') else [op] for op in operators]
+        pointers = [[dict(shared={key: slot.buffers[key].data_ptr() for key in SHARED_BUFFERS},
+                          packet=slot.buffers['rx_packets'].data_ptr(),
+                          mask=slot.selected.data_ptr() if slot.selected is not None else None,
+                          native=slot._exchange.native.handle.value)
+                     for slot in instance] for instance in slots]
+        require(all(pointers[0][index]['shared'] == pointers[1][index]['shared']
+                    for index in range(len(slots[0]))), 'Model instances did not share staging scratch')
+        for key in SHARED_BUFFERS:
+            require(len({item['shared'][key] for item in pointers[0]}) == len(slots[0]),
+                    'Rotating staging slots unexpectedly share scratch')
+        for key in ('packet', 'native') + (('mask',) if selected is not None else ()):
+            require(len({item[key] for instance in pointers for item in instance}) == 2*len(slots[0]),
+                    'Per-instance packet, mask or native state was aliased')
+        inputs, retained, expected, references = [], [], [], []
+        for index in range(2):
+            torch.manual_seed(20261101+dist.get_rank()*97+index)
+            inputs.append((torch.randn((2048, ROLES[role]), device='cuda', dtype=torch.bfloat16)*.03,
+                           torch.randn((4096, ROLES[role]), device='cuda', dtype=torch.bfloat16)*.03))
+        for iteration in range(4):
+            for index, op in enumerate(operators):
+                x, weight = inputs[index]
+                output = op.forward(x, weight)
+                if iteration == 0:
+                    expected.append(output.clone())
+                    references.append(reference_check(torch, dist, reference, x, weight, output, selected))
+                # After the reference iteration, enqueue six alternating calls
+                # without a host read/synchronize. Per-call equality would hide
+                # missing stream dependencies in actual model execution.
+                retained.append((output, output.clone()))
+        torch.cuda.synchronize()
+        require(all(torch.equal(snapshot.view(torch.uint8), expected[index % 2].view(torch.uint8))
+                    for index, (_, snapshot) in enumerate(retained)),
+                'Shared scratch changed repeated projection bits')
+        before_close = [op.transport_state() for op in operators]
+        operators[0].close()
+        output = operators[1].forward(*inputs[1])
+        torch.cuda.synchronize()
+        require(torch.equal(output.view(torch.uint8), expected[1].view(torch.uint8)),
+                'Closing one instance invalidated another shared scratch user')
+        require(len({value.data_ptr() for value, _ in retained} | {output.data_ptr()}) == 9
+                and all(torch.equal(value.view(torch.uint8), snapshot.view(torch.uint8))
+                        for value, snapshot in retained),
+                'Shared scratch reuse overwrote a retained projection output')
+        result = dict(passed=True, scratch_policy=SCRATCH_POLICY, instances=2,
+                      slots_per_instance=len(slots[0]), pointers=pointers,
+                      calls_before_close=[4, 4], async_burst_calls=6, repeated_bitwise=True,
+                      retained_outputs=8, retained_bitwise=True, output_storage_independent=True,
+                      survivor_after_close_bitwise=True, reference_checks=references,
+                      before_close=before_close, survivor_after_close=operators[1].transport_state())
+        validate_shared_scratch(result, arm)
+        return result
+    finally:
+        for op in operators:
+            slots = op.slots if hasattr(op, 'slots') else [op]
+            if all(not slot._exchange.failed for slot in slots):
+                op.close()
+
+
+def validate_shared_scratch(record, arm):
+    require(isinstance(record, dict), 'Missing shared scratch GPU evidence')
+    count = 1 if arm in ('a', 'r') else 2
+    require(record['passed'] and record['scratch_policy'] == SCRATCH_POLICY
+            and record['instances'] == 2 and record['slots_per_instance'] == count
+            and record['calls_before_close'] == [4, 4] and record['async_burst_calls'] == 6
+            and record['repeated_bitwise']
+            and record['retained_outputs'] == 8 and record['retained_bitwise']
+            and record['output_storage_independent'] and record['survivor_after_close_bitwise'],
+            'Shared scratch reuse/retention/cleanup evidence failed')
+    pointers = record['pointers']
+    require(len(pointers) == 2 and all(len(instance) == count for instance in pointers),
+            'Missing shared scratch pointer evidence')
+    for instance in pointers:
+        for item in instance:
+            require(set(item['shared']) == set(SHARED_BUFFERS)
+                    and all(type(value) is int and value > 0 for value in item['shared'].values()),
+                    'Invalid shared scratch pointer')
+    require(all(pointers[0][index]['shared'] == pointers[1][index]['shared'] for index in range(count)),
+            'Model instances did not share staging scratch')
+    require(len({value for item in pointers[0] for value in item['shared'].values()}) == 5*count,
+            'Staging buffers or rotating slots alias')
+    for key in ('packet', 'native', 'mask'):
+        values = [item[key] for instance in pointers for item in instance]
+        if key == 'mask' and count == 1:
+            require(values == [None, None], 'All-remote instances have unexpected masks')
+        else:
+            require(all(type(value) is int and value > 0 for value in values)
+                    and len(set(values)) == 2*count, 'Per-instance packet, mask or native state was aliased')
+    require(len(record['reference_checks']) == 2, 'Missing shared scratch numerical references')
+    for check in record['reference_checks']:
+        require(check['passed'] and check['budget_vs_bf16'] == .05 and check['budget_vs_codec'] == .01
+                and all(math.isfinite(check[key]) for key in ('relative_l2', 'protocol_relative_l2', 'max_abs'))
+                and 0 <= check['relative_l2'] <= .05 and 0 <= check['protocol_relative_l2'] <= .01,
+                'Shared scratch numerical reference failed')
+    states = record['before_close']
+    require(len(states) == 2, 'Missing shared scratch lifecycle state')
+    for state, calls, instance in ((states[0], 4, 0), (states[1], 4, 1),
+                                    (record['survivor_after_close'], 5, 1)):
+        slots = state.get('slots', [state])
+        require(state['protocol'] == TRANSPORT_PROTOCOL and not state['failed'] and len(slots) == count,
+                'Wrong shared scratch transport family')
+        for index, slot in enumerate(slots):
+            expected = calls if count == 1 else (calls+1-index)//2
+            require(slot['protocol'] == TRANSPORT_PROTOCOL and slot['scratch_policy'] == SCRATCH_POLICY
+                    and not slot['failed'] and not slot['closed'] and not slot['pending_exchange']
+                    and not slot['peer_memory'] and slot['native_phase'] == 0
+                    and slot['calls'] == slot['producer_calls'] == slot['pack_calls'] == slot['exchange_calls']
+                    == slot['wait_calls'] == slot['unpack_calls'] == slot['decode_calls'] == expected
+                    and slot['consumer_calls'] == 0
+                    and slot['initializations'] == (1 if arm in FUSED else expected)
+                    and slot['reconfigure_calls'] == (expected if arm == 'a' else 0)
+                    and slot['shared_scratch_ptrs'] == pointers[instance][index]['shared']
+                    and type(slot['shared_scratch_bytes']) is int and slot['shared_scratch_bytes'] > 0,
+                    'Shared scratch lifecycle or completion evidence failed')
+
+
 def role_probe(torch, dist, frontend, reference, arm, role, selected):
     rank, k = dist.get_rank(), ROLES[role]
     constructor = frontend.GemmRSTacoDoubleBuffered if selected is not None else frontend.GemmRSTaco
@@ -220,7 +348,8 @@ def role_probe(torch, dist, frontend, reference, arm, role, selected):
         return dict(passed=True, k_local=k, cases=checks, wire=wire, consumer=consumer,
                     retained_outputs=dict(passed=True, count=6, reuse_calls=7, independent_storage=True,
                                           unchanged_after_subsequent_calls=True, rank_delay_seconds=.025),
-                    transport=state)
+                    transport=state,
+                    shared_scratch=shared_scratch_probe(torch, dist, frontend, reference, arm, role, selected))
     finally:
         # Normal cleanup synchronizes only here, outside the measured campaign.
         # Failed NCCL submissions deliberately retain their buffers until the
@@ -241,6 +370,7 @@ def validate_reports(root, arm, manifest_sha256):
                 and row['build_manifest_sha256'] == manifest_sha256 and set(row['roles']) == set(ROLES),
                 'Local transport smoke identity/completion mismatch')
         for role, record in row['roles'].items():
+            validate_shared_scratch(record.get('shared_scratch'), arm)
             require(record['passed'] and record['k_local'] == ROLES[role]
                     and set(record['cases']) == set(CASES) | {'after_delayed_reuse'}, 'Missing reference cases')
             for check in record['cases'].values():

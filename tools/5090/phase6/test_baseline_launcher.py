@@ -1,5 +1,5 @@
 """CPU-only integration checks; no GPU timing data is synthesized as results."""
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -107,18 +108,19 @@ class Launcher(unittest.TestCase):
             root = Path(tmp)
             args = launcher.arguments(['--out', str(root/'out')])
             environment = {'CPU_FIXTURE': True}
-            launcher.write(root/'build/baseline-build.json', dict(environment=environment,
-                           transport_inputs={'nccl_transport.py': repair.LEGACY_SHA256}))
             receipt = dict(status='repaired', backup='CPU-FIXTURE-backup')
-            stages = []
-            with patch.object(repair, 'repair', return_value=receipt) as migrate, \
-                 patch.object(builder, 'environment_identity', return_value=environment), \
-                 patch.object(builder, 'verify', return_value={'CPU_FIXTURE': True}) as verify:
-                launcher.reuse_build(args, root/'build', stages.append)
-            self.assertEqual(stages, ['repair-native-rank', 'verify-build'])
-            migrate.assert_called_once_with(root/'build')
-            verify.assert_called_once_with(root/'build', True)
-            self.assertEqual(launcher.read(args.out/'build-frontend-repair.json'), receipt)
+            for identity in repair.LEGACY_FRONTEND_SHA256:
+                launcher.write(root/'build/baseline-build.json', dict(environment=environment,
+                               transport_inputs={'nccl_transport.py': identity}))
+                stages = []
+                with patch.object(repair, 'repair', return_value=receipt) as migrate, \
+                     patch.object(builder, 'environment_identity', return_value=environment), \
+                     patch.object(builder, 'verify', return_value={'CPU_FIXTURE': True}) as verify:
+                    launcher.reuse_build(args, root/'build', stages.append)
+                self.assertEqual(stages, ['repair-transport-frontend', 'verify-build'])
+                migrate.assert_called_once_with(root/'build')
+                verify.assert_called_once_with(root/'build', True)
+                self.assertEqual(launcher.read(args.out/'build-frontend-repair.json'), receipt)
 
     def test_changed_environment_and_unknown_build_are_not_repaired(self):
         import repair_native_rank as repair
@@ -205,6 +207,53 @@ class Launcher(unittest.TestCase):
         devices[1]['sm_count'] = 132
         with self.assertRaisesRegex(RuntimeError, '170-SM'):
             preflight.validate_devices(devices, peers)
+
+    def test_preflight_preserves_device_memory_evidence_when_later_probe_fails(self):
+        observed = []
+        def memory(device):
+            observed.append(device)
+            return (1000+device, 32000)
+        cuda = SimpleNamespace(
+            is_available=lambda: True, device_count=lambda: 8,
+            get_device_properties=lambda device: SimpleNamespace(
+                name='NVIDIA GeForce RTX 5090', uuid=f'GPU-{device}', major=12, minor=0,
+                multi_processor_count=170, total_memory=33000),
+            can_device_access_peer=lambda source, destination: source == destination,
+            mem_get_info=memory, memory_allocated=lambda device: 16*device,
+            memory_reserved=lambda device: 32*device)
+        torch = SimpleNamespace(version=SimpleNamespace(cuda='12.9'), cuda=cuda)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)/'preflight.json'
+            log, errors = io.StringIO(), io.StringIO()
+            with patch.dict(sys.modules, {'torch': torch}), \
+                 patch.object(preflight, 'toolkit', return_value={'version': '12.9'}), \
+                 patch.object(preflight.importlib, 'import_module', side_effect=RuntimeError('Apex unavailable')), \
+                 redirect_stdout(log), redirect_stderr(errors):
+                with self.assertRaisesRegex(RuntimeError, 'Apex unavailable'):
+                    preflight.main(['--out', str(output), '--cuda-home', '/CPU-FIXTURE',
+                                    '--build-cuda-home', '/CPU-FIXTURE'])
+            evidence = json.loads(output.read_text())
+        self.assertEqual(observed, list(range(8)))
+        self.assertFalse(evidence['completed'])
+        self.assertFalse(evidence['environment_probe_passed'])
+        self.assertEqual(evidence['error'], 'RuntimeError: Apex unavailable')
+        self.assertEqual(json.loads(errors.getvalue()), evidence)
+        self.assertEqual(json.loads(log.getvalue())['devices'], evidence['devices'])
+        for device, row in enumerate(evidence['devices']):
+            self.assertEqual(row['cuda_device'], device)
+            self.assertEqual(row['uuid'], f'GPU-{device}')
+            self.assertEqual(row['free_memory_bytes'], 1000+device)
+            self.assertEqual(row['used_memory_bytes'], 31000-device)
+            self.assertEqual(row['cuda_total_memory_bytes'], 32000)
+            self.assertEqual(row['total_memory_bytes'], 33000)
+            self.assertEqual(row['torch_allocated_bytes'], 16*device)
+            self.assertEqual(row['torch_reserved_bytes'], 32*device)
+
+    def test_invalid_driver_memory_observation_is_not_reported_as_capacity(self):
+        for free, total in ((-1, 32000), (33000, 32000), (0, 0)):
+            torch = SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda _: (free, total)))
+            with self.subTest(free=free, total=total), self.assertRaisesRegex(RuntimeError, 'memory observation'):
+                preflight.memory_state(torch, 0)
 
     def test_worker_environment_routes_all_nine_arms_and_drops_topology_override(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,7 +17,7 @@ p = load('protocol')
 s = load('sources')
 v = load('validation')
 profiles = load('profile')
-from nccl_transport import wire_layout
+from nccl_transport import wire_layout, SCRATCH_POLICY, SHARED_BUFFERS, PACKET_BYTES_PER_SOURCE
 from test_ma2_cr2 import fixture_plan
 from test_baseline_new import fixture_rows as old_fixture_rows
 
@@ -71,6 +71,13 @@ def fixture(arm, mode='timing'):
                                         workspace_bytes=0))
                 row['rtx5090_transport'][name] = (dict(protocol=p.TRANSPORT, failed=False, next_slot=0,
                     slots=[dict(copy.deepcopy(slot), slot=i) for i in range(2)]) if double else slot)
+                record = row['rtx5090_transport'][name]
+                for i, value in enumerate(record.get('slots', [record])):
+                    base = 10000 + (1000 if role == 'mlp' else 0) + 100*i
+                    value.update(scratch_policy=SCRATCH_POLICY,
+                                 shared_scratch_ptrs={kind: base+j for j, kind in enumerate(SHARED_BUFFERS)},
+                                 shared_scratch_bytes=2*8*256*4096*2 + 8*PACKET_BYTES_PER_SOURCE
+                                 + layout['tx_bytes'] + layout['rx_bytes'])
         if arm in ('ma8', 'ma9'):
             for suffix in ('consumer_state', 'submission_state'):
                 row[arm+'_'+suffix] = row.pop('ma11_'+suffix)
@@ -309,6 +316,23 @@ class Workers(unittest.TestCase):
                     v.validate_rows(rows, job, plan, worker)
             with self.assertRaises(ValueError):
                 v.validate_rows(original[:-1], job, plan, worker)
+
+    def test_scratch_pool_identity_memory_and_separation_are_enforced(self):
+        original, job, plan, worker = fixture('ma11')
+        names = sorted(name for name in original[0]['rtx5090_transport']
+                       if name.endswith('.self_attention.linear_proj'))
+        def first(row, index=0):
+            return row['rtx5090_transport'][names[0]]['slots'][index]
+        mutations = [lambda row: first(row).update(scratch_policy='private'),
+                     lambda row: first(row).update(shared_scratch_bytes=0),
+                     lambda row: first(row)['shared_scratch_ptrs'].update(tx_wire=0),
+                     lambda row: first(row)['shared_scratch_ptrs'].update(tx_wire=99999),
+                     lambda row: first(row, 1).update(shared_scratch_ptrs=first(row)['shared_scratch_ptrs'])]
+        for mutate in mutations:
+            rows = copy.deepcopy(original)
+            mutate(rows[0])
+            with self.subTest(mutate=mutate), self.assertRaisesRegex(ValueError, 'scratch'):
+                v.validate_rows(rows, job, plan, worker)
 
     def test_c_mask_and_rca_workspace_ownership_checked(self):
         rows, job, plan, worker = fixture('c')

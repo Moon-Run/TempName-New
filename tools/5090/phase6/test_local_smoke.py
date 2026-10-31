@@ -24,6 +24,33 @@ s = module('rtx5090_local_smoke_tested', HERE/'local_smoke.py')
 t = module('rtx5090_local_smoke_transport', HERE/'nccl_transport.py')
 
 
+def shared_scratch_fixture(arm, state, reference):
+    count = 1 if arm in ('a', 'r') else 2
+    pointers = [[dict(shared={key: 1000+index*10+offset for offset, key in enumerate(s.SHARED_BUFFERS)},
+                      packet=2000+instance*10+index, mask=3000+instance*10+index if count == 2 else None,
+                      native=4000+instance*10+index)
+                 for index in range(count)] for instance in range(2)]
+
+    def lifecycle(instance, calls):
+        result = copy.deepcopy(state)
+        slots = result.get('slots', [result])
+        for index, slot in enumerate(slots):
+            expected = calls if count == 1 else (calls+1-index)//2
+            slot.update({key: expected for key in ('calls', 'producer_calls', 'pack_calls', 'exchange_calls',
+                                                   'wait_calls', 'unpack_calls', 'decode_calls')})
+            slot.update(closed=False, consumer_calls=0, initializations=1 if arm in s.FUSED else expected,
+                        reconfigure_calls=expected if arm == 'a' else 0, scratch_policy=s.SCRATCH_POLICY,
+                        shared_scratch_bytes=123456, shared_scratch_ptrs=pointers[instance][index]['shared'])
+        return result
+
+    return dict(passed=True, scratch_policy=s.SCRATCH_POLICY, instances=2, slots_per_instance=count,
+                pointers=pointers, calls_before_close=[4, 4], async_burst_calls=6,
+                repeated_bitwise=True, retained_outputs=8,
+                retained_bitwise=True, output_storage_independent=True, survivor_after_close_bitwise=True,
+                reference_checks=[dict(reference), dict(reference)],
+                before_close=[lifecycle(0, 4), lifecycle(1, 4)], survivor_after_close=lifecycle(1, 5))
+
+
 def rows_for(arm):
     """Structural CPU fixture, tagged by its path/UUID; never stored in logs/."""
     rows = []
@@ -55,7 +82,7 @@ def rows_for(arm):
                                if arm in s.FUSED else None,
                                retained_outputs=dict(passed=True, count=6, reuse_calls=7,
                                                      independent_storage=True, unchanged_after_subsequent_calls=True),
-                               transport=state)
+                               transport=state, shared_scratch=shared_scratch_fixture(arm, state, one))
         rows.append(dict(protocol=s.PROTOCOL, transport_protocol=s.TRANSPORT_PROTOCOL, completed=True,
                          arm=arm, rank=rank, gpu_uuid=f'CPU-FIXTURE-{rank}', build_manifest_sha256='a'*64, roles=roles))
     return rows
@@ -142,6 +169,41 @@ class Smoke(unittest.TestCase):
                 s.write(root/'rank0.json', changed)
                 with self.assertRaisesRegex(RuntimeError, 'Unfinished'):
                     s.validate_reports(root, arm, 'a'*64)
+
+    def test_reports_require_cross_instance_gpu_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = rows_for('ma11')
+            for rank, row in enumerate(rows):
+                s.write(root/f'rank{rank}.json', row)
+            del rows[0]['roles']['attn']['shared_scratch']
+            s.write(root/'rank0.json', rows[0])
+            with self.assertRaisesRegex(RuntimeError, 'Missing shared scratch GPU evidence'):
+                s.validate_reports(root, 'ma11', 'a'*64)
+
+    def test_cross_instance_evidence_rejects_aliases_stale_outputs_and_incomplete_cleanup(self):
+        for arm in s.ARMS:
+            record = rows_for(arm)[0]['roles']['attn']['shared_scratch']
+            for label in ('not_shared', 'private_aliased', 'output_changed', 'close_invalidated',
+                          'pending_survivor', 'missing_call', 'bad_reference'):
+                with self.subTest(arm=arm, fault=label):
+                    changed = copy.deepcopy(record)
+                    if label == 'not_shared':
+                        changed['pointers'][1][0]['shared']['tx_bf16'] += 100
+                    elif label == 'private_aliased':
+                        changed['pointers'][1][0]['packet'] = changed['pointers'][0][0]['packet']
+                    elif label == 'output_changed':
+                        changed['retained_bitwise'] = False
+                    elif label == 'close_invalidated':
+                        changed['survivor_after_close_bitwise'] = False
+                    elif label == 'bad_reference':
+                        changed['reference_checks'][0]['protocol_relative_l2'] = .02
+                    else:
+                        state = changed['survivor_after_close']
+                        slot = state.get('slots', [state])[0]
+                        slot['pending_exchange' if label == 'pending_survivor' else 'decode_calls'] = True
+                    with self.assertRaises(RuntimeError):
+                        s.validate_shared_scratch(changed, arm)
 
 
 if __name__ == '__main__':

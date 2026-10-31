@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import weakref
 
 PROTOCOL = 'rtx5090-nccl-staged-v2'
 NATIVE_ARM = '__RTX5090_NATIVE_ARM__'
@@ -22,6 +23,8 @@ STATE_FIELDS = ('protocol_version', 'initializations', 'producer_calls', 'decode
 TILE_BF16_BYTES = 128 * 128 * 2
 TILE_PACKET_BYTES = 128 * 136
 PACKET_BYTES_PER_SOURCE = 256 * 32 * 136
+SCRATCH_POLICY = 'fixed-stream-shared-scratch-private-packets-v1'
+SHARED_BUFFERS = ('tx_bf16', 'tx_packets', 'rx_bf16', 'tx_wire', 'rx_wire')
 
 
 def require(condition, message):
@@ -149,15 +152,48 @@ class _NativeRuntime:
             self._closed = True
 
 
+class _Scratch:
+    """Scratch is live only from produce through decode on one fixed stream.
+
+    Receive packets, selection masks, native handles/GEMM caches and returned
+    outputs remain private. The two rotating slots use separate scratch keys.
+    Holding the same submission lock across instances prevents host threads
+    from interleaving produce/exchange/decode on a shared allocation.
+    """
+    def __init__(self, buffers, group):
+        self.buffers, self.group = buffers, group
+        self.lock = threading.Lock()
+        self.failed = False
+
+
+class _ScratchPool:
+    def __init__(self):
+        self.entries = weakref.WeakValueDictionary()
+        self.lock = threading.Lock()
+
+    def acquire(self, key, factory, group):
+        with self.lock:
+            scratch = self.entries.get(key)
+            if scratch is None:
+                scratch = _Scratch(factory(), group)
+                self.entries[key] = scratch
+            require(not scratch.failed, 'Cannot reuse failed shared NCCL TACO scratch')
+            return scratch
+
+
+_SCRATCH_POOL = _ScratchPool()
+
+
 class _Exchange:
     """Fixed-stream single-flight submission, independently testable on CPU."""
     def __init__(self, native, torch, dist, buffers, layout, group, device, stream,
-                 *, reconfigure=False, profile=False):
+                 *, reconfigure=False, profile=False, scratch=None):
         self.native, self.torch, self.dist = native, torch, dist
         self.buffers, self.layout, self.group = buffers, layout, group
         self.device, self.stream = device, stream
         self.reconfigure, self.profile = reconfigure, profile
-        self.lock = threading.Lock()
+        self.scratch = scratch
+        self.lock = scratch.lock if scratch is not None else threading.Lock()
         self.failed = self.closed = False
         self.inflight = None
         self.calls = self.exchange_calls = self.wait_calls = 0
@@ -165,12 +201,19 @@ class _Exchange:
     def scope(self, name):
         return self.torch.profiler.record_function('rtx5090.transport.'+name) if self.profile else nullcontext()
 
+    def poison(self):
+        self.failed = True
+        if self.scratch is not None:
+            self.scratch.failed = True
+
     def run(self, input_, weight, output, bias=None, residual=None):
         if not self.lock.acquire(blocking=False):
-            self.failed = True
+            self.poison()
             raise RuntimeError('Concurrent or reentrant NCCL TACO submission')
         try:
             require(not self.failed and not self.closed, 'Cannot reuse failed/closed NCCL TACO staging')
+            require(self.scratch is None or not self.scratch.failed,
+                    'Cannot reuse failed shared NCCL TACO scratch')
             require(self.torch.cuda.current_device() == self.device and
                     self.torch.cuda.current_stream().cuda_stream == self.stream,
                     'NCCL TACO staging requires its creation device and CUDA stream')
@@ -201,7 +244,7 @@ class _Exchange:
             self.calls += 1
             return output
         except BaseException:
-            self.failed = True
+            self.poison()
             raise
         finally:
             self.lock.release()
@@ -216,7 +259,13 @@ class _Exchange:
                     native_workspace_bytes=native['workspace_bytes'],
                     reconfigure_calls=native['reconfigure_calls'],
                     configuration_scope='per_call' if self.reconfigure else 'instance',
-                    failed=bool(self.failed or native['failed']), closed=self.closed,
+                    failed=bool(self.failed or native['failed'] or
+                                (self.scratch is not None and self.scratch.failed)), closed=self.closed,
+                    scratch_policy=SCRATCH_POLICY if self.scratch is not None else 'private',
+                    shared_scratch_bytes=(sum(t.numel()*t.element_size() for t in self.scratch.buffers.values())
+                                          if self.scratch is not None else 0),
+                    shared_scratch_ptrs=({key: value.data_ptr() for key, value in self.scratch.buffers.items()}
+                                         if self.scratch is not None else {}),
                     pending_exchange=self.inflight is not None, native_phase=native['phase'],
                     device=self.device, stream=self.stream, peer_memory=False,
                     send_split_bytes=list(self.layout['tx_splits']), receive_split_bytes=list(self.layout['rx_splits']),
@@ -237,7 +286,7 @@ class _Exchange:
 
 class GemmRSTaco:
     def __init__(self, group, m, n, k_local, placement=None, selected=None, graph=False,
-                 _defer_reuse_barrier=False, quantization_mode=None):
+                 _defer_reuse_barrier=False, quantization_mode=None, _scratch_slot=0):
         import torch
         import torch.distributed as dist
         require(NATIVE_ARM in NATIVE_ARMS, 'Builder must bind the native arm before installing this frontend')
@@ -273,15 +322,21 @@ class GemmRSTaco:
         digests = [None]*8
         dist.all_gather_object(digests, identity, group=group)
         require(all(value == identity for value in digests), 'Ranks disagree on native arm, shape or packet schema')
-        self.buffers = {
-            key: torch.empty((8, 256, 4096), dtype=torch.bfloat16, device=self.device)
-            for key in ('tx_bf16', 'rx_bf16')}
-        self.buffers.update({
-            key: torch.empty((8, PACKET_BYTES_PER_SOURCE), dtype=torch.uint8, device=self.device)
-            for key in ('tx_packets', 'rx_packets')})
+        require(type(_scratch_slot) is int and _scratch_slot in (0, 1), 'Invalid staging slot')
+        scratch_key = (id(group), self.device, self.stream, NATIVE_ARM, m, n, k_local,
+                       self.selection_sha256, _scratch_slot)
+        def allocate_scratch():
+            buffers = {key: torch.empty((8, 256, 4096), dtype=torch.bfloat16, device=self.device)
+                       for key in ('tx_bf16', 'rx_bf16')}
+            buffers['tx_packets'] = torch.empty((8, PACKET_BYTES_PER_SOURCE), dtype=torch.uint8, device=self.device)
+            for prefix in ('tx', 'rx'):
+                buffers[prefix+'_wire'] = torch.empty((layout[prefix+'_bytes'],), dtype=torch.uint8, device=self.device)
+            return buffers
+        self._scratch = _SCRATCH_POOL.acquire(scratch_key, allocate_scratch, group)
+        self.buffers = dict(self._scratch.buffers)
+        self.buffers['rx_packets'] = torch.empty((8, PACKET_BYTES_PER_SOURCE), dtype=torch.uint8, device=self.device)
         for prefix in ('tx', 'rx'):
             self.buffers[prefix+'_offsets'] = torch.tensor(layout[prefix+'_offsets'], dtype=torch.int64, device=self.device)
-            self.buffers[prefix+'_wire'] = torch.empty((layout[prefix+'_bytes'],), dtype=torch.uint8, device=self.device)
         self.packet_bytes_per_source = PACKET_BYTES_PER_SOURCE
         self._wire_bytes_per_rank = layout['tx_bytes']
         library = (Path(__file__).parent/'lib/libflux_cuda.so').resolve()
@@ -292,7 +347,8 @@ class GemmRSTaco:
                                 self.selected, self.buffers, layout, self.stream)
         self.lib = native.lib
         self._exchange = _Exchange(native, torch, dist, self.buffers, layout, group, self.device, self.stream,
-                                   reconfigure=NATIVE_ARM == 'a', profile=os.environ.get('E2E_MODE') == 'profile')
+                                   reconfigure=NATIVE_ARM == 'a', profile=os.environ.get('E2E_MODE') == 'profile',
+                                   scratch=self._scratch)
 
     def _forward(self, input_, weight, bias=None, residual=None):
         tensors = [(input_, (self.m, self.k_local)), (weight, (self.n, self.k_local))]
@@ -365,7 +421,7 @@ class GemmRSTacoDoubleBuffered:
     """Two local staging slots; no cross-rank reuse rendezvous is required."""
     def __init__(self, *args, **kwargs):
         require(NATIVE_ARM in ('c', 'cr3', 'ma89', 'ma11'), 'Double staging is only defined for selective arms')
-        self.slots = [GemmRSTaco(*args, **kwargs) for _ in range(2)]
+        self.slots = [GemmRSTaco(*args, **kwargs, _scratch_slot=index) for index in range(2)]
         self.next_slot = 0
         self._failed = False
         self._lock = threading.Lock()

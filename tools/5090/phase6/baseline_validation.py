@@ -11,7 +11,7 @@ import ma8_fullstep
 import ma9_fullstep
 import ma11_fullstep
 import basic_quant_validation
-from nccl_transport import wire_layout
+from nccl_transport import wire_layout, SCRATCH_POLICY, SHARED_BUFFERS, PACKET_BYTES_PER_SOURCE
 from tp8_dp2_protocol import validate_projection_checks
 
 PREFIX = {'ma11': 'ma11', 'ma89': 'ma11', 'ma8': 'ma8', 'ma9': 'ma9', 'cr3': 'ma4_f'}
@@ -56,6 +56,7 @@ def validate_transport(row, arm, calls, names, layouts):
     require(set(records) == names, 'Missing per-module local transport evidence')
     double = arm in p.QUANT_SELECTIVE
     workspace_bytes = 0
+    scratch_sets, scratch_owners = {}, {}
     for name, record in records.items():
         require(record['protocol'] == p.TRANSPORT and record['failed'] is False, 'Failed/foreign transport')
         if double:
@@ -95,6 +96,22 @@ def validate_transport(row, arm, calls, names, layouts):
             allocated = slot['native_workspace_bytes']
             require(type(allocated) is int and allocated >= 0, 'Missing raw CUDA TACO workspace accounting')
             workspace_bytes += allocated
+            scratch_key = (role, index, slot['device'], slot['stream'])
+            pointers = slot.get('shared_scratch_ptrs', {})
+            require(slot.get('scratch_policy') == SCRATCH_POLICY and set(pointers) == set(SHARED_BUFFERS)
+                    and all(type(pointer) is int and pointer > 0 for pointer in pointers.values())
+                    and len(set(pointers.values())) == len(SHARED_BUFFERS)
+                    and slot.get('shared_scratch_bytes') ==
+                    2*8*256*4096*2 + 8*PACKET_BYTES_PER_SOURCE + layout['tx_bytes'] + layout['rx_bytes'],
+                    'Missing shared scratch identity or incorrect memory budget')
+            require(scratch_key not in scratch_sets or scratch_sets[scratch_key] == pointers,
+                    'Same-role staging scratch was duplicated across modules')
+            scratch_sets[scratch_key] = pointers
+            for kind, pointer in pointers.items():
+                owner = (scratch_key, kind)
+                require(pointer not in scratch_owners or scratch_owners[pointer] == owner,
+                        'Staging scratch aliases a different role, slot, stream or buffer')
+                scratch_owners[pointer] = owner
             expected_native = dict(protocol_version=1, initializations=initializations,
                                    producer_calls=expected_calls, decode_calls=expected_calls,
                                    bias_residual_calls=consumers, phase=0, failed=False,

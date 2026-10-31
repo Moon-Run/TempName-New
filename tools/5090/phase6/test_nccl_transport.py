@@ -1,8 +1,10 @@
 """CPU-only packet schema and stream-order tests; no fake GPU measurements."""
 from contextlib import contextmanager
+import gc
 import importlib.util
 from pathlib import Path
 import random
+import sys
 import threading
 from types import SimpleNamespace
 import unittest
@@ -147,6 +149,111 @@ class NativeInitialization(unittest.TestCase):
                 with self.subTest(rank=rank), self.assertRaisesRegex(RuntimeError, 'matching CUDA device'):
                     t._NativeRuntime('unused.so', torch, rank, 512, True, None, {}, {}, 1729)
                 library.assert_not_called()
+
+
+class ScratchReuse(unittest.TestCase):
+    def test_pool_releases_unused_storage_and_rejects_poisoned_storage(self):
+        pool = t._ScratchPool()
+        factory = Mock(return_value={'CPU': object()})
+        first = pool.acquire(('stream', 0), factory, 'group')
+        self.assertIs(pool.acquire(('stream', 0), factory, 'group'), first)
+        factory.assert_called_once()
+        second = pool.acquire(('stream', 1), factory, 'group')
+        self.assertIsNot(first, second)
+        first.failed = True
+        with self.assertRaisesRegex(RuntimeError, 'failed shared'):
+            pool.acquire(('stream', 0), factory, 'group')
+        del first
+        gc.collect()
+        self.assertNotIn(('stream', 0), pool.entries)
+        self.assertFalse(pool.acquire(('stream', 0), factory, 'group').failed)
+
+    def test_siblings_serialize_and_share_failure_but_close_independently(self):
+        first, x, _ = exchange()
+        second, y, log = exchange()
+        scratch = t._Scratch({}, 'TP8')
+        for instance in (first, second):
+            instance.scratch, instance.lock = scratch, scratch.lock
+        first.run(x['input'], x['weight'], x['output'])
+        second.run(y['input'], y['weight'], y['output'])
+        first.close()
+        second.run(y['input'], y['weight'], y['output'])
+        self.assertEqual(second.calls, 2)
+        scratch.lock.acquire()
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'reentrant'):
+                first.run(x['input'], x['weight'], x['output'])
+        finally:
+            scratch.lock.release()
+        before = list(log)
+        with self.assertRaisesRegex(RuntimeError, 'failed shared'):
+            second.run(y['input'], y['weight'], y['output'])
+        self.assertEqual(before, log)
+        self.assertTrue(second.state()['failed'])
+
+    def test_64_projections_keep_private_packets_and_only_four_scratch_sets(self):
+        # Model the actual constructors and allocation sizes without allocating
+        # GPU memory. Different role/slot/stream/group/mask must not alias.
+        allocations = []
+        class Storage:
+            def __init__(self, shape, dtype):
+                self.shape, self.dtype = shape, dtype
+                allocations.append(self)
+                self.pointer = len(allocations)*4096
+            def numel(self):
+                result = 1
+                for dimension in self.shape:
+                    result *= dimension
+                return result
+            def element_size(self):
+                return {'bf16': 2, 'u8': 1, 'i64': 8}[self.dtype]
+            def data_ptr(self):
+                return self.pointer
+            def to(self, **_):
+                return Storage(self.shape, self.dtype)
+        def tensor(value, dtype, **_):
+            shape = (len(value), len(value[0])) if isinstance(value[0], list) else (len(value),)
+            return Storage(shape, dtype)
+        cuda = Cuda()
+        cuda.device_count = lambda: 8
+        cuda.get_device_properties = lambda _: SimpleNamespace(major=12, minor=0, multi_processor_count=170)
+        dist = SimpleNamespace(get_rank=lambda _: 3, get_world_size=lambda _: 8,
+                               get_backend=lambda _: 'nccl',
+                               all_gather_object=lambda target, value, **_: target.__setitem__(slice(None), [value]*8))
+        torch = SimpleNamespace(cuda=cuda, distributed=dist, bfloat16='bf16', uint8='u8', int64='i64',
+                                tensor=tensor, empty=lambda shape, dtype, **_: Storage(shape, dtype))
+        library = (HERE/'lib/libflux_cuda.so').resolve()
+        pool = t._ScratchPool()
+        mask = [[0]*512 for _ in range(8)]
+        group = object()
+        with patch.dict(sys.modules, {'torch': torch, 'torch.distributed': dist}), \
+             patch.dict(t.os.environ, NCCL_P2P_DISABLE='1', LOCAL_WORLD_SIZE='8', LOCAL_RANK='3'), \
+             patch.object(t, 'NATIVE_ARM', 'ma11'), patch.object(t, '_SCRATCH_POOL', pool), \
+             patch.object(t, '_NativeRuntime', side_effect=lambda *args: Mock()), \
+             patch.object(t.Path, 'read_text', return_value=str(library)):
+            ops = [t.GemmRSTacoDoubleBuffered(group, 2048, 4096, k, selected=mask, quantization_mode='targeted')
+                   for _ in range(32) for k in (512, 2048)]
+            slots = [slot for op in ops for slot in op.slots]
+            self.assertEqual(len(pool.entries), 4)
+            for key in t.SHARED_BUFFERS:
+                self.assertEqual(len({slot.buffers[key].data_ptr() for slot in slots}), 4)
+            self.assertEqual(len({slot.buffers['rx_packets'].data_ptr() for slot in slots}), 128)
+            self.assertEqual(len({slot.selected.data_ptr() for slot in slots}), 128)
+            self.assertEqual(len({id(slot._exchange.native) for slot in slots}), 128)
+            scratch_bytes = sum(value.numel()*value.element_size() for value in ops[0].slots[0]._scratch.buffers.values())
+            # The all-BF16 wire is the largest possible selective allocation.
+            self.assertEqual(scratch_bytes, 68.5*1024**2)
+            self.assertGreater((128-4)*scratch_bytes, 8*1024**3)
+            cuda.stream += 1
+            other_stream = t.GemmRSTacoDoubleBuffered(group, 2048, 4096, 512, selected=mask, quantization_mode='targeted')
+            self.assertEqual(len(pool.entries), 6)
+            cuda.stream -= 1
+            other_group = t.GemmRSTacoDoubleBuffered(object(), 2048, 4096, 512, selected=mask, quantization_mode='targeted')
+            mask[3][0] = 1
+            other_mask = t.GemmRSTacoDoubleBuffered(group, 2048, 4096, 512, selected=mask, quantization_mode='targeted')
+            self.assertEqual(len(pool.entries), 10)
+            for op in [*ops, other_stream, other_group, other_mask]:
+                op.close()
 
 
 class Layout(unittest.TestCase):

@@ -4,7 +4,7 @@
 
 **当前状态：代码改为不依赖 P2P 的 NCCL staging v2，尚无 RTX 5090 训练实测结果。** 2026-10-30 用户回传的官方 `nvcr.io/nvidia/pytorch:25.06-py3` 临时容器检查确认，8 张 RTX 5090 均为 SM120 / 170 SM，但全部 56 条跨卡有向 peer-access 链路不可用。新的投影路径为 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**，不再把其他 GPU 的地址交给 CUDA kernel。P2P 矩阵仍记录在预检证据中，但不再要求链路可用。
 
-本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。2026-10-31 两次目标机批次均通过八组 TACO 原生传输 smoke，但八个 rank 在完整模型 MA11 的 softmax 数值自检中失败，日志未报显存不足。完整模型检查和正式计时仍未通过，不把 H100 耗时填作 5090 耗时。
+本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。**最新回传 `20261031-210050-693717` / `20261031-210455-861085` 已通过独立 MA11 softmax 逐位自检及八组 TACO 原生传输 smoke，随后在完整模型 MA11 首轮前向发生 CUDA OOM。** 当前增加同 stream 临时 staging scratch 复用和严格旧构建迁移；修复后的完整模型检查和正式计时仍待目标机执行，不把 H100 耗时填作 5090 耗时。
 
 ## 1. 对比目标与 H100 参考
 
@@ -24,7 +24,7 @@ H100 行来自历史多批次汇总，供背景参考；5090 待测行将填写�
 
 | 展示名称（均为 staged 迁移版） | 脚本组名 | 原机制 ID | 新后端中保留的比较内容 |
 | --- | --- | --- | --- |
-| MA11 | `ma11` | `F4-cache-zcount-csoftmax` | 完整 MA89，加注意力 mask/softmax 中间态消除；保留原归约树、BF16 舍入和 QK/PV 算术。 |
+| MA11 | `ma11` | `F4-cache-zcount-csoftmax` | 完整 MA89，加注意力 mask/softmax 中间态消除；softmax 对齐目标 PyTorch 的归约与 BF16 舍入，QK/PV 算术不变。 |
 | MA89 | `ma89` | `F4-cache-zcount` | CR3，加 MA8-v2 前后向激活复用和 MA9 保序多张量零梯度统计。 |
 | MA8 | `ma8` | `F4-cache` | CR3，加 MA8-v2 激活缓存；QKV/FC1 反向复用前向完整输入，减少重复 AllGather。 |
 | MA9 | `ma9` | `F4-zcount` | CR3，加分块计数与保序汇总两个零统计 kernel；不改梯度范数、裁剪和 Adam。 |
@@ -46,7 +46,7 @@ H100 行来自历史多批次汇总，供背景参考；5090 待测行将填写�
 
 H100 Phase6 的量化投影使用 CUTLASS V2，内部注册键为 SM80/A100。5090 构建将机器码编译为 **`sm_120`**，本地 producer 使用冻结 GEMM/epilogue 算术和 swizzle，将按目的 rank 打包的内容写入本 GPU 的发送缓冲，不构造 CUDA IPC peer 地址或跨卡 GroupBarrier。NCCL 交换完成后，decoder 只访问本 GPU 的接收缓冲和本地 BF16 贡献，保留原 source 归约顺序与舍入。
 
-生产、交换、消费按 CUDA stream 依赖排序：先完成本地 producer 的 packet 写入，再提交字节 All-to-All，等待通信的 stream 依赖后启动本地 decoder；工作区再次写入前必须排在上次消费之后。失败的实例不继续复用。**这一版本不尝试恢复原 GEMM tile 尚在产生时跨卡发送和到达优先消费的重叠**，通信开始时间与源端排序的性能意义都已改变。
+生产、交换、消费按 CUDA stream 依赖排序：先完成本地 producer 的 packet 写入，再提交字节 All-to-All，等待通信的 stream 依赖后启动本地 decoder；工作区再次写入前必须排在上次消费之后。临时 scratch 按进程组、GPU、固定 stream、native arm、形状、mask 和 slot 共享，持有同一提交锁直到 decoder 提交完成；下一实例的 producer 排在该 stream 上的 decoder 之后。任何失败会同时禁止共享该 scratch 的实例继续提交。**这一版本不尝试恢复原 GEMM tile 尚在产生时跨卡发送和到达优先消费的重叠**，通信开始时间与源端排序的性能意义都已改变。
 
 全部九组冻结 `NCCL_P2P_DISABLE=1`、`NCCL_SHM_DISABLE=0`、`NCCL_NVLS_ENABLE=0`，保留并记录其他 NCCL/NIC 设置。这里允许 NCCL 使用主机中转，不把环境变量本身作为“实际采用 SHM”的证据；具体 transport 由 NCCL/目标系统选择。
 
@@ -59,7 +59,7 @@ Flux＋基础量化使用适合 5090 的 **GemmOnly V2** 后端；H100 该列的
 - 不要求 CUDA peer access；预检记录完整矩阵，并启动真实八 rank NCCL 检查。BF16 AllGather、AllReduce、ReduceScatter，以及非等长 `uint8` All-to-All（self split 为 0）必须全部正确。探针在非默认 CUDA stream 上循环三次并等待异步 Work，记录每个 rank 的 GPU、软件环境和通信配置。
 - 仓库中的冻结源码、选择表、相应依赖以及指定的 Megatron 源码完整可用。构建器按源文件身份校验，在新的输出目录生成 SM120 二进制，不复用 H100 的 `.so`。
 
-新增本地 staging 需要显存。按当前选择性量化配置估算，每个 slot 的发送/接收等 packet 工作区约 77 MiB，64 个目标模块、双 slot 约为 9.6 GiB 量级；还需叠加模型、optimizer、激活缓存和临时张量。32 GiB 5090 上的实际峰值必须通过完整 smoke 确认，代码不会为绕过 OOM 自动缩小 batch、关闭 MA8 缓存或减少模型层数。
+旧本地 staging 为每个 slot 分别分配约 77 MiB，64 个目标模块、双 slot 的张量约占每卡 9.6 GiB。当前 `fixed-stream-shared-scratch-private-packets-v1` 复用五项临时缓冲：`tx_bf16`、`tx_packets`、`rx_bf16`、`tx_wire`、`rx_wire`。接收 `rx_packets`、选择 mask、偏移表、native handle、GEMM workspace/提交缓存及返回输出保持每实例独立，双 slot 继续轮转且不互相共享 scratch。当前两种形状、一个 stream 对应四套共享 scratch；按冻结 mask 逐 rank 计算，这部分张量总驻留从 **9.5935–9.6091 GiB 降至 1.3305–1.3310 GiB，减少 8.2630–8.2781 GiB**。这是分配尺寸计算，不是实测峰值；还需叠加模型、optimizer、激活缓存和临时张量。32 GiB 5090 上的完整 smoke 仍是门禁，模型层数、batch、MA8 缓存及逐位数值检查均不降低。
 
 GEMM 私有 workspace 使用独立 `cudaMalloc`，不在 PyTorch allocator 峰值中。每个 rank 另记所有 TACO slot 的 `native_workspace_bytes`，报告同时展示 Torch allocated 峰值及逐 rank 加上 TACO workspace 后的最大值；该合计仍不包含 CUDA context、NCCL 等内部显存，不能视为整卡总占用。
 
@@ -96,7 +96,22 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 新增 `tools/5090/phase6/ma11_softmax_5090.cu`，前向使用 32 线程 warp、每线程 64 个元素与 XOR 归约，反向使用 128 线程的两级 warp 归约，并保留 BF16 中间乘积舍入与 mask。它是 5090 的独立 CUDA 库，不修改 H100 实现或原有 Flux/TACO 构建。完整测试会编译该小库，先在 GPU 0 上独立运行 6 组前向及反向逐位自检；全部通过后继续原生传输和完整模型检查。自检失败会分别报告 `forward_bitwise`、`backward_bitwise`，没有放宽比较门禁。MA89 profile 同步检查目标版本的 warp softmax 路径。
 
-本地已完成 SM120 CUDA 编译及 CPU 回归；目标 RTX 5090 的逐位自检及完整模型测试仍待执行，不能把编译成功视为 GPU 数值验证或正式性能结果。
+后续 `20261031-210455-861085/ma11-compat/self-test/probe-result.json` 已记录目标 RTX 5090 上 6 组前向及反向逐位检查全部通过，RNG 未改变；这解决了先前独立 softmax 自检的阻塞，完整模型和正式性能验证仍未完成。
+
+### 最新 OOM 定位与修复（2026-10-31）
+
+失败证据均在 `Load-5090/logs/5090/phase6/` 的对应批次中，原始文件保持不变：
+
+| 批次 | 失败证据 | 结论 |
+| --- | --- | --- |
+| `20261031-210050-693717` | `results/smoke-ma11/process.log`：例如 rank1 申请 16 MiB，整卡仅剩 14.75 MiB，而该进程占用约 17.56 GiB | 存在未被该进程占用解释的显存用量；旧预检没有 free-memory 快照，无法仅凭日志归因到具体进程。 |
+| `20261031-210455-861085` | 同文件：rank7 等在 `ma11_adapter.py` 的 `value.masked_fill(mask, -10000).softmax(-1)` 申请 32 MiB 失败；进程占用 31.32 GiB、Torch allocated 26.34 GiB、可用 30.19 MiB | 已是本进程容量不足。该 32 MiB 是触发分配；删除自检不代表完整 optimizer step 能装下。 |
+
+修复覆盖八组 TACO 前端，保留 A 逐调用配置、R/C 实例配置、CR3 家族提交缓存、MA8/MA9/MA11 机制与选择表。Flux＋基础量化继续原有独立 codec。构建迁移仅更新六份 Python 前端和哈希清单，沿用已编译 CUDA 二进制；完整 smoke、跨组 loss/gradient/parameter 检查、profile 和正式计时均重新执行。工作区策略及每 slot 的实际共享地址/字节数写入训练记录；报告拒绝同组模块未共享或不同 role/slot/stream 错误别名。
+
+原生 smoke 新增两个实例的连续交替提交检查：核对五项 scratch 共享、双 slot 分离、接收 packet/mask/native handle 私有、先前输出不被覆盖，以及关闭一个实例后另一实例仍能正确执行。逐卡预检新增 CUDA free/total/used 和本进程 Torch allocated/reserved；后续预检失败仍保留已采集快照。`nvidia-smi` 的计算进程列表为空不能单独证明显存空闲，快照也只是当时观测。
+
+本次修复在无 GPU 的开发环境执行 `python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**93 项测试全部通过**，另通过入口预览与 `git diff --check`。测试覆盖冻结训练/计时 AST、九组报告、SM120 softmax 编译、共享 scratch 生命周期以及旧构建迁移/回滚。**尚未在目标 RTX 5090 上运行新的共享 scratch smoke 或完整模型**，实际可运行性及峰值以重跑结果为准。
 
 ## 4. 一键执行
 
@@ -159,7 +174,7 @@ bash tools/5090/phase6/run_baseline.sh --execute --foreground \
 
 正式执行先检查九组 worker 源码，再进行硬件检查和构建，避免源码错误在长时间编译后才被发现。`_NativeRuntime` 在设备检查前绑定传入的 rank，保持 rank/device 一致性门禁。
 
-自动修复只接受源码哈希为 `61bb8c847e41774648629cc1cffcb35729601bd6ad64e6fa9f73a8d6c0ebab22` 的已知旧前端及这次单行修复；其他原生源码、库、环境或构建身份变化仍会拒绝复用。旧文件备份位于构建目录的 `repairs/native-rank-*/`，新批次保存 `build-frontend-repair.json`，校验失败会恢复原文件。修复过程持有与测试相同的仓库锁，不会与另一个批次同时修改构建。已修复构建再次使用时只校验；旧失败批次不会被改写为成功。
+自动迁移只接受两个冻结旧前端：缺少 rank 初始化的 `61bb8c847e41774648629cc1cffcb35729601bd6ad64e6fa9f73a8d6c0ebab22`，以及已修 rank、仍为每实例完整分配的 `ba668cc182904040bce8592d5d98840e0a286dde9dbcec4742874ddbd65eca8c`。两者均升级到共享 scratch 前端；其他原生源码、库、环境或构建身份变化仍拒绝复用。同步目录时须包含 `legacy_nccl_transport_v2.txt`，供旧源码精确校验。旧文件备份位于构建目录的 `repairs/`，新批次保存 `build-frontend-repair.json`，校验失败会恢复原文件。迁移持有与测试相同的仓库锁；已升级构建再次使用时只校验。原失败结果不改写，也不与新工作区策略的正式结果混算。
 
 `run_transport_smoke.sh` 固定使用前台传输检查；不加 `--execute` 时仅预览，不修复构建、不使用 GPU。传输 smoke 子进程失败时，入口会直接打印 rank 记录中的原始错误，并保留 `process.log`。
 

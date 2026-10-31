@@ -45,18 +45,42 @@ def validate_devices(devices, peers):
     return [(i, j) for i in range(8) for j in range(8) if i != j and not peers[i][j]]
 
 
-def probe(cuda_home, build_cuda_home):
+def memory_state(torch, device):
+    """Observe driver-wide usage as well as this probe's allocator usage.
+
+    Explicit logical CUDA indices respect CUDA_VISIBLE_DEVICES, unlike joining
+    an nvidia-smi physical index to a torchrun rank. Driver usage includes other
+    processes and non-Torch allocations; it is not a process attribution.
+    """
+    free, total = map(int, torch.cuda.mem_get_info(device))
+    require(0 <= free <= total and total > 0, 'Invalid CUDA memory observation')
+    return dict(free_memory_bytes=free, cuda_total_memory_bytes=total,
+                used_memory_bytes=total-free,
+                torch_allocated_bytes=int(torch.cuda.memory_allocated(device)),
+                torch_reserved_bytes=int(torch.cuda.memory_reserved(device)))
+
+
+def probe(cuda_home, build_cuda_home, *, evidence=None):
+    # Preserve observations if a later Apex, topology, or inventory check fails.
+    evidence = {} if evidence is None else evidence
     build_toolkit, runtime_toolkit = toolkit(build_cuda_home), toolkit(cuda_home)
+    evidence.update(build_toolkit=build_toolkit, runtime_toolkit=runtime_toolkit)
     import torch
     require(torch.version.cuda is not None and version(torch.version.cuda) >= (12, 8),
             'Use a CUDA >= 12.8 PyTorch build with SM120 support; the H100 cu124 environment is unsuitable')
     require(torch.cuda.is_available(), 'CUDA is unavailable in the selected Python environment')
     require(torch.cuda.device_count() == 8, 'CUDA_VISIBLE_DEVICES must expose exactly eight RTX 5090 GPUs')
     devices = []
+    evidence.update(devices=devices,
+                    memory_observation_stage='after_cuda_context_initialization_before_apex_probes',
+                    memory_observation_scope='device-wide point-in-time usage; not an idle or capacity guarantee')
     for i in range(8):
         prop = torch.cuda.get_device_properties(i)
         devices.append(dict(name=prop.name, uuid=str(prop.uuid), capability=[prop.major, prop.minor],
-                            sm_count=prop.multi_processor_count, total_memory_bytes=prop.total_memory))
+                            sm_count=prop.multi_processor_count, total_memory_bytes=prop.total_memory,
+                            cuda_device=i, **memory_state(torch, i)))
+    print(json.dumps(dict(memory_observation_stage=evidence['memory_observation_stage'],
+                          devices=devices), ensure_ascii=False), flush=True)
     peers = [[i == j or torch.cuda.can_device_access_peer(i, j) for j in range(8)] for i in range(8)]
     unavailable_peers = validate_devices(devices, peers)
     # The shared step uses Apex Adam and layer normalization. Import checks alone
@@ -82,11 +106,11 @@ def probe(cuda_home, build_cuda_home):
             torch.cuda.empty_cache()
     try:
         topology = subprocess.check_output(['nvidia-smi', 'topo', '-m'], text=True, stderr=subprocess.STDOUT, timeout=30)
-        inventory = subprocess.check_output(['nvidia-smi', '--query-gpu=index,name,uuid,driver_version,memory.total',
+        inventory = subprocess.check_output(['nvidia-smi', '--query-gpu=index,name,uuid,driver_version,memory.total,memory.free,memory.used',
                                              '--format=csv'], text=True, timeout=30)
     except (FileNotFoundError, subprocess.SubprocessError) as exc:
         raise RuntimeError('nvidia-smi topology/inventory capture failed') from exc
-    return dict(completed=False, environment_probe_passed=True, collective_probe_passed=False,
+    evidence.update(completed=False, environment_probe_passed=True, collective_probe_passed=False,
                 host=socket.gethostname(), devices=devices, peer_access=peers,
                 unavailable_peer_links=unavailable_peers, peer_access_required=False,
                 topology=topology, nvidia_smi=inventory, cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),
@@ -98,6 +122,7 @@ def probe(cuda_home, build_cuda_home):
                 bf16_and_apex_probe_passed=True,
                 transport='rtx5090-nccl-staged-v2',
                 limitation='Environment/Apex probes alone do not validate distributed communication or native model kernels')
+    return evidence
 
 
 def main(argv=None):
@@ -106,11 +131,13 @@ def main(argv=None):
     parser.add_argument('--cuda-home', type=Path, required=True)
     parser.add_argument('--build-cuda-home', type=Path, required=True)
     args = parser.parse_args(argv)
+    result = dict(completed=False, environment_probe_passed=False, collective_probe_passed=False)
     try:
-        result = probe(args.cuda_home, args.build_cuda_home)
+        result = probe(args.cuda_home, args.build_cuda_home, evidence=result)
     except BaseException as exc:
-        result = dict(completed=False, error=f'{type(exc).__name__}: {exc}')
+        result.update(completed=False, error=f'{type(exc).__name__}: {exc}')
         args.out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
+        print(json.dumps(result, indent=2, ensure_ascii=False), file=sys.stderr, flush=True)
         raise
     args.out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
     print(json.dumps(result, indent=2, ensure_ascii=False))
