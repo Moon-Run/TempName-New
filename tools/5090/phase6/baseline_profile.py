@@ -1,7 +1,9 @@
 """Launch-correlated mechanism evidence for the nine RTX 5090 arms."""
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
+from pathlib import Path
 from statistics import median
+from types import ModuleType
 
 from rtx5090_loader import load
 
@@ -11,8 +13,25 @@ import ma4_f_fullstep
 import ma4_f_bench
 import ma8_profile
 import ma9_profile
-import ma11_profile
+import ma11_profile as h100_ma11_profile
 from ma9_profile import Index, contains, end, require
+
+
+def _pytorch28_ma11_profile():
+    # 2048-element BF16 forward uses PyTorch 2.8's persistent warp kernel.
+    # Preserve the entire H100 ownership/order audit, adapting only its exact
+    # control-kernel predicate in this private module; do not alter H100 code.
+    source = Path(h100_ma11_profile.__file__).read_text()
+    old = "'cunn_SoftMaxForwardSmem' in kernel['name']"
+    new = "'softmax_warp_forward' in kernel['name']"
+    require(source.count(old) == 1, 'MA11 profile source contract changed')
+    module = ModuleType('rtx5090_pytorch28_ma11_profile')
+    module.__file__ = h100_ma11_profile.__file__
+    exec(compile(source.replace(old, new), module.__file__, 'exec'), module.__dict__)
+    return module
+
+
+ma11_profile = _pytorch28_ma11_profile()
 
 PRODUCE = 'rtx5090.transport.produce_pack'
 EXCHANGE = 'rtx5090.transport.exchange'

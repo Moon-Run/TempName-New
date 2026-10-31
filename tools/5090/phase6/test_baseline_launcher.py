@@ -26,6 +26,43 @@ preflight = module('rtx5090_preflight_test', 'baseline_preflight.py')
 
 
 class Launcher(unittest.TestCase):
+    def test_ma11_gpu_probe_evidence_rejects_wrong_device_or_numerical_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            compat = dict(protocol='CPU-FIXTURE', torch='2.8.0+CPU-FIXTURE')
+            hardware = dict(devices=[dict(uuid='GPU-0')], environment=dict(cuda='CPU-CUDA'))
+            path = root/'ma11-compat/self-test/probe-result.json'
+            result = dict(protocol=compat['protocol'], completed=True, performance_measured=False,
+                          gpu=0, uuid='GPU-0', torch=compat['torch'], cuda='CPU-CUDA', library=compat,
+                          self_test=dict(passed=True, cases=6, forward_bitwise=True,
+                                         backward_bitwise=True, rng_unchanged=True))
+            launcher.write(path, result)
+            evidence = dict(result_sha256=launcher.sha(path))
+            launcher.verify_ma11_probe(root, compat, evidence, hardware)
+            for update in ({'uuid': 'wrong'}, {'completed': False},
+                           {'self_test': dict(passed=False)}):
+                changed = dict(result, **update)
+                launcher.write(path, changed)
+                with self.subTest(update=update), self.assertRaisesRegex(ValueError, 'did not pass'):
+                    launcher.verify_ma11_probe(root, compat, dict(result_sha256=launcher.sha(path)), hardware)
+            with self.assertRaisesRegex(ValueError, 'Missing/changed'):
+                launcher.verify_ma11_probe(root, compat, evidence, hardware)
+
+    def test_ma11_library_is_injected_only_for_the_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = launcher.arguments(['--out', str(root/'out')])
+            plan = dict(run_id='CPU', cuda_visible_devices='0,1,2,3,4,5,6,7',
+                        communication=launcher.capture_communication(),
+                        ma11_compat=dict(library='/CPU-FIXTURE/ma11.so'))
+            for arm in load('protocol').ARMS:
+                job = dict(arm=arm, mode='smoke', trial=1, block=0, index=0)
+                env = launcher.worker_environment(args, root/'build', root/'scripts', job, root/'results', plan)
+                if arm == 'ma11':
+                    self.assertEqual(env['RTX5090_MA11_SOFTMAX_LIBRARY'], '/CPU-FIXTURE/ma11.so')
+                else:
+                    self.assertNotIn('RTX5090_MA11_SOFTMAX_LIBRARY', env)
+
     def test_new_batches_default_to_sibling_data_repository_without_moving_old_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

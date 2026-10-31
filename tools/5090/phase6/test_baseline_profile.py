@@ -87,6 +87,21 @@ def find(events, token, cat='kernel'):
 
 
 class StagedProfiles(unittest.TestCase):
+    def test_5090_ma89_profile_accepts_pytorch28_warp_forward(self):
+        from test_ma11_profile import fixture as attention_fixture
+        old = attention_fixture()
+        events = copy.deepcopy(old)
+        for event in events:
+            if event.get('cat') == 'kernel' and 'cunn_SoftMaxForwardSmem' in event['name']:
+                event['name'] = 'softmax_warp_forward<c10::BFloat16, c10::BFloat16, float, 11>'
+        result = profile.ma11_profile.trace_attention_softmax_records(events, 'F4-cache-zcount')
+        self.assertEqual(result['softmax_compute_kernel_calls'], 640)
+        with self.assertRaisesRegex(ValueError, 'Original BF16 softmax'):
+            profile.ma11_profile.trace_attention_softmax_records(old, 'F4-cache-zcount')
+        # The isolated adaptation must not modify the original H100 audit.
+        self.assertEqual(profile.h100_ma11_profile.trace_attention_softmax_records(
+            old, 'F4-cache-zcount')['softmax_compute_kernel_calls'], 640)
+
     def test_all_eight_staged_arms_have_real_kernel_and_consumer_paths(self):
         for arm in p.ARMS[:-1]:
             with self.subTest(arm=arm):

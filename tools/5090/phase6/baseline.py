@@ -121,6 +121,8 @@ def worker_environment(args, build, scripts, job, dest, plan):
                E2E_BLOCK=str(job['block']), E2E_WINDOW=str(job['index']),
                CUDA_HOME=str(args.cuda_home), PATH=f'{args.python.parent}:{args.cuda_home}/bin:' + env.get('PATH', ''))
     native = builder.native_root(build, arm)
+    if arm == 'ma11' and plan.get('ma11_compat'):
+        env['RTX5090_MA11_SOFTMAX_LIBRARY'] = plan['ma11_compat']['library']
     env['PYTHONPATH'] = ':'.join(map(str, (scripts, build/'megatron', native/'python')))
     libraries = [native/'python/flux/lib', native, native/'build/lib', args.cuda_home/'lib64']
     for value in os.environ.get('LD_LIBRARY_PATH', '').split(':'):
@@ -242,10 +244,14 @@ def replay(root, recompute_profiles=True):
     root = Path(root)
     verify_controllers(root)
     plan, workers = read(root/'plan.json'), read(root/'workers.json')
+    if plan.get('ma11_compat'):
+        load('ma11_compat').verify(plan['ma11_compat'], root, plan['environment']['torch'])
     require(plan['protocol'] == p.PROTOCOL and plan['transport'] == p.TRANSPORT
             and plan['arms'] == list(p.ARMS) and plan['model'] == p.MODEL
             and plan['schedule'] == p.schedule(plan['trials'], plan['blocks']), 'Wrong nine-arm plan')
     hardware = read(root/'environment-preflight.json')
+    if plan.get('ma11_compat'):
+        verify_ma11_probe(root, plan['ma11_compat'], plan['ma11_probe'], hardware)
     require(sha(root/'environment-preflight.json') == plan['preflight_sha256']
             and hardware['completed'] is True and hardware['environment'] == plan['environment']
             and hardware['communication'] == plan['communication'],
@@ -279,12 +285,53 @@ def replay(root, recompute_profiles=True):
                   environment=plan['environment'], worker_records=records,
                   profile_summary_sha256=sha(root/'profile-summary.json'), plan_sha256=sha(root/'plan.json'),
                   build=plan['build'], calibration_origin='frozen H100 tables; not recalibrated on RTX5090')
+    if plan.get('ma11_compat'):
+        result['ma11_compat'] = plan['ma11_compat']
     return result
 
 
 class Peer:
     def check(self):
         pass
+
+
+def verify_ma11_probe(root, compat, evidence, hardware):
+    path = Path(root)/'ma11-compat/self-test/probe-result.json'
+    require(path.is_file() and evidence.get('result_sha256') == sha(path), 'Missing/changed MA11 GPU probe')
+    result = read(path)
+    require(result.get('protocol') == compat['protocol'] and result.get('completed') is True
+            and result.get('performance_measured') is False and result.get('gpu') == 0
+            and result.get('uuid') == hardware['devices'][0]['uuid']
+            and result.get('torch') == compat['torch'] and result.get('cuda') == hardware['environment']['cuda']
+            and result.get('library') == compat
+            and result.get('self_test') == dict(passed=True, cases=6, forward_bitwise=True,
+                                                backward_bitwise=True, rng_unchanged=True),
+            'MA11 compatibility GPU probe did not pass on the preflight environment')
+
+
+def ma11_gpu_preflight(args, compat, hardware):
+    from tp8_dp2_train import run_process
+    root = args.out
+    directory = root/'ma11-compat/self-test'
+    env = dict(os.environ, PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1', PYTHONUNBUFFERED='1',
+               CUDA_VISIBLE_DEVICES=hardware['cuda_visible_devices'], CUDA_HOME=str(args.cuda_home))
+    for key in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONOPTIMIZE'):
+        env.pop(key, None)
+    env['PATH'] = f'{args.python.parent}:{args.cuda_home}/bin:' + env.get('PATH', '')
+    env['LD_LIBRARY_PATH'] = str(args.cuda_home/'lib64') + ':' + env.get('LD_LIBRARY_PATH', '')
+    log = root/'ma11-compat/self-test-process.log'
+    command = [args.python, HERE/'ma11_softmax_probe.py', '--execute', '--prepared-root', root,
+               '--out', directory, '--cuda-home', args.cuda_home]
+    try:
+        run_process(command, REPO, env, log, 600, Peer())
+    except Exception:
+        path = directory/'probe-result.json'
+        if path.is_file():
+            print('MA11 SOFTMAX PROBE FAILED:', read(path).get('error'), file=sys.stderr, flush=True)
+        raise
+    evidence = dict(result_sha256=sha(directory/'probe-result.json'))
+    verify_ma11_probe(root, compat, evidence, hardware)
+    return evidence
 
 
 def hardware_preflight(args):
@@ -462,12 +509,21 @@ def supervise(args):
             builder.prepare(build)
             stage('compile')
             built = builder.compile_build(build, args.megatron, args.build_cuda_home, args.jobs)
+        compat = None
+        compat_probe = None
+        if not args.transport_smoke_only:
+            stage('compile-ma11-compat')
+            compat = load('ma11_compat').prepare(root, args.build_cuda_home, hardware['environment']['torch'])
+            stage('ma11-compat-preflight')
+            compat_probe = ma11_gpu_preflight(args, compat, hardware)
         plan = dict(protocol=p.PROTOCOL, transport=p.TRANSPORT, original_mechanisms_not_identical=True,
                     run_id=uuid.uuid4().hex, arms=list(p.ARMS), model=p.MODEL,
                     trials=args.trials, blocks=args.blocks, schedule=p.schedule(args.trials, args.blocks),
                     communication=hardware['communication'], environment=hardware['environment'],
                     cuda_visible_devices=hardware['cuda_visible_devices'],
                     preflight_sha256=sha(root/'environment-preflight.json'),
+                    ma11_compat=compat,
+                    ma11_probe=compat_probe,
                     build=dict(root=str(build), manifest_sha256=sha(build/'baseline-build.json')))
         write(root/'plan.json', plan)
         stage('prepare-workers')
@@ -494,6 +550,8 @@ def supervise(args):
                         and all(value['execution_validated'] is True for value in profile['profiles'].values()),
                         'All nine GPU mechanism profiles must pass before formal timing')
             verify_controllers(root)
+            load('ma11_compat').verify(plan['ma11_compat'], root, plan['environment']['torch'])
+            verify_ma11_probe(root, plan['ma11_compat'], plan['ma11_probe'], hardware)
             require(sha(build/'baseline-build.json') == plan['build']['manifest_sha256'], 'Build identity changed')
             verify_files(build, built['files'])
             scripts = check_worker(root, job['arm'], workers[job['arm']])

@@ -1,10 +1,10 @@
 # RTX 5090 九组 NCCL staging v2 baseline：MA11 / MA89 / MA8 / MA9 / CR3 / R / C / A / Flux＋基础量化
 
-更新：2026-10-30。目标机器为**单机 8×RTX 5090，TP8、DP1**。本页定义九组同场对比，并提供与 `bash tools/h100/phase6/run_ma19.sh --execute` 相同使用方式的 [5090 入口](../../../tools/5090/phase6/run_baseline.sh)。
+更新：2026-10-31。目标机器为**单机 8×RTX 5090，TP8、DP1**。本页定义九组同场对比，并提供与 `bash tools/h100/phase6/run_ma19.sh --execute` 相同使用方式的 [5090 入口](../../../tools/5090/phase6/run_baseline.sh)。
 
 **当前状态：代码改为不依赖 P2P 的 NCCL staging v2，尚无 RTX 5090 训练实测结果。** 2026-10-30 用户回传的官方 `nvcr.io/nvidia/pytorch:25.06-py3` 临时容器检查确认，8 张 RTX 5090 均为 SM120 / 170 SM，但全部 56 条跨卡有向 peer-access 链路不可用。新的投影路径为 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**，不再把其他 GPU 的地址交给 CUDA kernel。P2P 矩阵仍记录在预检证据中，但不再要求链路可用。
 
-本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。2026-10-30 目标机回传已确认七组原生构建、硬件/NCCL 预检、native mapping 及八组 TACO 原生传输 smoke 通过。随后完整模型 MA11 worker 因遗留的跨卡 P2P 断言在初始化阶段中止；当前已修复九组 worker 的这一门禁，完整模型检查及正式计时仍待目标机执行，不把 H100 耗时填作 5090 耗时。
+本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。2026-10-31 两次目标机批次均通过八组 TACO 原生传输 smoke，但八个 rank 在完整模型 MA11 的 softmax 数值自检中失败，日志未报显存不足。完整模型检查和正式计时仍未通过，不把 H100 耗时填作 5090 耗时。
 
 ## 1. 对比目标与 H100 参考
 
@@ -88,6 +88,16 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 后续批次 `baseline-nine-arm-nccl-staged-v2-1x-50steps-20261030-163809-528885` 的完整模型 MA11 worker 在第 38 行 `assert all(torch.cuda.can_device_access_peer(...))` 失败。这是 H100 模板残留的 P2P 必需检查，不是 GPU 忙碌或显存耗尽错误；独立原生传输 smoke 不执行这段模型启动代码。5090 生成器现为九组统一移除该断言，仍通过 `runtime.check_topology` 检查八张独立 RTX 5090、SM120/170 SM 及冻结通信配置，并记录 P2P 矩阵。源码预检会拒绝重新引入 worker 直接 P2P 查询。此次仅修改生成 worker 的代码，可继续复用已编译构建；更新 `tools/5090/phase6/baseline_sources.py` 后新启动批次即可，历史批次不改写。
 
+2026-10-31 拉回的 `20261031-195751-850613` 和 `20261031-200655-868659` 两次批次都通过了 NCCL 前置检查和八组 TACO 原生传输 smoke，随后在 `smoke-ma11` 失败。两次的八个 rank 都报告 `MA11 native arithmetic differs from installed ATen, case 0`，日志中没有 CUDA OOM。该自检比较 MA11 native masked softmax 与当前 PyTorch ATen 的前向和反向结果是否逐位一致，旧版错误信息没有区分是哪一项不同。现有预检记录 GPU 总容量，但不记录当时的可用显存；此次失败日志不支持把数值自检失败归因于显存占用，也不能证明后续完整训练显存一定足够。两个批次均未进入正式计时。
+
+核查上游实现发现，原 H100 MA11 使用 PyTorch 2.6 的 2048 列 block 归约；[目标版本对应的 PyTorch 代码](https://github.com/pytorch/pytorch/blob/5228986c39/aten/src/ATen/native/cuda/SoftMax.cu)将 BF16 前向的 2048 列送入 persistent warp softmax，并为对齐的 2048 列反向使用 shared-memory/warp 归约。归约顺序变化会改变浮点舍入，是现有逐位失败的重要兼容性原因；实际镜像的结果仍以目标 GPU 自检为准。
+
+对 `case 0` 的第 318 行做 CPU 浮点顺序示例：旧 block 顺序与新 warp 顺序得到的分母分别为 `16.51946258544922` 和 `16.519460678100586`，进而有 2 个 BF16 输出不同。此示例使用 CPU `expf`，用于说明舍入次序可改变结果，并非目标 GPU 的数值记录。
+
+新增 `tools/5090/phase6/ma11_softmax_5090.cu`，前向使用 32 线程 warp、每线程 64 个元素与 XOR 归约，反向使用 128 线程的两级 warp 归约，并保留 BF16 中间乘积舍入与 mask。它是 5090 的独立 CUDA 库，不修改 H100 实现或原有 Flux/TACO 构建。完整测试会编译该小库，先在 GPU 0 上独立运行 6 组前向及反向逐位自检；全部通过后继续原生传输和完整模型检查。自检失败会分别报告 `forward_bitwise`、`backward_bitwise`，没有放宽比较门禁。MA89 profile 同步检查目标版本的 warp softmax 路径。
+
+本地已完成 SM120 CUDA 编译及 CPU 回归；目标 RTX 5090 的逐位自检及完整模型测试仍待执行，不能把编译成功视为 GPU 数值验证或正式性能结果。
+
 ## 4. 一键执行
 
 在 `TempName-New` 仓库根目录、已准备好的 5090 Python 环境内执行：
@@ -106,6 +116,14 @@ source env/activate_5090.sh
 ```
 
 测试入口会自动读取生成的 Python、CUDA 和 Megatron 路径；参数、日志、软件预配置模式见 [5090 环境说明](../../../env/README_5090.md)。已配置环境无需再手动重设 `RTX5090_PYTHON` 为镜像系统解释器。
+
+先在目标机独立验证修复后的 MA11，不创建完整模型、也不重编译 Flux/TACO；结果保存到 `Load-5090/logs/5090/phase6/ma11-softmax-probe-<时间>/`。脚本默认只预览，传入 `--execute` 才执行 GPU 自检：
+
+```bash
+bash tools/5090/phase6/run_ma11_softmax_probe.sh --execute
+```
+
+成功时显示 `MA11 SOFTMAX PROBE PASSED`；失败信息及 `probe-result.json` 会说明前向和反向的逐位比较结果。单卡探针通过后，下面的完整测试仍会在预检和全模型 smoke 中重复检查，不以单次探针替代正式正确性验证。
 
 ```bash
 # 仅打印执行计划；不查询 GPU、不构建、不启动训练。

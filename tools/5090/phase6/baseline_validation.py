@@ -193,6 +193,11 @@ def validate_rows(rows, job, plan, worker):
             for rank in range(8):
                 layouts[(role, rank)] = wire_layout(mask, rank)
     for rank, row in enumerate(rows):
+        if arm == 'ma11' and plan.get('ma11_compat'):
+            compat = plan['ma11_compat']
+            require(row.get('rtx5090_ma11_softmax') ==
+                    dict(path=compat['library'], sha256=compat['library_sha256']),
+                    'MA11 compatibility library identity changed')
         require(row['protocol'] == p.PROTOCOL and row['run_id'] == plan['run_id']
                 and row['arm'] == arm and row['mode'] == mode and row['block'] == job['block']
                 and row['window'] == job['index'] and row['trial'] == job['trial']

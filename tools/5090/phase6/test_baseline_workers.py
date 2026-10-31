@@ -280,6 +280,16 @@ class Workers(unittest.TestCase):
                     args = fixture(arm, mode)
                     self.assertEqual(len(v.validate_rows(*args)), 8)
 
+    def test_ma11_compatibility_library_identity_is_checked_for_each_rank(self):
+        rows, job, plan, worker = fixture('ma11', 'smoke')
+        plan['ma11_compat'] = dict(library='/CPU-FIXTURE/ma11.so', library_sha256='a'*64)
+        for row in rows:
+            row['rtx5090_ma11_softmax'] = dict(path=plan['ma11_compat']['library'], sha256='a'*64)
+        self.assertEqual(len(v.validate_rows(rows, job, plan, worker)), 8)
+        rows[3]['rtx5090_ma11_softmax']['sha256'] = 'b'*64
+        with self.assertRaisesRegex(ValueError, 'compatibility library identity'):
+            v.validate_rows(rows, job, plan, worker)
+
     def test_wrong_hardware_software_sample_and_mechanism_rejected(self):
         for arm in p.ARMS:
             original, job, plan, worker = fixture(arm)

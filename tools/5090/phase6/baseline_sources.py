@@ -106,9 +106,25 @@ def softmax_adapter_source(environment):
     source = (HERE/'ma11_adapter.py').read_text()
     source = replace_once(source, "    if not torch.__version__.split('+')[0] == '2.6.0':",
                           f'    if str(torch.__version__) != {version!r}:')
-    return replace_once(source,
+    source = replace_once(source,
         "raise RuntimeError('MA11 requires the pinned PyTorch 2.6.0 softmax dispatch')",
         "raise RuntimeError('MA11 requires the frozen RTX5090 PyTorch environment and exact smoke validation')")
+    source = replace_once(source, '        derivative = native.backward(grad, out, mask)',
+                          '        derivative = native.backward(grad, ref.detach(), mask)')
+    return replace_once(source,
+        "        if not exact_equal(torch, ref, out) or not exact_equal(torch, ref_grad, derivative):\n"
+        "            raise RuntimeError('MA11 native arithmetic differs from installed ATen, case ' + str(case))",
+        "        forward_equal = exact_equal(torch, ref, out)\n"
+        "        backward_equal = exact_equal(torch, ref_grad, derivative)\n"
+        "        if not forward_equal or not backward_equal:\n"
+        "            fwd_mismatches = (torch.count_nonzero(ref.contiguous().view(torch.int16) !=\n"
+        "                out.contiguous().view(torch.int16)).item() if not forward_equal else 0)\n"
+        "            bwd_mismatches = (torch.count_nonzero(ref_grad.contiguous().view(torch.int16) !=\n"
+        "                derivative.contiguous().view(torch.int16)).item() if not backward_equal else 0)\n"
+        "            raise RuntimeError('MA11 native arithmetic differs from installed ATen, case ' + str(case)\n"
+        "                + ', forward_bitwise=' + str(forward_equal) + ', backward_bitwise=' + str(backward_equal)\n"
+        "                + ', forward_mismatches=' + str(fwd_mismatches)\n"
+        "                + ', backward_mismatches=' + str(bwd_mismatches))")
 
 
 def validate_worker(source):
@@ -145,6 +161,11 @@ def worker_source(arm):
              'c': 'H100_MA2C_EXECUTE', 'a': 'H100_MA2C_EXECUTE',
              'flux-basic': 'H100_BASIC_QUANT_EXECUTE'}[arm]
     source = replace_once(source, guard, 'RTX5090_BASELINE_EXECUTE')
+    if arm == 'ma11':
+        source = replace_once(source,
+            '    ma11_softmax_tracker = ma11_adapter.install_softmax(raw, ma11_library, MODE)',
+            "    ma11_softmax_library = ctypes.CDLL(os.environ['RTX5090_MA11_SOFTMAX_LIBRARY'])\n"
+            '    ma11_softmax_tracker = ma11_adapter.install_softmax(raw, ma11_softmax_library, MODE)')
     # The inherited model worker has a second P2P gate after check_topology.
     # Only the RTX5090 overlay removes it: our runtime records peer access and
     # enforces the device/protocol requirements for NCCL staging instead.
@@ -169,6 +190,11 @@ report['arm'] = PLAN['arm']
 report['transport'] = PLAN['transport']
 report['trial'] = int(os.environ['E2E_TRIAL'])
 report['worker_config_sha256'] = hashlib.sha256((HERE/'config.json').read_bytes()).hexdigest()""")
+    if arm == 'ma11':
+        source = replace_once(source, "report['arm'] = PLAN['arm']", """report['arm'] = PLAN['arm']
+_compat_library = Path(os.environ['RTX5090_MA11_SOFTMAX_LIBRARY']).resolve()
+report['rtx5090_ma11_softmax'] = dict(path=str(_compat_library),
+    sha256=hashlib.sha256(_compat_library.read_bytes()).hexdigest())""")
     source = replace_once(source, "(OUT/f'rank{rank}.json').write_text", """report['parameter_trajectory'] = consumer_parameter_trajectory
 report['trainable_parameters'] = consumer_parameter_universe
 report['final_parameters_sha256'] = fingerprint(raw.named_parameters())
