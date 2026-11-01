@@ -2,7 +2,7 @@
 
 更新：2026-11-01。目标机器为单机 **8×RTX 5090，TP8/DP1**。本实验按要求从**旧九组 baseline 的 C/A**拆出量化对照，另比较 Flux＋基础量化和 Flux 无量化。独立入口为 [run_baseline_flux.sh](../../../tools/5090/phase6/run_baseline_flux.sh)，协议为 **`rtx5090-phase6-flux-quant-four-arm-v1`**。
 
-**当前状态：目标机已完成构建和硬件/NCCL 预检，首次 C native 探针被检查器的 mask 数量错误阻止；已修复，待重新执行。尚无完整模型和正式性能结果。** 失败原因及复用已有构建的重跑命令见第 7 节。“改进量化”是本组的命名，不预设一定快于其他组。旧 [baseline](baseline.md) 和 [OP1-A](op-1-A.md) 的实验数据不混入本次报告。
+**当前状态：四组实验已有完成批次 `20261101-203719-996417`；后续批次 `20261101-231152-305302` 在硬件预检时遇到 CUDA OOM。** 本次失败原因和重跑方法见第 8 节，早期 native 检查器错误及修复见第 7 节。“改进量化”是本组的命名，不预设一定快于其他组。旧 [baseline](baseline.md) 和 [OP1-A](op-1-A.md) 的实验数据不混入四组报告。
 
 ## 1. 四组定义
 
@@ -175,5 +175,33 @@ bash tools/5090/phase6/run_baseline_flux.sh --execute --foreground \
 ```
 
 该命令重新执行全部门禁和四组训练，不向失败目录追加结果。目标机构建目录及其依赖的原九组构建须保留；本地回传归档不含 `build` 二进制。新增回归测试覆盖 A/C 两种 slot 数、每个 mask 位置的非空拒绝、缺失/额外 slot、错误别名/同步，以及完整八 rank 报告校验。执行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_flux_baseline*.py' -v`，**24 项针对性测试全部通过**，入口预览和 `git diff --check` 也通过；这些 CPU fixture 不作为 GPU 通过证据，修复后尚未重跑八卡。
+
+## 8. 2026-11-01 回传失败：硬件预检 CUDA OOM
+
+批次 `flux-quant-four-arm-v1-1x-50steps-20261101-231152-305302` 的 [batch-state.json](../../../../Load-5090/logs/5090/phase6/flux-quant-four-arm-v1-1x-50steps-20261101-231152-305302/batch-state.json) 显示失败阶段为 `hardware-preflight`。原始 [environment-preflight.log](../../../../Load-5090/logs/5090/phase6/flux-quant-four-arm-v1-1x-50steps-20261101-231152-305302/environment-preflight.log) 显示，预检在第一个逻辑 GPU 调用 `torch.cuda.mem_get_info` 时报告 `CUDA error: out of memory`，尚未运行 NCCL 探针、构建验证、模型或正式计时。日志中的上层 `Child exited 1` 是包装错误，CUDA OOM 才是子进程记录的原始错误。
+
+当时 `devices=[]`，旧代码没有及时保存当前设备 UUID 或故障前的 `nvidia-smi` 设备/进程信息；仅凭本次记录无法确定当时各卡的剩余显存、占用来源，也不能认定一定是 `temp.sh`。预检前的空闲进程检查已经通过，但容器中的进程列表未必能看到全部宿主机占用；不能仅凭空进程列表认定显存足够。更早完成批次的显存峰值是历史参考，不是此次故障时的快照。
+
+预检已增强：在 CUDA 上下文初始化前及发生异常后尽力保存 `nvidia-smi` 显存/计算进程快照，保存 `CUDA_VISIBLE_DEVICES`，并在可取得设备属性时记录失败逻辑 GPU 的 UUID；父控制器不再用 `Child exited 1` 覆盖子进程错误。快照查询失败仍保留原错误，显存或进程不符合条件仍会阻止测试。这是**诊断改进，不会自动释放显存或保证重跑成功**。物理索引和 CUDA 逻辑索引可能不同，应按 UUID 对照。
+
+在目标机检查 GPU 显存和进程：
+
+```bash
+nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free,memory.used,utilization.gpu --format=csv
+nvidia-smi --query-compute-apps=pid,gpu_uuid,process_name,used_gpu_memory --format=csv
+```
+
+如容器内无法解释显存占用，应在宿主机检查对应 UUID；确认并停止自己的占用任务后再跑。如果之前启动了 `temp.sh` 的 24 小时计算，它会持续占用 GPU，须先确认对应进程是否仍在运行。不要停止无法确认归属的进程。
+
+同步更新整个 `tools/5090/phase6/` 后，可先执行八卡预检；通过后沿用本次 `handoff/supervisor.json` 记录的目标机构建重新开始完整实验：
+
+```bash
+bash tools/5090/phase6/run_baseline_flux.sh --execute --preflight-only
+
+bash tools/5090/phase6/run_baseline_flux.sh --execute --foreground \
+  --flux-build /workspace/Load-5090/logs/5090/phase6/flux-quant-four-arm-v1-1x-50steps-20261101-220324-139713/build
+```
+
+两条命令分别生成新批次；完整实验会重新执行所有门禁。构建路径必须在目标机仍存在且通过原有身份校验；本地归档不含该构建的二进制。若预检继续失败，请同时查看新批次的 `environment-preflight.json` 中 `driver_snapshot_before_cuda`、`driver_snapshot_on_failure`、`devices` 与原始 `error`，以及 `environment-preflight.log`。这些快照是采样时刻的观察，不是持续空闲或容量保证。
 
 相关实现：[控制器](../../../tools/5090/phase6/flux_baseline.py)、[协议统计](../../../tools/5090/phase6/flux_baseline_protocol.py)、[隔离构建](../../../tools/5090/phase6/flux_baseline_build.py)、[native 消融](../../../tools/5090/phase6/flux_baseline_native.py)、[worker 生成](../../../tools/5090/phase6/flux_baseline_sources.py)、[记录检查](../../../tools/5090/phase6/flux_baseline_validation.py)、[profile 检查](../../../tools/5090/phase6/flux_baseline_profile.py)。
