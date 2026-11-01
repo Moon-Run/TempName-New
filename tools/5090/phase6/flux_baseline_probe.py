@@ -17,6 +17,11 @@ def probe_module():
         raise ValueError('Old shared/role probe constructors changed')
     source = source.replace(old, "constructor = frontend.GemmRSTacoDoubleBuffered if arm == 'c' else frontend.GemmRSTaco")
     source = replace(source, "if key == 'mask' and count == 1:", "if key == 'mask':")
+    # Two instances have two mask entries for A but four for double-buffered C.
+    # Both arms must have no masks; the pointer/slot shape checks stay intact.
+    source = replace(source,
+        "require(values == [None, None], 'All-remote instances have unexpected masks')",
+        "require(values == [None] * (2 * count), 'All-remote instances have unexpected masks')")
     source = replace(source, "        builder = load('build')", '        import flux_baseline_build as builder')
     source = source.replace("args.build/'baseline-build.json'", "args.build/'flux-build.json'")
     source = replace(source, "        selection = read(args.build/'selective/selection-plan.json')\n"

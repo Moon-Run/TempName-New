@@ -2,7 +2,7 @@
 
 更新：2026-11-01。目标机器为单机 **8×RTX 5090，TP8/DP1**。本实验按要求从**旧九组 baseline 的 C/A**拆出量化对照，另比较 Flux＋基础量化和 Flux 无量化。独立入口为 [run_baseline_flux.sh](../../../tools/5090/phase6/run_baseline_flux.sh)，协议为 **`rtx5090-phase6-flux-quant-four-arm-v1`**。
 
-**当前状态：四组实现、构建和测试入口已提供，尚无本实验的八卡实测结果。** “改进量化”是本组的命名，不预设一定快于其他组。旧 [baseline](baseline.md) 和 [OP1-A](op-1-A.md) 的实验数据不混入本次报告。
+**当前状态：目标机已完成构建和硬件/NCCL 预检，首次 C native 探针被检查器的 mask 数量错误阻止；已修复，待重新执行。尚无完整模型和正式性能结果。** 失败原因及复用已有构建的重跑命令见第 7 节。“改进量化”是本组的命名，不预设一定快于其他组。旧 [baseline](baseline.md) 和 [OP1-A](op-1-A.md) 的实验数据不混入本次报告。
 
 ## 1. 四组定义
 
@@ -157,6 +157,23 @@ profile 必须证明：C/A 各自执行融合 GEMM、pack、NCCL、unpack 和原
 
 执行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**182 项测试全部通过**，其中本次新增 19 项。覆盖四组的真实 worker 生成与库路由、全部记录校验、四组完整控制流程、原排序/量化范围检查、无量化 Reduce-Scatter 调用和输出所有权，以及错误路径拒绝。CPU fixture 不作为 GPU 测量数据保存。
 
-本地 CUDA 12.8 已将两组 A/C 的 transport、decoder 和实际 GEMM 注册编译为 **SM120 对象文件**，并成功编译各自的 CUDA mapping 检查可执行文件；没有在本地运行这些 GPU 程序。入口预览、shell 语法、文档链接和 whitespace 检查通过。**完整动态库/Python 扩展链接、八卡正确性门禁及正式性能仍须由目标机执行上述入口确认。**
+初次交付时，本地 CUDA 12.8 已将两组 A/C 的 transport、decoder 和实际 GEMM 注册编译为 **SM120 对象文件**，并成功编译各自的 CUDA mapping 检查可执行文件；没有在本地运行这些 GPU 程序。入口预览、shell 语法、文档链接和 whitespace 检查通过。后续目标机已越过完整构建阶段，但八卡正确性门禁和正式性能仍未完成，见下节。
+
+## 7. 2026-11-01 回传失败：双工作区空 mask 数量误判
+
+批次 `flux-quant-four-arm-v1-1x-50steps-20261101-201716-772182` 在 `native-reference-wire-and-mapping-probes` 阶段失败，八 rank 均报 `RuntimeError: All-remote instances have unexpected masks`。较早的 `20261101-200546-250921` 批次也是同一错误。证据见最新批次的 [supervisor 日志](../../../../Load-5090/logs/5090/phase6/flux-quant-four-arm-v1-1x-50steps-20261101-201716-772182/handoff/supervisor.log)和 [C 探针日志](../../../../Load-5090/logs/5090/phase6/flux-quant-four-arm-v1-1x-50steps-20261101-201716-772182/native-probe/flux-improved/process.log)。
+
+这是四组实验的 Python 检查器错误：原共享 scratch 检查只允许单工作区全远端组，要求两个实例的 mask 列表为 `[None, None]`。移植时将 C 也设为全远端，却漏掉了它仍有双工作区；C 的实际列表应为 `[None, None, None, None]`。旧检查在所有 mask 都为空时仍必然失败。修复在 [flux_baseline_probe.py](../../../tools/5090/phase6/flux_baseline_probe.py)，期望长度改为 `2 × 每实例 slot 数`，保留实例数、slot 数、非空 mask、私有 packet/native handle、共享 scratch、输出保留和同步计数等检查，不放宽数值预算。
+
+最新批次的 `environment-preflight.json` 记录 `completed=true`；目标机已编译 A/C 两份变体并进入 native 检查。C 的 Attention/MLP mapping 日志各含八 rank 共 4096 条 tile 记录。失败 rank 文件仍为 `completed=false`、`roles={}`，且没有创建模型 `results` 目录，**不把此前未保存的中间检查记为完整 native smoke 通过，也没有正式训练数据可汇总**。
+
+此次只修改探针检查器，构建器、native 源码及前端与目标机冻结快照一致。同步修复后的工具后，在目标机 `TempName-New` 根目录用下面命令启动新批次，可复用已完成构建，**不必重编译 CUDA**：
+
+```bash
+bash tools/5090/phase6/run_baseline_flux.sh --execute --foreground \
+  --flux-build /workspace/Load-5090/logs/5090/phase6/flux-quant-four-arm-v1-1x-50steps-20261101-201716-772182/build
+```
+
+该命令重新执行全部门禁和四组训练，不向失败目录追加结果。目标机构建目录及其依赖的原九组构建须保留；本地回传归档不含 `build` 二进制。新增回归测试覆盖 A/C 两种 slot 数、每个 mask 位置的非空拒绝、缺失/额外 slot、错误别名/同步，以及完整八 rank 报告校验。执行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_flux_baseline*.py' -v`，**24 项针对性测试全部通过**，入口预览和 `git diff --check` 也通过；这些 CPU fixture 不作为 GPU 通过证据，修复后尚未重跑八卡。
 
 相关实现：[控制器](../../../tools/5090/phase6/flux_baseline.py)、[协议统计](../../../tools/5090/phase6/flux_baseline_protocol.py)、[隔离构建](../../../tools/5090/phase6/flux_baseline_build.py)、[native 消融](../../../tools/5090/phase6/flux_baseline_native.py)、[worker 生成](../../../tools/5090/phase6/flux_baseline_sources.py)、[记录检查](../../../tools/5090/phase6/flux_baseline_validation.py)、[profile 检查](../../../tools/5090/phase6/flux_baseline_profile.py)。
