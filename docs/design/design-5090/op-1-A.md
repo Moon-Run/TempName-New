@@ -2,7 +2,7 @@
 
 更新：2026-11-01。目标为单机 **8×RTX 5090、TP8/DP1**。本次新增独立的 A 实现和[三组测试入口](../../../tools/5090/phase6/run_op1_a.sh)，不改写原九组 baseline 或 H100 实现。
 
-**状态：实现和测试入口已提供，尚无本方案的八卡性能结果。** 下文的改进指减少明确存在的配置、复制和布局转换；是否降低完整 optimizer step 耗时，由新批次的同场实测决定。不能把原 baseline 的结果、CPU 单测或无 GPU 编译作为本方案已经加速的证据。
+**状态：三组八卡 full-step 测试已完成。** 批次 `op1-a-direct-wire-v1-1x-50steps-20261101-185132-330063` 中，新 A 平均 **978.184 ms/step**，同期 Flux＋基础量化为 **967.327 ms/step**；新 A 慢约 **1.122%**。Flux 加交替排序后平均 **967.302 ms/step**，相对原排序的配对区间跨零，本轮没有观察到明确的端到端收益。两个 Flux 组的训练轨迹不逐位相同，数值差异和结果边界见第 6 节。
 
 ## 1. 为什么原 A 在 5090 上失去优势
 
@@ -172,10 +172,51 @@ bash tools/5090/phase6/run_op1_a.sh --report --out /path/to/completed-op1-batch
 
 报告提供三项同期配对：**A/Flux＋基础量化、A/Flux＋基础量化＋交替排序、Flux＋基础量化＋交替排序/Flux＋基础量化**。使用完整 block 的对数耗时比和 10,000 次 bootstrap 给出 95% CI；均值比与配对估计分开，负收益和慢窗口保留。区间只描述该固定负载，三项比较没有多重比较校正。
 
-## 6. 结果填写原则
+## 6. RTX 5090 八卡实测与回传复核
 
-当前没有本方案实机结果，暂不填写“加速比”或“最优实现”。目标机完成后，应记录完整批次路径、环境、三组所有窗口统计、三个配对区间和门禁状态。若新 A 仍慢于 Flux，应保留结果；原 A scalar decoder 与 Flux receiver 的实现差异仍可能主导性能，不能为了得到正收益而省略其工作或改变验证预算。
+数据来自 `op1-a-direct-wire-v1-1x-50steps-20261101-185132-330063`：**1 trial × 6 个完整 block × 3 组，共 18 个正式窗口、144 份正式 rank 记录、900 个正式 optimizer step**。每组有 6 个窗口、300 个正式 step；每窗口另有 10 步预热。全部窗口保留，窗口步时取八 rank 最大 elapsed 除以 50，平均值为各组六个窗口的算术均值，每 step 为 8192 tokens。见[原始报告](../../../../Load-5090/logs/5090/phase6/op1-a-direct-wire-v1-1x-50steps-20261101-185132-330063/report.md)、[报告数据](../../../../Load-5090/logs/5090/phase6/op1-a-direct-wire-v1-1x-50steps-20261101-185132-330063/report.json)和[批次状态](../../../../Load-5090/logs/5090/phase6/op1-a-direct-wire-v1-1x-50steps-20261101-185132-330063/batch-state.json)。
 
-本地验证：`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v` 共 **163 项测试通过**；最终数值差异汇总调整后，入口相关 4 项测试再次通过。shell 语法、只读预览、新文档链接和 whitespace 检查通过。使用本地 CUDA 12.8 将新 A transport、A decoder、交替排序 GemmOnly 实际注册及 mapping probe 编译为 **SM120 对象文件**成功。开发环境没有执行完整动态库链接或八卡 GPU 门禁；CPU 流程测试中的 fixture 不作为实测数据保存，也不能替代目标机正确性与性能验证。
+| 指标 | A（5090 direct-wire） | Flux＋基础量化 | Flux＋基础量化＋交替排序 |
+| --- | ---: | ---: | ---: |
+| 平均耗时（ms/step） | 978.184 | 967.327 | **967.302** |
+| 中位数（ms/step） | 978.640 | 967.481 | 967.512 |
+| 最快 / 最慢窗口（ms/step） | 976.006 / 979.205 | 964.130 / 968.949 | 964.347 / 969.549 |
+| 吞吐（tokens/s） | 8374.70 | 8468.69 | 8468.91 |
+| A 相对该组的均值耗时下降 | +0.000% | -1.122% | -1.125% |
+| 最大 Torch allocated（GiB） | 16.893 | 17.473 | 17.473 |
+| 最大 Torch reserved（GiB） | 17.0625 | 17.6348 | 17.6348 |
+| 最大 allocated＋native workspace（GiB） | 18.221 | 17.473 | 17.473 |
+
+负降幅表示 A 更慢。显存合计先逐 rank 将 Torch allocated 与独立 `cudaMalloc` 的 native workspace 相加，再在所有窗口取最大值；不与 reserved 相加，也不含 CUDA context、NCCL 等内部占用，不能视为整卡峰值。
+
+### 同期配对
+
+按六个完整 block 配对，使用对数耗时比及 10,000 次 bootstrap；区间描述本次固定负载，三项比较未做多重比较校正。平均耗时差与配对点估计是不同统计量。
+
+| 同期比较（前者 / 后者） | 平均耗时差（前者 − 后者，ms/step） | 配对降幅 %［95% CI］ | 前者更快的块数 |
+| --- | ---: | --- | ---: |
+| A / Flux＋基础量化 | +10.857 | -1.122［-1.300, -0.985］ | 0/6 |
+| A / Flux＋基础量化＋交替排序 | +10.882 | -1.125［-1.304, -0.971］ | 0/6 |
+| Flux＋基础量化＋交替排序 / Flux＋基础量化 | -0.025 | +0.003［-0.059, +0.078］ | 2/6 |
+
+**结果解读：** 新 A 在六个配对块中均慢于两组 Flux。两个 Flux 均值仅差 0.025 ms/step，配对区间同时包含正负值，且交替排序仅在 2/6 块更快，不能据此认定它有稳定的加速或减速。A 与 Flux 同时存在 GEMM、融合编码及 decoder 的差别，不能把全部差值归因于某一个环节。完整条件下没有恢复 H100 的跨卡 tile 到达重叠。
+
+此前九组 baseline 的旧 A 平均 **986.816 ms/step**，新 A 本次平均 **978.184 ms/step**，数值相差 **8.632 ms/step**；旧批同期 Flux 为 967.474 ms/step，本批为 967.327 ms/step。**这两次 A 不在同一个配对实验中**，不能将 8.632 ms 或约 0.875% 作为本改动的同场净收益或置信区间，也不能用同期 Flux 接近就排除其他批次因素。新旧 A 的逐位 native probe 只证明所覆盖的 packet 和输出一致，不代替同场训练速度对比。
+
+### 正确性与数值差异
+
+目标机报告 `correctness_passed=true`、`execution_path_validated=true`、`a_native_old_new_bitwise=true`。新旧 A probe 覆盖 Attention/MLP 两种形状和零值、随机、离群三类输入；八 rank 的输出和 packet 哈希逐位一致，56 条有向链路互证通过。三组模型 smoke 和 24 份 profile 均通过；A 的 profile 记录验证了 direct producer→NCCL→decoder，pack/unpack、逐调用配置和输出 clone 均为零。交替排序 Flux 的实际 GEMM CTA mapping 检查通过。
+
+两个 Flux 组**不满足逐位轨迹等价**：报告的 8 个配对窗口包含 1 个 smoke、1 个 profile 和 6 个正式窗口，最终参数逐位一致的窗口为 **0/8**；smoke 中投影输出和参数轨迹也不逐位相同。整个比较中的最大 loss 绝对差为 **1.060479**，最大 gradient norm 绝对差为 **4.307620**。例如 block00 的第 18 个正式 step，rank0 loss 为 **4.177876 / 3.117397**；第 20 个正式 step 的 gradient norm 为 **14.641653 / 18.949272**（原排序 / 交替排序）。两组使用相同初始化、输入和训练协议；这些差异不应仅凭本报告归因于某个具体舍入步骤。上述门禁允许排序引起的归约变化，两组各自通过数值预算及有限 loss/梯度检查，但这些结果**不能证明长期收敛或模型质量等价**。
+
+最大相对 loss 差为 **9.584 倍**，发生在原排序 loss 约 **0.000143** 的位置；最大相对 gradient norm 差为 **25.299 倍**，发生在原排序 norm 约 **0.001615** 的位置。相对差的分母接近零，不宜单独作为整体精度变化比例；上面的绝对差示例反映了两个轨迹在其他位置也存在可见差异。
+
+### 环境和复核范围
+
+目标主机为 `SL3060`，8×RTX 5090、SM120/170 SM、TP8/DP1，驱动 `595.84`，PyTorch `2.8.0a0+5228986c39.nv25.06`、CUDA `12.9`、NCCL `2.27.3`、Python `3.12.3`，跨卡 peer access 为 0/56。单机固定合成输入结果不直接代表其他拓扑、负载或真实数据训练表现。
+
+回传复核使用本批冻结 controller 源码：重新验证 24 个 smoke、profile 和正式窗口的 **192 份 rank 记录**及其哈希，重算全部 18 个正式窗口、三组统计和 Flux 数值差异，与报告一致；八卡 NCCL、native 新旧 A packet/输出和实际 mapping 证据也重新校验通过。三组共 **24 份原始 GPU profile trace** 均在本地重新解析，并与保存的分析结果逐项一致。回传目录没有完整 build 与 CUDA 动态库，因此未在本地重新校验二进制或执行包含 build 身份检查的完整 `--report` 重放。
+
+历史开发阶段的本地验证：`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v` 共 **163 项测试通过**；后续目标机实测证据以本节批次为准。
 
 相关代码：[控制器](../../../tools/5090/phase6/op1_a.py)、[协议与统计](../../../tools/5090/phase6/op1_a_protocol.py)、[隔离构建](../../../tools/5090/phase6/op1_a_build.py)、[实际 CTA 排序](../../../tools/5090/phase6/op1_a_swizzle.py)、[新旧 A 与 mapping 探针](../../../tools/5090/phase6/op1_a_probe.py)、[worker 生成](../../../tools/5090/phase6/op1_a_sources.py)、[记录校验](../../../tools/5090/phase6/op1_a_validation.py)、[profile 审计](../../../tools/5090/phase6/op1_a_profile.py)。
