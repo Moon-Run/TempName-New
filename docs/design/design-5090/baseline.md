@@ -1,10 +1,10 @@
 # RTX 5090 九组 NCCL staging v2 baseline：MA11 / MA89 / MA8 / MA9 / CR3 / R / C / A / Flux＋基础量化
 
-更新：2026-10-31。目标机器为**单机 8×RTX 5090，TP8、DP1**。本页定义九组同场对比，并提供与 `bash tools/h100/phase6/run_ma19.sh --execute` 相同使用方式的 [5090 入口](../../../tools/5090/phase6/run_baseline.sh)。
+更新：2026-11-01。目标机器为**单机 8×RTX 5090，TP8、DP1**。本页汇总九组同场 full-step 对比，并提供 [5090 入口](../../../tools/5090/phase6/run_baseline.sh)。
 
-**当前状态：NCCL staging v2 已通过 RTX 5090 九组完整模型 smoke，尚无正式计时结果。** 2026-10-30 用户回传的官方 `nvcr.io/nvidia/pytorch:25.06-py3` 临时容器检查确认，8 张 RTX 5090 均为 SM120 / 170 SM，但全部 56 条跨卡有向 peer-access 链路不可用。新的投影路径为 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**，不再把其他 GPU 的地址交给 CUDA kernel。P2P 矩阵仍记录在预检证据中，但不再要求链路可用。
+**当前状态：九组 RTX 5090 同场实验已完成。** 批次 `baseline-nine-arm-nccl-staged-v2-1x-50steps-20261101-124230-640474` 的九组 smoke、九组 profile 和 **162 个正式计时窗口**均通过，完成 **8100 个正式 optimizer step**。MA11 平均 **911.458 ms/step**、**8987.79 tokens/s**；相对同期 MA89 平均耗时下降 **3.406%**，相对同期 Flux＋基础量化下降 **5.790%**。原始证据见[批次报告](../../../../Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261101-124230-640474/report.md)、[报告数据](../../../../Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261101-124230-640474/report.json)和[批次状态](../../../../Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261101-124230-640474/batch-state.json)。
 
-本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。**最新回传 `20261031-215027-387404` 已通过独立 MA11 softmax 逐位自检、八组 TACO 原生传输 smoke 和九组完整模型 smoke；MA11 profile 的八个 GPU worker 也已完成，随后 CPU 端 profile 检查器误拒绝最终 LayerNorm。此次不是 CUDA OOM。** 之前两批 OOM 与共享 scratch 修复见下文；正式计时仍待目标机完成，不把 smoke/profile 或 H100 耗时填作 5090 正式耗时。
+本轮实验协议为 `rtx5090-phase6-nine-arm-nccl-staged-v2`，传输协议为 `rtx5090-nccl-staged-v2`；旧的直接访存 v1 构建与结果不能复用。目标机的 56 条跨卡有向 peer-access 链路均不可用，因此投影使用 **本卡 producer 写入本地 packet → NCCL All-to-All → 本卡 decoder**。这是经过迁移的机制对照，不保留 H100 的跨卡 tile 到达及计算通信重叠；原有 OOM 和 profile 检查器兼容问题的历史记录见下文。
 
 ## 1. 对比目标与 H100 参考
 
@@ -13,12 +13,37 @@
 | 指标 | MA11 | MA89 | MA8 | MA9 | CR3 | R | C | A | Flux＋基础量化 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | H100 历史平均耗时（ms/step） | **450.662** | 459.806 | 474.004 | 489.878 | 501.433 | 515.716 | 516.784 | 536.692 | 582.318 |
-| 5090 同场平均耗时（ms/step） | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 5090 同场中位数（ms/step） | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 5090 吞吐（tokens/s） | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| 5090 MA11 相对各组均值耗时下降 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 5090 同场平均耗时（ms/step） | **911.458** | 943.601 | 965.172 | 995.407 | 1017.192 | 977.081 | 1022.978 | 986.816 | 967.474 |
+| 5090 同场中位数（ms/step） | **911.603** | 943.621 | 965.721 | 995.406 | 1017.265 | 977.195 | 1023.035 | 986.831 | 967.859 |
+| 5090 同场最慢窗口（ms/step） | **912.119** | 943.930 | 966.544 | 995.997 | 1017.859 | 978.014 | 1024.961 | 988.477 | 969.195 |
+| 5090 吞吐（tokens/s） | **8987.79** | 8681.63 | 8487.60 | 8229.80 | 8053.54 | 8384.16 | 8007.99 | 8301.44 | 8467.41 |
+| 5090 MA11 相对各组均值耗时下降 | +0.000% | +3.406% | +5.565% | +8.434% | +10.395% | +6.716% | +10.902% | +7.636% | +5.790% |
+| 5090 最大 Torch allocated（GiB） | 18.728 | 18.728 | 18.728 | 17.730 | 17.730 | 17.008 | 17.730 | 17.008 | 17.473 |
+| 5090 最大 allocated＋TACO workspace（GiB） | 21.384 | 21.384 | 21.384 | 20.386 | 20.386 | 18.337 | 20.386 | 18.337 | 17.473 |
 
-H100 行来自历史多批次汇总，供背景参考；5090 待测行将填写本次九组同场实验。H100 原表的“选定窗口耗时”混合了均值、中位数和最慢值，**本实验九组一律用全部正式窗口的算术均值计算主表降幅**。跨机器比值同时包含 GPU、互联、CUDA/PyTorch、GEMM 和传输后端差异，不表示某一机制的净收益。结果显式记录 `original_mechanisms_not_identical=true` 和 `original_peer_overlap_preserved=false`。
+H100 行来自历史多批次汇总，5090 行来自本次 **1 trial × 18 块 × 9 组**同场实验。每组均保留 18 个正式窗口、144 份正式 rank 记录和 900 个正式 step；窗口步时取八 rank 最大 elapsed 除以 50，每步处理 8192 tokens。H100 原表的“选定窗口耗时”混合了均值、中位数和最慢值，**本页九组一律用全部正式窗口的算术均值计算主表降幅**。跨机器差异同时包含 GPU、互联、CUDA/PyTorch、GEMM 和传输后端差异，不表示某一机制的净收益。结果显式记录 `original_mechanisms_not_identical=true` 和 `original_peer_overlap_preserved=false`。
+
+最大显存为所有正式窗口、八 rank 中的最大值；allocated＋workspace 先逐 rank 相加再取最大，不与 reserved 相加。该合计不含 CUDA context、NCCL 等内部占用，不能当作整卡峰值。所有窗口均保留；例如 MA8 最快窗口为 954.171 ms，而中位数为 965.721 ms，主表均值没有剔除该窗口。
+
+### 同期配对结果
+
+下表按 18 个完整 block 配对，以对数耗时比和 10,000 次 bootstrap 计算；配对估计与主表的算术均值比是不同统计量。正值表示前者更快。区间仅描述本次固定负载，36 个两两比较未作多重比较校正。
+
+| 同期比较（前者 / 后者） | 平均耗时（ms/step） | 平均减少（ms/step） | 配对降幅 %［95% CI］ | 更快的完整块 |
+| --- | --- | ---: | --- | ---: |
+| MA11 / MA89 | 911.458 / 943.601 | 32.143 | +3.406［+3.384, +3.428］ | 18/18 |
+| MA89 / MA8 | 943.601 / 965.172 | 21.571 | +2.235［+2.090, +2.317］ | 18/18 |
+| MA8 / CR3 | 965.172 / 1017.192 | 52.020 | +5.114［+5.029, +5.253］ | 18/18 |
+| MA9 / CR3 | 995.407 / 1017.192 | 21.785 | +2.142［+2.105, +2.175］ | 18/18 |
+| CR3 / C | 1017.192 / 1022.978 | 5.786 | +0.566［+0.522, +0.612］ | 18/18 |
+| R / A | 977.081 / 986.816 | 9.736 | +0.987［+0.954, +1.019］ | 18/18 |
+| MA11 / Flux＋基础量化 | 911.458 / 967.474 | 56.016 | +5.790［+5.686, +5.856］ | 18/18 |
+
+**结果解读：** MA11 在本批九组中平均最快；MA89、MA8、Flux＋基础量化、R、A、MA9、CR3、C 依次排在其后。MA11/MA89、MA89/MA8、MA8/CR3 和 MA9/CR3 使用相同选择性量化策略，适合观察本 staged 后端中相应机制组合的同期差异；各项收益不应直接相加。MA11 与 Flux＋基础量化的量化策略及 GEMM 后端不同，5.790% 是端到端组合对比，不能归因于单一优化。
+
+**实际环境与验证：** 目标主机 `SL3060`，8×RTX 5090（SM120、每卡 170 SM）、TP8/DP1，驱动 `595.84`，PyTorch `2.8.0a0+5228986c39.nv25.06`、CUDA `12.9`、NCCL `2.27.3`、Python `3.12.3`。八卡 peer access 为 0/56；拓扑记录显示 GPU0–3 与 GPU4–7 分属两个 NUMA 域。报告标记 `correctness_passed=true`、`execution_path_validated=true`、`equivalent_policy_trajectories_identical=true`：同策略等价组的 loss、梯度和参数轨迹检查通过，九组各八 rank 的 profile 路径检查通过；不同量化策略之间不强求相同轨迹。归档中的完整 36 组配对结果见[报告](../../../../Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261101-124230-640474/report.md)。
+
+**回传数据复核：** 使用该批次冻结的 controller 源码，对全部 180 个 smoke、profile 和正式窗口的 **1440 份 rank 记录**重新验证身份、硬件、机制、数值和同策略等价组，并与报告的 rank 文件哈希一致；从正式 rank 记录重算 162 个窗口和所有统计，与 `report.json` 一致。八卡 NCCL 预检、native mapping、八组 TACO 原生 smoke 证据及 72 份 profile trace 的哈希也通过核对。profile 的实际路径分析通过是目标机报告的结果，本次本地复核核对了 trace 哈希和已保存的 72 份分析结果，**没有重新解析全部 trace**。回传目录不含 MA11 兼容 `.so` 和复用的完整构建，且记录使用目标机绝对路径，因此此处不是在本地执行完整 `--report` 重放；没有将缺失的二进制验证记为通过。
 
 ## 2. 九组实现与量化范围
 
@@ -98,7 +123,7 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 后续 `20261031-210455-861085/ma11-compat/self-test/probe-result.json` 已记录目标 RTX 5090 上 6 组前向及反向逐位检查全部通过，RNG 未改变；这解决了先前独立 softmax 自检的阻塞，完整模型和正式性能验证仍未完成。
 
-### 最新 OOM 定位与修复（2026-10-31）
+### 历史 OOM 定位与修复（2026-10-31）
 
 失败证据均在 `Load-5090/logs/5090/phase6/` 的对应批次中，原始文件保持不变：
 
@@ -113,7 +138,7 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 
 该次共享 scratch 修复在无 GPU 的开发环境执行 `python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**93 项测试全部通过**，另通过入口预览与 `git diff --check`。测试覆盖冻结训练/计时 AST、九组报告、SM120 softmax 编译、共享 scratch 生命周期以及旧构建迁移/回滚。当时尚未实机执行；后续 `20261031-215027-387404` 已通过共享 scratch 原生 smoke 和九组完整模型检查，结果如下。
 
-### 最新 profile 检查器兼容性故障（2026-10-31）
+### 历史 profile 检查器兼容性故障（2026-10-31）
 
 证据目录为 `Load-5090/logs/5090/phase6/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261031-215027-387404/`。`preflight.json` 的 `completed=true` 且九组均为 `true`；九组 smoke 共 72 个 rank 记录和 MA11 profile 的 8 个 rank 记录全部 `passed=true`、`completed=true`。离线重新执行逐 rank 校验、初始硬件/软件/权重/RNG/输入身份检查及同量化策略组的 loss、梯度、参数轨迹比较，也全部通过。没有正式 timing 窗口。
 
@@ -138,9 +163,9 @@ NVIDIA 在 [RTX 5090 P2P 问题的公开答复](https://forums.developer.nvidia.
 | A | 17.018 | 17.213 | 1.328 | 18.346 |
 | Flux＋基础量化 | 17.481 | 17.686 | 0 | 17.481 |
 
-MA11 profile 的 allocated＋native 最大为 **21.384 GiB**。最后一列逐 rank 相加后取最大值，不把 allocated 和 reserved 重复相加，也不包含 CUDA context、NCCL 等内部占用。它与全部 worker 正常完成一起说明这批已越过先前 OOM 阶段；长窗口正式计时仍须重新运行。
+MA11 profile 的 allocated＋native 最大为 **21.384 GiB**。最后一列逐 rank 相加后取最大值，不把 allocated 和 reserved 重复相加，也不包含 CUDA context、NCCL 等内部占用。它与全部 worker 正常完成一起说明这批已越过先前 OOM 阶段；该历史批次没有完成正式计时，后续 2026-11-01 的完成批次见第 1 节。
 
-修复后的验证：在无 GPU 的开发环境执行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**116 项测试全部通过**；入口预览、shell 语法和 `git diff --check` 均通过。另对本批 `results/profile-ma11/rank0-profile.json.gz` 至 `rank7-profile.json.gz` 逐一执行完整 `analyze()`，八个 rank 的投影、激活缓存、反向、零统计、softmax 五项审计全部通过。每 rank 均确认 252 次 Apex＋4 次 TE LayerNorm、128 次 Attention dgrad split-K 归约。这里是对原始 GPU trace 的离线复核，未修改原 trace 或失败状态；其余八组 profile 和全套正式计时仍需在目标机新批次验证。
+修复后的验证：在无 GPU 的开发环境执行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v`，**116 项测试全部通过**；入口预览、shell 语法和 `git diff --check` 均通过。另对本批 `results/profile-ma11/rank0-profile.json.gz` 至 `rank7-profile.json.gz` 逐一执行完整 `analyze()`，八个 rank 的投影、激活缓存、反向、零统计、softmax 五项审计全部通过。每 rank 均确认 252 次 Apex＋4 次 TE LayerNorm、128 次 Attention dgrad split-K 归约。这里是对历史批次原始 GPU trace 的离线复核，未修改原 trace 或失败状态；后续 2026-11-01 新批次已完成全部九组 profile 和正式计时。
 
 这次仅修复 5090 的 profile 分析及回归测试，保留训练代码、模型尺寸、数值门禁和全部九组机制。更新整个 `tools/5090/phase6/` 后，可继续使用原 `--baseline-build` 路径，不需重编译 Flux/TACO；入口仍会编译独立 MA11 兼容小库并重复完整门禁。使用原命令启动新批次，不向失败批次追加结果；`--report` 只适用于完整批次，不能续跑这次未完成的实验。
 
@@ -264,6 +289,6 @@ bash tools/5090/phase6/run_baseline.sh \
 
 同一 trial 中各组保持相同初始参数、输入和运行环境。MA11/MA89/MA8/MA9/CR3/C 在组内检查 loss、梯度和参数更新一致性，R/A 在另一组内检查；不同量化策略不强行要求逐位相等。基础量化 v2 单独检查 codec 和输出所有权。各组还检查实际模块覆盖、无 fallback、完整梯度/参数轨迹及相应 profile 路径，防止只改组名而优化未启用。
 
-每个批次保留 `environment-preflight.json`（硬件/Apex/NCCL 检查汇总）、`preflight-communication.json`、`nccl-preflight/rank*.json`（八 rank 集合通信原始记录）、`local-smoke/<arm>/rank*.json` 与 `local-smoke-summary.json`（八组 TACO 原生传输检查）、`preflight.json`（九组模型 smoke）、构建清单、worker 配置、逐 rank 训练记录、profile 证据及阶段日志；最终生成 **`report.json` 和 `report.md`**。后台状态看 `batch-state.json`，控制进程日志看 `handoff/supervisor.log`。`--transport-smoke-only` 成功状态为 `transport_smoke_completed`，不生成训练性能报告。离线复核检查 NCCL/原生传输探针证据、逐 rank 完成状态、软件/硬件身份及固定通信环境；失败或缺失的窗口不能计入已完成报告，收益为负不会提前停止。完成实机测试后，应以该批次报告及原始记录回填第 1 节的 5090 待测行，同时记录批次目录、驱动、PyTorch/CUDA、NCCL 和 PCIe/P2P 拓扑。
+每个批次保留 `environment-preflight.json`（硬件/Apex/NCCL 检查汇总）、`preflight-communication.json`、`nccl-preflight/rank*.json`（八 rank 集合通信原始记录）、`local-smoke/<arm>/rank*.json` 与 `local-smoke-summary.json`（八组 TACO 原生传输检查）、`preflight.json`（九组模型 smoke）、构建清单、worker 配置、逐 rank 训练记录、profile 证据及阶段日志；最终生成 **`report.json` 和 `report.md`**。后台状态看 `batch-state.json`，控制进程日志看 `handoff/supervisor.log`。`--transport-smoke-only` 成功状态为 `transport_smoke_completed`，不生成训练性能报告。离线复核检查 NCCL/原生传输探针证据、逐 rank 完成状态、软件/硬件身份及固定通信环境；失败或缺失的窗口不能计入已完成报告，收益为负不会提前停止。第 1 节已填写本次完成批次，并记录环境和 P2P 拓扑；后续批次应单独复核和注明来源。
 
 相关实现：[入口](../../../tools/5090/phase6/run_baseline.sh)、[九组协议与统计](../../../tools/5090/phase6/baseline_protocol.py)、[八 rank NCCL 探针](../../../tools/5090/phase6/baseline_collectives.py)、[隔离构建](../../../tools/5090/phase6/baseline_build.py)、[worker 生成](../../../tools/5090/phase6/baseline_sources.py)。
