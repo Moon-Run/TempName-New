@@ -58,36 +58,37 @@ class Protocol(unittest.TestCase):
         with self.assertRaises(ValueError):
             p.report(bad, blocks=8)
 
-    def test_default_three_blocks_finish_without_bootstrap_or_extra_blocks(self):
-        for trials in (1, 2):
-            jobs = p.schedule(trials)
-            self.assertEqual(len(jobs), trials*12)
+    def test_default_two_and_legacy_three_blocks_finish_without_bootstrap(self):
+        self.assertEqual(p.schedule(), p.schedule(blocks=2))
+        for trials, blocks in itertools.product((1, 2), (2, 3)):
+            jobs = p.schedule(trials, blocks)
+            self.assertEqual(len(jobs), trials*blocks*4)
             for trial in range(1, trials+1):
                 own = [job for job in jobs if job['trial'] == trial]
-                self.assertEqual({job['block'] for job in own}, {0, 1, 2})
-                self.assertEqual(own, p.schedule(trials, 8)[(trial-1)*32:(trial-1)*32+12])
-                for block in range(3):
+                self.assertEqual({job['block'] for job in own}, set(range(blocks)))
+                self.assertEqual(own, p.schedule(trials, 8)[(trial-1)*32:(trial-1)*32+blocks*4])
+                for block in range(blocks):
                     self.assertEqual({job['arm'] for job in own if job['block'] == block}, set(p.ARMS))
             samples = [dict(job, ms_per_step=1030-10*p.ARMS.index(job['arm']),
                 peak_allocated_gib=17, peak_reserved_gib=18, native_workspace_gib=1,
                 peak_allocated_plus_taco_workspace_gib=18) for job in jobs]
             with patch.object(p, 'paired', side_effect=AssertionError('No short-run bootstrap')):
-                result = p.report(samples, trials=trials)
-            self.assertEqual(result['formal_optimizer_steps'], trials*600)
-            self.assertEqual(result['timing_rank_records'], trials*96)
+                result = p.report(samples, trials=trials, blocks=blocks)
+            self.assertEqual(result['formal_optimizer_steps'], trials*blocks*200)
+            self.assertEqual(result['timing_rank_records'], trials*blocks*32)
             self.assertTrue(result['completed'])
             self.assertFalse(result['counterbalanced_order'])
             self.assertFalse(result['pairwise_ci_available'])
             for comparison in result['comparisons'].values():
                 self.assertEqual(len(comparison['pairs']), 6)
                 for pair in comparison['pairs'].values():
-                    self.assertEqual(pair['paired_blocks'], 3)
+                    self.assertEqual(pair['paired_blocks'], blocks)
                     self.assertIsNone(pair['ci95'])
                 self.assertAlmostEqual(comparison['pairs'][p.ARMS[0]+'/flux-improved']['percent'], -3)
-            self.assertIn('三块短测', p.markdown(result))
+            self.assertIn(f'{blocks} 块短测', p.markdown(result))
             self.assertIn('不计算 95% CI', p.markdown(result))
             with self.assertRaises(ValueError):
-                p.report(samples[:-1], trials=trials)
+                p.report(samples[:-1], trials=trials, blocks=blocks)
 
     def test_window_is_slowest_rank_not_mean_rank(self):
         rows = [dict(rank=rank, timed_steps=50, elapsed_seconds=40+rank,

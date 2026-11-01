@@ -30,8 +30,8 @@ class Launcher(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     record = json.loads(result.stdout[result.stdout.index('{'):])
                     self.assertEqual(record['arms'], list(p.ARMS))
-                    self.assertEqual(record['timing_windows'], 0 if mode else 12)
-                    self.assertEqual(record['formal_optimizer_steps'], 0 if mode else 600)
+                    self.assertEqual(record['timing_windows'], 0 if mode else 8)
+                    self.assertEqual(record['formal_optimizer_steps'], 0 if mode else 400)
                     self.assertFalse(record['counterbalanced_order'])
                     self.assertFalse(output.exists())
 
@@ -39,7 +39,8 @@ class Launcher(unittest.TestCase):
         args = launcher.arguments([])
         self.assertEqual(args.out.parent, launcher.REPO.parent/'Load-5090/logs/5090/phase6')
         self.assertTrue(args.out.name.startswith('op1-abc-staged-v1-'))
-        self.assertEqual(args.blocks, 3)
+        self.assertEqual(args.blocks, 2)
+        self.assertEqual(launcher.arguments(['--blocks', '3']).blocks, 3)
         self.assertEqual(launcher.arguments(['--blocks', '8']).blocks, 8)
         for options in (['--report'], ['--inside'], ['--blocks', '6'],
                         ['--execute', '--report', '--out', '/tmp/op1-abc']):

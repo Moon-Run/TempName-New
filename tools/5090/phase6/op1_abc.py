@@ -37,7 +37,7 @@ def arguments(argv=None):
     reuse.add_argument('--abc-build', type=Path, help='Reuse an already compiled OP1 ABC build and its frozen baseline reference')
     parser.add_argument('--trials', type=int, choices=(1, 2), default=1)
     parser.add_argument('--blocks', type=int, default=p.DEFAULT_BLOCKS,
-                        help='Default 3-block short run; use a positive multiple of 8 for balanced ordering')
+                        help='Default 2-block short run; 3 also supported; use a positive multiple of 8 for balanced ordering')
     parser.add_argument('--jobs', type=int, default=2)
     parser.add_argument('--worker-timeout', type=int, default=3600)
     parser.add_argument('--execute', action='store_true')

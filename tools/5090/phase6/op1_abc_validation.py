@@ -59,7 +59,10 @@ def validate_transport(row, arm, calls, names, layouts):
         return
     base.validate_transport(row, 'flux-basic', calls, names, layouts)
     states = row['op1_abc_transport']
-    require(set(states) == names, 'Missing per-module ABC transport evidence')
+    require(set(states) == names,
+            f'Missing per-module ABC transport evidence: expected {len(names)} modules, '
+            f'observed {len(states)}; missing={sorted(names-set(states))}, '
+            f'unexpected={sorted(set(states)-names)}')
     pointers = []
     for state in states.values():
         validate_codec_state(state, arm, calls, row['rank'])

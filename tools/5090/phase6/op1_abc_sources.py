@@ -81,10 +81,19 @@ def worker_source(arm):
     source = original.worker_source('flux-improved' if arm == 'flux-improved' else 'flux-basic')
     source = native.replace(source, "report['flux_implementation'] = PLAN['flux_implementation']",
                             "report['op1_abc_implementation'] = PLAN['op1_abc_implementation']")
-    anchor = "report['op1_abc_implementation'] = PLAN['op1_abc_implementation']"
-    source = native.replace(source, anchor, anchor + "\nreport['op1_abc_transport'] = " + (
-        "{}" if arm == 'flux-improved' else
-        "{name: op.codec.tensor_codec.state() for name, op in adapter.scope_ops.items()}"))
+    # Operators are created lazily by the first forward. Snapshot their mutable
+    # counters only after warmup AND the measured/profile steps have completed,
+    # alongside the existing final native state, before serializing rank JSON.
+    anchor = "report['rtx5090_transport'] = "
+    final_state = "report['op1_abc_transport'] = {}\n"
+    if arm in BASIC_ARMS:
+        final_state = """report['op1_abc_transport'] = {
+    name: op.codec.tensor_codec.state() for name, op in adapter.scope_ops.items()}
+assert set(report['op1_abc_transport']) == set(report['target_modules']), 'Incomplete final ABC transport coverage'
+assert all(state['calls'] == (warmup + (1 if MODE == 'profile' else count))*microsteps
+           for state in report['op1_abc_transport'].values()), 'Stale final ABC transport counters'
+"""
+    source = native.replace(source, anchor, final_state + anchor)
     base.validate_worker(source)
     return source
 

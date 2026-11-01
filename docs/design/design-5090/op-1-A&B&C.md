@@ -1,8 +1,8 @@
 # OP1 A/B/C：RTX 5090 的 FLUX 交替排序、分块到达消费与选择性量化
 
-更新：2026-11-02。目标为单机 **8×RTX 5090，TP8/DP1**。新增独立协议 **`rtx5090-phase6-op1-abc-staged-v1`** 和入口 [run_op1_abc.sh](../../../tools/5090/phase6/run_op1_abc.sh)，同场比较下面三种组合及 [baseline-flux.md](baseline-flux.md) 的 **FLUX＋改进量化**。默认已按要求缩短为 **3 个 block**。
+更新：2026-11-02。目标为单机 **8×RTX 5090，TP8/DP1**。新增独立协议 **`rtx5090-phase6-op1-abc-staged-v1`** 和入口 [run_op1_abc.sh](../../../tools/5090/phase6/run_op1_abc.sh)，同场比较下面三种组合及 [baseline-flux.md](baseline-flux.md) 的 **FLUX＋改进量化**。默认已按要求缩短为 **2 个 block**。
 
-**状态：实现与测试入口已提供，尚未在目标八卡机器运行本轮实验；没有本轮加速比。** 新 codec 已在本地用 CUDA 12.8 编译为 SM120 动态库；CPU 检查不等于 GPU 正确性或性能验证。原 H100、5090 九组 baseline、OP1-A 和 Flux 四组的源码构建及历史日志保持各自协议，不向旧结果目录追加新数据。
+**状态：目标机批次 `20261102-000347-679838` 已完成构建和四组 native 探针，首组模型 smoke 在控制器校验阶段失败；尚无正式计时或本轮加速比。** 原因是生成 worker 过早采集通信状态，修复与复用构建重跑方法见第 9 节。新 codec 此前已在本地用 CUDA 12.8 编译为 SM120 动态库；CPU 检查不等于 GPU 正确性或性能验证。原 H100、5090 九组 baseline、OP1-A 和 Flux 四组的源码构建及历史日志保持各自协议，不向旧结果目录追加新数据。
 
 ## 1. 从已有结果确定改进方向
 
@@ -81,7 +81,7 @@ C 发送的数据多于 A/B；可能通过减少 codec 运算获益，也可能�
 # 无副作用预览，不查询 GPU、不创建批次。
 bash tools/5090/phase6/run_op1_abc.sh
 
-# 四组比较，默认 3 个 block，后台运行。
+# 四组比较，默认 2 个 block，后台运行。
 bash tools/5090/phase6/run_op1_abc.sh --execute
 
 # 如需完整的八块排序平衡周期，显式指定。
@@ -126,9 +126,9 @@ bash tools/5090/phase6/run_op1_abc.sh --report --out /path/to/completed-op1-abc-
 
 模型保持 **32 层、hidden 4096、FFN 16384、32 heads、sequence 2048、micro batch 1、global batch 4、BF16、TP8/DP1**，每 optimizer step 为 **8192 tokens**。四组覆盖全部 64 个 Attention/MLP 输出投影，反向、optimizer、清梯度及全部通信计入墙钟，不启用 CUDA Graph 或后续 MA8/MA9/MA11 优化。
 
-默认 **1 trial × 3 blocks × 4 组**；每窗口 **10 步预热＋50 步正式计时**，共 **12 个正式窗口、96 份 rank 记录、600 个正式 optimizer step**。`results/compare1/` 下只有 `block00-<组名>`、`block01-<组名>`、`block02-<组名>`，每个 block 各有四个组别目录。一个窗口是“一个 block 中的一组运行”，不是一个 block；此前的 32 个窗口对应八个 block，并非 `block00` 到 `block31`。
+默认 **1 trial × 2 blocks × 4 组**；每窗口 **10 步预热＋50 步正式计时**，共 **8 个正式窗口、64 份 rank 记录、400 个正式 optimizer step**。`results/compare1/` 下只有 `block00-<组名>`、`block01-<组名>`，每个 block 各有四个组别目录。一个窗口是“一个 block 中的一组运行”，不是一个 block；此前的 32 个窗口对应八个 block，并非 `block00` 到 `block31`。
 
-三块短测使用原八块排序的前三块，四组每块都运行，但尚未完成位置和前后关系的平衡周期；报告只给描述统计与配对点估计，**不计算 95% CI**。指定 `--blocks 8` 可恢复原 **32 个窗口、1600 个正式 step** 的平衡比较和 bootstrap 区间。`--blocks` 接受 3 或 8 的正整数倍，`--trials` 支持 1 或 2；每个 trial 独立汇总。
+两块短测使用原八块排序的前两块，四组每块都运行，但尚未完成位置和前后关系的平衡周期；报告只给描述统计与配对点估计，**不计算 95% CI**。指定 `--blocks 8` 可恢复原 **32 个窗口、1600 个正式 step** 的平衡比较和 bootstrap 区间。`--blocks` 接受 2、3 或 8 的正整数倍（保留三块兼容），`--trials` 支持 1 或 2；每个 trial 独立汇总。
 
 执行前先检查冻结训练源码、八卡硬件/Apex/NCCL，再构建和运行四组 native probe，之后依次运行四组模型 smoke、四组八 rank profile，全部通过才进入正式计时。仍固定 `NCCL_P2P_DISABLE=1`、`NCCL_SHM_DISABLE=0`、`NCCL_NVLS_ENABLE=0`。
 
@@ -143,13 +143,13 @@ bash tools/5090/phase6/run_op1_abc.sh --report --out /path/to/completed-op1-abc-
 
 不同量化策略或 GEMM 归约路径不要求训练轨迹逐位相同；报告保留六组配对的数值差异观测。短程 smoke 和 50 步窗口不是收敛或模型质量等价证明。
 
-报告从全部原始 rank 记录重算：窗口步时为 `max(八 rank elapsed_seconds) × 1000 / 50`，单位 ms/step。主表给所有窗口均值、中位数、最慢窗口、tokens/s、相对同期改进量化的均值降幅；六项配对使用完整 block 的对数比。三块短测仅给点估计；八块或更多的完整平衡周期另给 10,000 次 bootstrap 区间，不做多重比较校正。不筛除慢窗口或负收益。显存包括 Torch allocated/reserved 和独立 native workspace，allocated＋native 不含 CUDA context/NCCL 内部占用。
+报告从全部原始 rank 记录重算：窗口步时为 `max(八 rank elapsed_seconds) × 1000 / 50`，单位 ms/step。主表给所有窗口均值、中位数、最慢窗口、tokens/s、相对同期改进量化的均值降幅；六项配对使用完整 block 的对数比。两块或三块短测仅给点估计；八块或更多的完整平衡周期另给 10,000 次 bootstrap 区间，不做多重比较校正。不筛除慢窗口或负收益。显存包括 Torch allocated/reserved 和独立 native workspace，allocated＋native 不含 CUDA context/NCCL 内部占用。
 
 若正式计时中断，保留已完成 profile 和原始窗口，但不产生伪完整报告；也不会复用历史窗口补齐本轮。预检 CUDA OOM 的处理仍参考 [baseline-flux 第 8 节](baseline-flux.md#8-2026-11-01-回传失败硬件预检-cuda-oom)，本入口不会自动停止其他 GPU 任务。
 
 ## 8. 本地验证
 
-初次实现新增 **30 项专项测试**，当时整个 `tools/5090/phase6` 测试集 **217 项全部通过**；独立入口预览、shell 语法、Python 语法、文档文件链接和 whitespace 检查也通过。此次默认三块改动另增加短测调度与报告回归，覆盖不生成额外 block、不调用 bootstrap 和完整八块模式保留；**10 项调度/入口测试全部通过**，三块及八块入口预览也通过。CPU 回归命令：
+初次实现新增 **30 项专项测试**，当时整个 `tools/5090/phase6` 测试集 **217 项全部通过**；独立入口预览、shell 语法、Python 语法、文档文件链接和 whitespace 检查也通过。此前默认三块改动另增加短测调度与报告回归，覆盖不生成额外 block、不调用 bootstrap 和完整八块模式保留；**10 项调度/入口测试全部通过**，三块及八块入口预览也通过。CPU 回归命令：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
@@ -163,3 +163,26 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
 覆盖构建来源及篡改拒绝、生成 worker、分块布局与字节预算、stream 依赖与失败后禁止复用、探针记录验证、profile 的 CUDA launch/完成依赖、八块平衡顺序、六组配对和中断状态。fixture 只用于验证检查器，不作为 GPU 测量数据。
 
 已用本地 CUDA 12.8 将新 codec 的全部编码/解码入口编译为 SM120 动态库。当前环境没有可见 GPU，未在本地执行 native 探针、模型 smoke 或八卡计时。目标机运行上述完整入口后，才可判断本轮三组对 5090 的实际收益。
+
+## 9. 2026-11-02 回传失败：首次前向前采集了空通信状态
+
+批次 `op1-abc-staged-v1-1x-50steps-20261102-000347-679838` 的 [supervisor.log](../../../../Load-5090/logs/5090/phase6/op1-abc-staged-v1-1x-50steps-20261102-000347-679838/handoff/supervisor.log) 在 `smoke-flux-basic-interleaved` 阶段报 `Missing per-module ABC transport evidence`。这是本次代码生成器的错误。
+
+冻结的 `worker.py` 第 117 行在首次前向之前执行 `report['op1_abc_transport'] = {...adapter.scope_ops...}`。算子实例在第一次前向中才延迟创建，此时 `scope_ops` 为空，字典推导式保存的是空快照，之后不会自动更新。八个 rank 的实际记录都含 64 个目标模块、每模块 20 次 codec 调用，即 `(2 步预热＋3 步 smoke)×4 microsteps`，但通信状态均为 `{}`。worker 自身记录 `completed=true / passed=true`，控制器仍必须因证据缺失拒绝该窗口，不能追填状态或把本批标记为通过。
+
+[op1_abc_sources.py](../../../tools/5090/phase6/op1_abc_sources.py) 已将 A/B/C 的动态状态采集移到全部训练/profile step 结束后的最终报告区，与原生 transport 状态相邻，且在 rank JSON 落盘之前。新增 worker 断言要求覆盖全部目标模块，调用次数必须包含预热及正式/profile 步；控制器继续严格校验等待、stream、split、缓冲区和调用计数。改进量化对照仍使用其原生状态，ABC 状态保持空。诊断错误现会列出期望数量、实际数量、缺失和额外模块。
+
+原测试手工构造了已经填好的状态，只验证记录校验器，没有执行生成 worker 的状态采集时机。新增生命周期回归执行实际生成代码的预热循环、smoke/profile/timing 分支及最终 JSON 写入，用 CPU 替身模拟首次前向创建 64 个实例、随后累计调用次数；把采集故意移回启动阶段必须失败。这些替身不会生成或冒充 GPU 实验结果。
+
+修复后 **35 项 OP1-ABC 回归全部通过**。同一生命周期测试执行回传旧 worker，复现“5 步、64 个目标模块、0 条通信状态、每模块 20 次调用”；执行修复后的 worker 得到“5 步、64 个目标模块、64 条通信状态、每模块 20 次调用”。新增四项测试覆盖三组全部模式、改进量化原生状态、启动时空快照，以及仅预热后采样导致的过期计数。修复后尚未重跑八卡模型。
+
+本地只读重验了四组 native 探针的逐 rank 记录，重新计算的汇总与 [native-probe/report.json](../../../../Load-5090/logs/5090/phase6/op1-abc-staged-v1-1x-50steps-20261102-000347-679838/native-probe/report.json) 一致。回传目录没有完整 build 二进制，未在本地重跑 GPU，也未执行整个批次的成功报告重放。后续三组模型 smoke、四组 profile 和正式计时尚未执行。
+
+修复只涉及 Python worker 生成与校验诊断；与本批冻结源码核对，native builder、CUDA codec、运行时及其构建依赖未改变。同步更新 `tools/5090/phase6/` 后，在目标机 `TempName-New` 根目录复用本批已完成构建，**无需重编译 CUDA**：
+
+```bash
+bash tools/5090/phase6/run_op1_abc.sh --execute --foreground --blocks 2 \
+  --abc-build /workspace/Load-5090/logs/5090/phase6/op1-abc-staged-v1-1x-50steps-20261102-000347-679838/build
+```
+
+该路径来自本批 `plan.json`，必须仍存在并通过原有构建身份验证。命令创建新批次，重新运行全部门禁及两块比较，不向失败目录追加或修改记录。
