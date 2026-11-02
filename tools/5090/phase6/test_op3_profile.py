@@ -14,8 +14,8 @@ def forward_fixture(arm):
             if 'op1_abc_encode_kernel' in event['name']:
                 event['name'] = profile.ENCODERS[arm]
             elif 'op1_abc_decode_kernel' in event['name']:
-                event['name'] = profile.DECODERS[arm] + ('<true>' if arm == 'op3-r' else '')
-    if arm == 'op3-r':
+                event['name'] = profile.DECODERS[arm] + ('<true>' if profile.p.fused(arm) else '')
+    if profile.p.fused(arm):
         adds = [e for e in events if e['cat'] == 'kernel' and 'AddFunctor' in e['name']]
         correlations = {e['args']['correlation'] for e in adds}
         externals = {e['args']['External id'] for e in adds}
@@ -76,8 +76,8 @@ class ForwardAudit(unittest.TestCase):
                 self.assertEqual(row['calls'], 128)
                 self.assertEqual(row['chunks_per_call'], 1)
                 self.assertEqual(row['all_to_all_calls'], 128)
-                self.assertEqual(row['consumer_add_kernels'], 0 if arm == 'op3-r' else 256)
-                self.assertEqual(row['fused_consumer'], arm == 'op3-r')
+                self.assertEqual(row['consumer_add_kernels'], 0 if profile.p.fused(arm) else 256)
+                self.assertEqual(row['fused_consumer'], profile.p.fused(arm))
 
     def test_wrong_decoder_specialization_and_wrong_encoder_rejected(self):
         for mutation in ('raw_r', 'wrong_encoder', 'extra_native'):
@@ -127,11 +127,11 @@ class ForwardAudit(unittest.TestCase):
 class BackwardAudit(unittest.TestCase):
     def test_both_autograd_paths_preserve_gathers_and_cublas_splitk(self):
         for arm in profile.p.ARMS:
-            result = profile.row_backward(backward_fixture(arm == 'op3-r', True), arm, 0)
+            result = profile.row_backward(backward_fixture(profile.p.fused(arm), True), arm, 0)
             self.assertEqual(result['attn']['splitk_reduction_kernels'], 128)
             self.assertEqual(result['mlp']['splitk_reduction_kernels'], 0)
             self.assertEqual(result['attn']['dgrad_calls'], 128)
-            if arm == 'op3-r':
+            if profile.p.fused(arm):
                 self.assertEqual(result['attn']['bias_reduction_kernels'], 128)
 
     def test_bias_order_owner_and_missing_work_are_rejected(self):

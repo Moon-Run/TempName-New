@@ -1,4 +1,4 @@
-"""Two OP3 workers on the same A/MA89/MA11 foundation and frozen training loop."""
+"""Combined OP3 worker on the A/MA89/MA11 foundation and frozen training loop."""
 import ast
 import copy
 import hashlib
@@ -21,20 +21,20 @@ BASE_ARM = 'flux-basic-interleaved'
 
 
 def implementation(arm):
-    require(arm in p.ARMS, 'Unknown OP3 arm')
+    require(arm in p.ALL_ARMS, 'Unknown OP3 arm')
     value = dict(projection.implementation(BASE_ARM))
     value.update(protocol=p.PROTOCOL, foundation='OP2-A-MA89-MA11', optimizations=STACK,
         repeated_ma89_installation=False, packet_layout='H128-AoS-136',
         encoder='upstream-cta128' if arm == 'op3-r' else 'warp-owned-four-groups',
-        decoder='r-packed-source-prefetch' if arm == 'op3-r' else 'basic-ring-bf16-h128-direct-v1',
-        r_decoder=arm == 'op3-r', cr3_consumer_fusion=arm == 'op3-r',
+        decoder='r-packed-source-prefetch' if p.fused(arm) else 'basic-ring-bf16-h128-direct-v1',
+        r_decoder=p.fused(arm), cr3_consumer_fusion=p.fused(arm),
         consumer_rounding='BF16-projection-plus-bias-then-residual',
         original_peer_overlap_preserved=False)
     return value
 
 
 def definition(arm):
-    require(arm in p.ARMS, 'Unknown OP3 arm')
+    require(arm in p.ALL_ARMS, 'Unknown OP3 arm')
     value = dict(projection.routing.definition(BASE_ARM))
     value.update(policy=arm, implementation='rtx5090-'+arm+'-v1', experiment=implementation(arm))
     return value
@@ -74,19 +74,19 @@ def selection_entry(*args):
 
 
 def adapter_source(arm):
-    require(arm in p.ARMS, 'Unknown OP3 arm')
+    require(arm in p.ALL_ARMS, 'Unknown OP3 arm')
     source = previous.adapter_source(BASE_ARM)
-    if arm == 'op3-r':
+    if p.fused(arm):
         source = consumer.adapter_source(source)
         source = projection.native.replace(source, "os.environ.get('H100_MA4_F_ARM') == 'F4'",
-                                             "os.environ.get('E2E_POLICY') == 'op3-r'")
+                                             "os.environ.get('E2E_POLICY') in ('op3-r', 'op3-combined')")
     return source
 
 
 def taco_source(arm):
-    require(arm in p.ARMS, 'Unknown OP3 arm')
+    require(arm in p.ALL_ARMS, 'Unknown OP3 arm')
     tree = ast.parse(base.taco_source('flux-basic'))
-    if arm == 'op3-r':
+    if p.fused(arm):
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'TacoForward')
         cls.body.extend(ast.parse('''def forward_consumer(self, input_, weight, bias, residual, reduce_scatter_option=None):
     if not self.owns_output or not self.codec.owns_configuration:
@@ -121,7 +121,7 @@ def flux_source():
 
 
 def worker_source(arm):
-    require(arm in p.ARMS, 'Unknown OP3 arm')
+    require(arm in p.ALL_ARMS, 'Unknown OP3 arm')
     source = previous.worker_source(BASE_ARM)
     source = source.replace('op1_abc_implementation', 'op3_implementation')
     source = source.replace('op1_abc_transport', 'op3_transport')
@@ -129,7 +129,7 @@ def worker_source(arm):
     source = source.replace('op2_optimization_libraries', 'op3_optimization_libraries')
     source = source.replace('op2_libraries', 'op3_libraries').replace('op2_native', 'op3_native')
     source = source.replace('final ABC', 'final OP3').replace('OP2 optimization', 'OP3 optimization')
-    final = "report['op3_consumer_state'] = "+('adapter.consumer_state()' if arm == 'op3-r' else '{}')+'\n'
+    final = "report['op3_consumer_state'] = "+('adapter.consumer_state()' if p.fused(arm) else '{}')+'\n'
     source = projection.native.replace(source, "report['rtx5090_transport'] = ", final+"report['rtx5090_transport'] = ")
     base.validate_worker(source)
     previous.validate_installation(source)
@@ -137,7 +137,7 @@ def worker_source(arm):
 
 
 def codec_identity(arm):
-    require(arm in p.ARMS, 'Unknown OP3 arm')
+    require(arm in p.ALL_ARMS, 'Unknown OP3 arm')
     value = base.basic_quant_sources.codec_identity()
     value.update(implementation='rtx5090-op3-direct-h128-v1',
         source_sha256=sha(HERE/'op3_codec.py'), reference_codec_sha256=sha(HERE/'op1_abc_codec.py'),
@@ -152,7 +152,7 @@ def configuration(arm, selection, communication, codec, plan):
         role_plan_sha256={arm: {'attn': None, 'mlp': None}}, codec_identity=codec_identity(arm),
         op3_implementation=implementation(arm), op3_optimization_stack=STACK,
         op3_optimization_libraries=optimizers.libraries(plan),
-        scope='OP3 A plus MA89/MA11: R consumer fusion versus warp-owned encoder')
+        scope='OP3 A plus MA89/MA11: warp-owned encoder with R consumer fusion')
     return cfg
 
 
@@ -182,9 +182,9 @@ def prepare_workers(build, out, plan):
         write(scripts/'config.json', cfg)
         write(scripts.parent/'plan.json', plan)
         (scripts/'build').mkdir()
-        (scripts/'build'/arm).symlink_to(builder.native_root(build, arm), target_is_directory=True)
+        (scripts/'build'/arm).symlink_to(builder.native_root(build, p.build_arm(arm)), target_is_directory=True)
         workers[arm] = dict(root=str(scripts), config=cfg, definition=definition(arm),
-            libraries=builder.libraries(build, arm), selection=selection,
+            libraries=builder.libraries(build, p.build_arm(arm)), selection=selection,
             files={path.name: sha(path) for path in scripts.iterdir() if path.is_file()},
             plan_sha256=sha(scripts.parent/'plan.json'))
     return workers

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RTX5090 OP3 paired comparison: A + MA89 + MA11 with R or a measured-path improvement."""
+"""RTX5090 OP3 combined encoder + R + consumer fusion, with operator-first measurements."""
 import argparse
 from datetime import datetime
 import fcntl
@@ -36,27 +36,28 @@ def arguments(argv=None):
     reuse.add_argument('--op3-build', type=Path, help='Reuse a verified OP3 codec build and its immutable ABC dependency')
     parser.add_argument('--trials', type=int, choices=(1, 2), default=1)
     parser.add_argument('--blocks', type=int, default=p.DEFAULT_BLOCKS,
-                        help='Positive even count; default 2 balances AB/BA; use at least 6 for a paired confidence interval')
+                        help='Positive count of single-arm windows per trial; default 1')
     parser.add_argument('--jobs', type=int, default=2)
     parser.add_argument('--worker-timeout', type=int, default=3600)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true')
     stages = parser.add_mutually_exclusive_group()
     stages.add_argument('--preflight-only', action='store_true')
-    stages.add_argument('--transport-smoke-only', action='store_true', help='Stop after native correctness, packet and runtime probes for both OP3 arms')
+    stages.add_argument('--transport-smoke-only', action='store_true', help='Stop after native correctness, packet and runtime probes for the combined OP3 arm')
+    stages.add_argument('--operator-only', action='store_true', help='Stop after operator correctness, latency and profiles, before full-model training')
     parser.add_argument('--report', action='store_true', help='Read-only verification of a completed --out batch')
     parser.add_argument('--inside', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     p.schedule(args.trials, args.blocks)
     require(args.jobs > 0 and args.worker_timeout > 300, 'Positive jobs and worker timeout > 300 required')
     require(not args.report or (args.out and not args.execute and not args.preflight_only
-                               and not args.transport_smoke_only), '--report requires --out without execution flags')
+                               and not args.transport_smoke_only and not args.operator_only), '--report requires --out without execution flags')
     require(not args.inside or (args.execute and args.out and not args.report), 'Invalid supervisor invocation')
     require(not args.execute or args.preflight_only or args.abc_build or args.op3_build,
             '--execute requires --abc-build or --op3-build (except --preflight-only)')
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'op3-two-arm-v1-{args.trials}x-50steps-{stamp}'
+        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'op3-combined-v2-{args.trials}x-50steps-{stamp}'
     for name, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, name, value.expanduser().absolute() if name == 'python' else value.expanduser().resolve())
@@ -70,7 +71,7 @@ def worker_environment(args, build, scripts, job, dest, plan):
     old_arm = p.NATIVE.get(arm, 'flux-basic')
     env = base.worker_environment(args, reference, scripts, dict(job, arm=old_arm), dest, plan)
     old_native = load('build').native_root(reference, old_arm)
-    native = builder.native_root(build, arm)
+    native = builder.native_root(build, p.build_arm(arm))
     for key in ('PYTHONPATH', 'LD_LIBRARY_PATH'):
         env[key] = env[key].replace(str(old_native), str(native))
     env['E2E_POLICY'] = p.POLICY[arm]
@@ -101,37 +102,26 @@ def check_identity(rows, initial, references, job):
     require(initial is None or current == initial, 'Hardware/software/weights/RNG/input changed between windows')
     key = (job['trial'], job['block'], job['mode'])
     group = references.setdefault(key, {})
-    require(job['arm'] not in group, 'Duplicate two-arm comparison window')
+    require(job['arm'] not in group, 'Duplicate single-arm window')
     group[job['arm']] = rows
-    if job['mode'] == 'smoke' and set(group) == set(p.ARMS):
-        # The projections are captured at different consumer stages, but both
-        # training graphs must produce the same smoke gradients and updates.
-        validation.base.equivalent(group[p.ARMS[0]], group[p.ARMS[1]], smoke=True)
     return current
 
 
 
 def numerical_comparison(references):
-    from op1_a import numerical_comparison as compare_pair
-    require(all(set(group) == set(p.ARMS) for group in references.values()),
-            'Incomplete two-arm numerical evidence')
-    reference, candidate = p.ARMS
-    # Keep the shared scalar/parameter estimator without inheriting its original
-    # Stream-K exception or comparing hashes captured at different output stages.
-    result = compare_pair({key: {'flux-basic': group[reference],
-                                'flux-basic-interleaved': group[candidate]}
-                           for key, group in references.items()})
-    result.update(reduction_changes_allowed=False, raw_projection_bitwise_required=True,
-                  smoke_training_equivalence_required=True,
-                  full_training_equivalence_required=False, output_stages_differ=True,
-                  output_stages={reference: 'projection-plus-bias-plus-residual',
-                                 candidate: 'raw-projection'})
-    for window in result['windows']:
-        if window['mode'] == 'smoke':
-            window['smoke_projection_outputs_identical'] = None
-            window['output_stages_differ'] = True
-    return {candidate+'/'+reference: result}
+    require(references and all(set(group) == set(p.ARMS) for group in references.values()),
+            'Incomplete single-arm numerical evidence')
+    return {}  # No concurrent control is executed or inferred from historical data.
 
+
+def operator_checks(args, build, plan):
+    from op3_operator import run_stage
+    return run_stage(args, build, plan)
+
+
+def operator_evidence(root, plan, hardware):
+    from op3_operator import evidence
+    return evidence(root, plan, hardware)
 
 
 def native_evidence(root, plan, hardware):
@@ -166,12 +156,17 @@ def replay(root, recompute_profiles=True):
     optimizers.verify_all(plan, root)
     base.verify_ma11_probe(root, plan['ma11_compat'], plan['ma11_probe'], hardware)
     native_evidence(root, plan, hardware)
+    for arm in p.ARMS:
+        base.check_worker(root, arm, workers[arm])
+    operator = operator_evidence(root, plan, hardware)
+    if plan.get('operator_only'):
+        return operator
     smoke, profile = read(root/'preflight.json'), read(root/'profile-summary.json')
-    require(smoke == dict(completed=True, arms=dict.fromkeys(p.ARMS, True)), 'Two full-model smokes are required')
+    require(smoke == dict(completed=True, arms=dict.fromkeys(p.ARMS, True)), 'Combined full-model smoke is required')
     require(profile['protocol'] == p.PROTOCOL and profile['run_id'] == plan['run_id']
             and profile['completed'] and profile['execution_validated']
             and set(profile['profiles']) == {f'{arm}/rank{rank}' for arm in p.ARMS for rank in range(8)},
-            'Two complete profile sets are required')
+            'Combined profile set is required')
     expected = {f'results/profile-{arm}/rank{rank}-profile.json.gz' for arm in p.ARMS for rank in range(8)}
     require(set(profile['evidence_files']) == expected, 'Missing raw profile trace')
     base.verify_files(root, profile['evidence_files'])
@@ -200,6 +195,7 @@ def replay(root, recompute_profiles=True):
         hardware=initial[0]['hardware'], environment=plan['environment'], worker_records=records,
         profile_summary_sha256=sha(root/'profile-summary.json'), plan_sha256=sha(root/'plan.json'),
         native_probe_sha256=sha(root/'native-probe/report.json'), build=plan['build'],
+        operator_report_sha256=sha(root/'operator/report.json'), operator_gradients_validated=True,
         optimization_libraries=optimizers.libraries(plan), ma11_probe=plan['ma11_probe'])
     return result
 
@@ -254,7 +250,7 @@ def supervise(args):
         stage('ma11-compat-preflight')
         ma11_probe = base.ma11_gpu_preflight(args, ma11_compat, hardware)
         plan = dict(protocol=p.PROTOCOL, transport=p.TRANSPORT, run_id=uuid.uuid4().hex,
-            arms=list(p.ARMS), model=p.MODEL, trials=args.trials, blocks=args.blocks,
+            arms=list(p.ARMS), model=p.MODEL, trials=args.trials, blocks=args.blocks, operator_only=args.operator_only,
             schedule=p.schedule(args.trials, args.blocks), communication=hardware['communication'],
             environment=hardware['environment'], cuda_visible_devices=hardware['cuda_visible_devices'],
             preflight_sha256=sha(root/'environment-preflight.json'),
@@ -272,17 +268,29 @@ def supervise(args):
             write(root/'batch-state.json', state)
             print('OP3 NATIVE PROBES PASSED', root/'native-probe/report.json', flush=True)
             return
+        stage('operator-correctness-latency-profile')
+        operator = operator_checks(args, build, plan)
+        require(operator.get('completed') is True and operator.get('operator_gradients_validated') is True
+                and operator.get('arm') == p.COMBINED, 'Combined operator checks incomplete')
+        operator_digest = sha(root/'operator/report.json')
+        if args.operator_only:
+            state.update(status='operator_completed', stage='done', gpu_benchmark_completed=True,
+                         full_step_completed=False, report=str(root/'operator/report.md'))
+            write(root/'batch-state.json', state)
+            print('OP3 OPERATOR COMPLETED', root/'operator/report.md', flush=True)
+            return
         smoke, initial, references, samples = {}, None, {}, []
         profile = dict(protocol=p.PROTOCOL, run_id=plan['run_id'], completed=False,
                        execution_validated=False, profiles={}, evidence_files={})
         for job in p.jobs(args.trials, args.blocks):
             if job['mode'] != 'smoke':
-                require(set(smoke) == set(p.ARMS), 'Both model smokes must pass')
+                require(set(smoke) == set(p.ARMS), 'Combined model smoke must pass')
             if job['mode'] == 'timing':
                 require(set(profile['profiles']) == {f'{a}/rank{r}' for a in p.ARMS for r in range(8)}
                         and all(v['execution_validated'] is True for v in profile['profiles'].values()),
-                        'Both actual execution paths must pass before timing')
+                        'Combined execution path must pass before timing')
             base.verify_controllers(root)
+            require(sha(root/'operator/report.json') == operator_digest, 'Operator evidence changed')
             require(sha(build/'op3-build.json') == plan['build']['manifest_sha256'], 'OP3 build identity changed')
             # Recheck registered binary/source hashes without preparing or recompiling anything.
             builder.verify(build, True)
@@ -346,23 +354,35 @@ def main(argv=None):
     args = arguments(argv)
     if args.report:
         result = replay(args.out)
-        require(result == read(args.out/'report.json'), 'Saved OP3 report differs from original evidence')
-        print(p.markdown(result))
+        if read(args.out/'plan.json').get('operator_only'):
+            from op3_operator import markdown
+            print(markdown(result))
+        else:
+            require(result == read(args.out/'report.json'), 'Saved OP3 report differs from original evidence')
+            print(p.markdown(result))
         return
     if not args.execute:
-        early = args.preflight_only or args.transport_smoke_only
+        from op3_operator import SETTINGS as operator_settings
+        early = args.preflight_only or args.transport_smoke_only or args.operator_only
+        workflow = 'hardware/NCCL'
+        if not args.preflight_only:
+            workflow += ' -> verified OP3 build/MA9/MA11 -> combined native probe'
+            if not args.transport_smoke_only:
+                workflow += ' -> operator gradients/latency/profile'
+                if not args.operator_only:
+                    workflow += ' -> model smoke/profile -> single-arm full-step timing'
+            workflow += ' -> report'
         print('PLAN ONLY: no files, builds, GPU queries or training workers. Add --execute to run.')
         print(json.dumps(dict(protocol=p.PROTOCOL, out=str(args.out), arms=list(p.ARMS), model=p.MODEL,
             transport=p.TRANSPORT, peer_access_required=False, trials=args.trials, blocks=args.blocks,
-            counterbalanced_order=args.blocks % p.BLOCKS_PER_CYCLE == 0,
+            counterbalanced_order=False,
             warmup_steps=10, timed_steps=50, timing_windows=0 if early else args.trials*args.blocks*len(p.ARMS),
             formal_optimizer_steps=0 if early else args.trials*args.blocks*len(p.ARMS)*50,
             abc_build=str(args.abc_build) if args.abc_build else None,
             op3_build=str(args.op3_build) if args.op3_build else None,
-            preflight_only=args.preflight_only, transport_smoke_only=args.transport_smoke_only,
-            workflow='hardware/NCCL -> verified ABC plus OP3 codec build -> MA9/MA11 libraries and softmax self-test '
-                     '-> both native correctness/transport probes -> both model smokes -> both profiles '
-                     '-> balanced AB/BA full-step timing -> report'),
+            preflight_only=args.preflight_only, transport_smoke_only=args.transport_smoke_only, operator_only=args.operator_only,
+            operator_settings=None if args.preflight_only or args.transport_smoke_only else operator_settings,
+            workflow=workflow),
             indent=2, ensure_ascii=False))
         return
     require(args.python.is_file(), 'Python missing: '+str(args.python))
@@ -393,6 +413,8 @@ def main(argv=None):
                 command += ['--'+name.replace('_', '-'), str(getattr(args, name))]
         if args.transport_smoke_only:
             command.append('--transport-smoke-only')
+        if args.operator_only:
+            command.append('--operator-only')
         with (args.out/'handoff/supervisor.log').open('x') as log:
             process = subprocess.Popen(command, cwd=REPO, stdin=subprocess.DEVNULL, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)

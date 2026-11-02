@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# OP3 native testing (--transport-smoke-only) or complete two-arm experiment.
+# OP3 combined configuration: native checks, operator measurements, then full training.
 # Preview only unless --execute is supplied; all results use a fresh output directory.
 op3_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 if [[ -f "$op3_repo/outputs/5090/env-setup/env.sh" ]]; then

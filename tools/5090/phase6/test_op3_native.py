@@ -75,7 +75,7 @@ def runtime_namespace():
     tree = ast.parse((native.HERE/'op3_codec.py').read_text())
     keep = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
             and node.name in ('chunk_plan', '_consumer', 'TensorTacoRS')]
-    ns = dict(ARMS=('op3-r', 'op3-improved'), PROTOCOL='rtx5090-op3-direct-h128-v1',
+    ns = dict(ARMS=('op3-r', 'op3-improved', 'op3-combined'), PROTOCOL='rtx5090-op3-direct-h128-v1',
               _LOCKS={}, _POISONED=set(), _RETAINED=[], threading=threading, nullcontext=nullcontext)
     exec(compile(ast.Module(body=keep, type_ignores=[]), '<op3-cpu-runtime>', 'exec'), ns)
     return ns
@@ -176,7 +176,7 @@ class ArithmeticLayout(unittest.TestCase):
 
 class Submission(unittest.TestCase):
     def test_decode_follows_nccl_completion_and_outputs_are_independent(self):
-        for arm in ('op3-r', 'op3-improved'):
+        for arm in ('op3-r', 'op3-improved', 'op3-combined'):
             ns, codec, partial, log, current = fake_runtime(arm)
             first, second = codec.reduce(partial), codec.reduce(partial)
             self.assertNotEqual(first.data_ptr(), second.data_ptr())
@@ -188,8 +188,32 @@ class Submission(unittest.TestCase):
             self.assertEqual(state['caller_stream'], state['decode_stream'])
             self.assertFalse(state['pending_exchange'])
 
+    def test_combined_dispatches_both_actual_cuda_entrypoints(self):
+        ns, codec, partial, log, current = fake_runtime('op3-combined')
+        tree = ast.parse((native.HERE/'op3_codec.py').read_text())
+        functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name in ('_shape', '_check', 'encode_chunk', 'decode_chunk')]
+        native_calls, fallback_calls = [], []
+        ns['load_library'] = lambda: SimpleNamespace(
+            op3_encode_warp=lambda *args: native_calls.append(('encode', args)) or 0,
+            op3_r_decode=lambda *args: native_calls.append(('decode', args)) or 0)
+        ns['reference'] = SimpleNamespace(_validate_chunk=lambda *args: None,
+            encode_chunk=lambda *args: fallback_calls.append('encode'),
+            decode_chunk=lambda *args: fallback_calls.append('decode'))
+        exec(compile(ast.Module(body=functions, type_ignores=[]), '<actual-cuda-dispatch>', 'exec'), ns)
+        wire = Tensor((7798784,), dtype='uint8', device=codec.device)
+        local = Tensor((256, 4096), device=codec.device)
+        output = Tensor((256, 4096), device=codec.device)
+        bias, residual = Tensor((4096,), device=codec.device), Tensor((256, 4096), device=codec.device)
+        ns['encode_chunk'](partial, wire, 0, 0, 8192, 0)
+        ns['decode_chunk'](wire, local, output, 0, 0, 8192, 0, bias=bias, residual=residual)
+        self.assertEqual(fallback_calls, [])
+        self.assertEqual([name for name, args in native_calls], ['encode', 'decode'])
+        self.assertEqual(native_calls[1][1][3:5], (bias.data_ptr(), residual.data_ptr()))
+        self.assertEqual(native_calls[0][1][-1], current[0].cuda_stream)
+
     def test_fused_consumer_passes_dynamic_tensors_and_counts_only_r(self):
-        ns, codec, partial, log, current = fake_runtime('op3-r')
+        ns, codec, partial, log, current = fake_runtime('op3-combined')
         for _ in range(2):
             bias = Tensor((4096,), device=codec.device)
             residual = Tensor((256, 4096), device=codec.device)
@@ -204,7 +228,7 @@ class Submission(unittest.TestCase):
         self.assertEqual(log, [])
 
     def test_incomplete_consumer_and_changed_stream_reject_before_enqueue(self):
-        ns, codec, partial, log, current = fake_runtime('op3-r')
+        ns, codec, partial, log, current = fake_runtime('op3-combined')
         with self.assertRaisesRegex(ValueError, 'supplied together'):
             codec.reduce(partial, Tensor((4096,), device=codec.device))
         self.assertEqual(log, [])
@@ -216,7 +240,7 @@ class Submission(unittest.TestCase):
         self.assertEqual(log, [])
 
     def test_failed_exchange_cannot_decode_or_retry_and_keeps_references(self):
-        ns, codec, partial, log, current = fake_runtime('op3-r')
+        ns, codec, partial, log, current = fake_runtime('op3-combined')
         def failed_wait(*args, **kwargs):
             raise RuntimeError('synthetic NCCL failure')
         ns['dist'].all_to_all_single = lambda *args, **kwargs: SimpleNamespace(wait=failed_wait)
@@ -231,7 +255,7 @@ class Submission(unittest.TestCase):
             codec.reduce(partial)
 
     def test_concurrent_calls_do_not_touch_persistent_packets(self):
-        ns, codec, partial, log, current = fake_runtime('op3-r')
+        ns, codec, partial, log, current = fake_runtime('op3-combined')
         codec._submit_lock.acquire()
         try:
             with self.assertRaisesRegex(RuntimeError, 'Concurrent OP3'):

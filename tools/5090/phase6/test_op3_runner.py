@@ -21,89 +21,45 @@ import op2_abc_build as optimizers
 
 
 def sample(job):
-    return dict(job, ms_per_step=900 if job['arm'] == p.ARMS[1] else 950,
+    return dict(job, ms_per_step=950,
                 peak_allocated_gib=20, peak_reserved_gib=22,
                 native_workspace_gib=0, peak_allocated_plus_taco_workspace_gib=20)
 
 
 class Protocol(unittest.TestCase):
-    def test_two_blocks_are_ab_ba_and_each_trial_is_independently_balanced(self):
-        self.assertEqual(p.ARMS, ('op3-r', 'op3-improved'))
-        self.assertEqual([j['arm'] for j in p.schedule()], [*p.ARMS, *p.ARMS[::-1]])
-        self.assertEqual([j['mode'] for j in p.jobs()], ['smoke']*2+['profile']*2+['timing']*4)
-        for count in (2, 4, 6, 8):
+    def test_only_combined_runs_and_positive_odd_blocks_are_valid(self):
+        self.assertEqual(p.ARMS, ('op3-combined',))
+        self.assertEqual([j['mode'] for j in p.jobs()], ['smoke', 'profile', 'timing'])
+        for count in (1, 2, 3, 20):
             jobs = p.schedule(trials=2, blocks=count)
+            self.assertEqual(len(jobs), count*2)
+            self.assertEqual({j['arm'] for j in jobs}, {p.COMBINED})
             for trial in (1, 2):
-                own = [j for j in jobs if j['trial'] == trial]
-                self.assertEqual({j['block'] for j in own}, set(range(count)))
-                for slot in (0, 1):
-                    self.assertEqual(Counter(j['arm'] for j in own if j['index'] % 2 == slot),
-                                     Counter(dict.fromkeys(p.ARMS, count//2)))
-        for count in (0, 1, 3, 5, True, 2.0):
+                self.assertEqual([j['block'] for j in jobs if j['trial'] == trial], list(range(count)))
+        for count in (0, -1, True, 1.5):
             with self.assertRaises(ValueError):
                 p.schedule(blocks=count)
 
-    def test_report_direction_and_ci_require_six_pairs_per_trial(self):
-        with patch.object(p, 'definition', side_effect=lambda arm: {'arm': arm}):
-            for blocks in (2, 4, 6):
-                rows = [sample(j) for j in p.schedule(trials=2, blocks=blocks)]
-                result = p.report(rows, trials=2, blocks=blocks)
-                self.assertTrue(result['counterbalanced_order'])
-                self.assertEqual(result['timing_windows'], blocks*4)
-                self.assertEqual(result['formal_optimizer_steps'], blocks*200)
-                self.assertFalse(result['increment_over_unoptimized_validated'])
-                self.assertFalse(result['reduction_changes_allowed'])
-                self.assertTrue(result['raw_projection_bitwise_required'])
-                self.assertTrue(result['smoke_training_equivalence_required'])
-                self.assertFalse(result['full_training_equivalence_required'])
-                for comparison in result['comparisons'].values():
-                    pairs = comparison['pairs']
-                    self.assertEqual(list(pairs), ['op3-improved/op3-r'])
-                    value = pairs['op3-improved/op3-r']
-                    self.assertAlmostEqual(value['percent'], 100*(1-900/950))
-                    self.assertEqual(value['faster_blocks'], blocks)
-                    self.assertEqual(value['ci95'] is None, blocks < 6)
-                    self.assertEqual(value['paired_blocks'], blocks)
-                self.assertIn('2 组', p.markdown(result))
-                self.assertIn('AB/BA', p.markdown(result))
-                with self.assertRaises(ValueError):
-                    p.report(rows[:-1], trials=2, blocks=blocks)
-                changed = copy.deepcopy(rows)
-                changed[0], changed[1] = changed[1], changed[0]
-                with self.assertRaises(ValueError):
-                    p.report(changed, trials=2, blocks=blocks)
-
-    def test_negative_gains_are_preserved_and_invalid_pairs_rejected(self):
-        self.assertLess(p.paired_summary([101, 102], [100, 100])['percent'], 0)
-        for candidate, reference in (([1], [1]), ([1, 2], [1]), ([1, 0], [1, 2]),
-                                     ([1, float('nan')], [1, 2]), ([1]*3, [1]*3)):
+    def test_single_arm_report_never_invents_paired_or_historical_gain(self):
+        for blocks in (1, 2, 20):
+            samples = [sample(job) for job in p.schedule(2, blocks)]
+            result = p.report(samples, 2, blocks)
+            self.assertEqual(result['timing_windows'], blocks*2)
+            self.assertEqual(result['formal_optimizer_steps'], blocks*100)
+            self.assertFalse(result['counterbalanced_order'])
+            self.assertFalse(result['pairwise_ci_available'])
+            self.assertFalse(result['increment_over_unoptimized_validated'])
+            self.assertTrue(result['operator_gradient_equivalence_required'])
+            for value in result['comparisons'].values():
+                self.assertEqual(value['pairs'], {})
+                self.assertEqual(set(value['arms']), {p.COMBINED})
             with self.assertRaises(ValueError):
-                p.paired_summary(candidate, reference)
-
-    def test_numerical_comparison_distinguishes_consumer_stage_and_keeps_training_evidence(self):
-        row = dict(losses=[1.0, 0.99], grad_norms=[2.0, 1.9], final_parameters_sha256='a'*64,
-                   parameter_trajectory=[{'parameter': 'b'*64}], trainable_parameters={'parameter': [1]},
-                   smoke_output_sha256={'layer': 'c'*64})
-        reference, candidate = copy.deepcopy(row), copy.deepcopy(row)
-        candidate['smoke_output_sha256']['layer'] = 'd'*64
-        references = {(0, -1, 'smoke'): {p.ARMS[0]: [reference]*8, p.ARMS[1]: [candidate]*8}}
-        result = controller.numerical_comparison(references)['op3-improved/op3-r']
-        self.assertTrue(result['all_trajectories_identical'])
-        self.assertTrue(result['output_stages_differ'])
-        self.assertFalse(result['reduction_changes_allowed'])
-        self.assertTrue(result['raw_projection_bitwise_required'])
-        self.assertFalse(result['full_training_equivalence_required'])
-        self.assertIsNone(result['windows'][0]['smoke_projection_outputs_identical'])
-        self.assertTrue(result['windows'][0]['smoke_parameter_trajectory_identical'])
-        self.assertEqual(result['max_loss_abs_difference'], 0)
-        self.assertEqual(candidate['smoke_output_sha256']['layer'], 'd'*64)
-        import op3_validation as validation
-        with patch.object(validation, 'identity', return_value='CPU-FIXTURE'):
-            paired = {}
-            for arm, rows in references[(0, -1, 'smoke')].items():
-                controller.check_identity(rows, None, paired,
-                    dict(trial=0, block=-1, mode='smoke', arm=arm))
-        self.assertEqual(set(paired[(0, -1, 'smoke')]), set(p.ARMS))
+                p.report(samples[:-1], 2, blocks)
+            changed = copy.deepcopy(samples)
+            changed[0]['arm'] = 'op3-r'
+            with self.assertRaises(ValueError):
+                p.report(changed, 2, blocks)
+            self.assertIn('1 组', p.markdown(result))
 
 
 class Launcher(unittest.TestCase):
@@ -128,7 +84,7 @@ class Launcher(unittest.TestCase):
                 self.assertEqual(base_env.call_args.args[3]['arm'], 'flux-basic')
 
     def test_both_entrypoints_are_preview_only_and_create_no_files(self):
-        for launcher in ('run_op3.sh', 'run_op3_compare.sh'):
+        for launcher in ('run_op3.sh', 'run_op3_compare.sh', 'run_op3_operator.sh'):
             with self.subTest(launcher=launcher), tempfile.TemporaryDirectory() as tmp:
                 out = Path(tmp)/'absent-run'
                 proc = subprocess.run(['bash', str(HERE/launcher), '--out', str(out),
@@ -137,21 +93,21 @@ class Launcher(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 record = json.loads(proc.stdout[proc.stdout.index('{'):])
                 self.assertEqual(record['arms'], list(p.ARMS))
-                self.assertEqual(record['timing_windows'], 4)
-                self.assertEqual(record['formal_optimizer_steps'], 200)
-                self.assertTrue(record['counterbalanced_order'])
+                self.assertEqual(record['timing_windows'], 0 if launcher == 'run_op3_operator.sh' else 1)
+                self.assertEqual(record['formal_optimizer_steps'], 0 if launcher == 'run_op3_operator.sh' else 50)
+                self.assertFalse(record['counterbalanced_order'])
+                self.assertEqual(record['operator_settings']['windows'], 1)
                 self.assertFalse(out.exists())
 
     def test_execute_requires_explicit_parent_but_preflight_does_not(self):
         with self.assertRaisesRegex(ValueError, '--abc-build or --op3-build'):
             controller.arguments(['--execute'])
         self.assertTrue(controller.arguments(['--execute', '--preflight-only']).preflight_only)
-        self.assertEqual(controller.arguments([]).blocks, 2)
-        with self.assertRaises(ValueError):
-            controller.arguments(['--blocks', '3'])
+        self.assertEqual(controller.arguments([]).blocks, 1)
+        self.assertEqual(controller.arguments(['--blocks', '3']).blocks, 3)
 
     def test_early_stage_preview_reports_zero_timing_windows(self):
-        for flag in ('--preflight-only', '--transport-smoke-only'):
+        for flag in ('--preflight-only', '--transport-smoke-only', '--operator-only'):
             with redirect_stdout(io.StringIO()) as output:
                 controller.main([flag])
             text = output.getvalue()
@@ -162,7 +118,7 @@ class Launcher(unittest.TestCase):
 
 class Supervisor(unittest.TestCase):
     def execute_fixture(self, root, *, stop=None, fail=None, fresh=False, tamper=False,
-                        real_sources=False, smoke_drift=None):
+                        real_sources=False):
         """Run the actual controller loop with GPU-facing boundaries replaced."""
         build = root/'existing-build'
         build.mkdir()
@@ -193,7 +149,7 @@ class Supervisor(unittest.TestCase):
             modules['op3_sources'].prepare_workers = lambda *a: dict.fromkeys(p.ARMS, {})
             modules['op3_sources'].definition = lambda arm: {'arm': arm}
         def analyze(events, arm, rank):
-            if fail == 'profile' and arm == p.ARMS[1]:
+            if fail == 'profile':
                 raise ValueError('fixture profile failure')
             return dict(execution_validated=fail != 'profile-rejected',
                         arm='foreign' if fail == 'profile-foreign' else arm, rank=rank)
@@ -207,7 +163,7 @@ class Supervisor(unittest.TestCase):
                 stored = controller.read(root/'profile-summary.json')
                 self.assertTrue(stored['completed'])
                 self.assertTrue(stored['execution_validated'])
-                self.assertEqual(len(stored['profiles']), 16)
+                self.assertEqual(len(stored['profiles']), 8)
             if job['mode'] == 'profile':
                 for rank in range(8):
                     with gzip.open(dest/f'rank{rank}-profile.json.gz', 'wt') as handle:
@@ -227,19 +183,14 @@ class Supervisor(unittest.TestCase):
         def window(root, job, *rest):
             if fail == 'smoke' and job['mode'] == 'smoke':
                 raise ValueError('fixture smoke failure')
-            if smoke_drift:
-                row = dict(losses=[1.0], grad_norms=[2.0], final_parameters_sha256='a'*64,
-                    parameter_trajectory=[{'gradient': 'b'*64, 'parameter': 'c'*64}],
-                    trainable_parameters={'parameter': [1]})
-                if job['mode'] == 'smoke' and job['arm'] == p.ARMS[1]:
-                    if smoke_drift == 'grad_norms':
-                        row['grad_norms'] = [2.01]
-                    elif smoke_drift == 'final_parameters_sha256':
-                        row['final_parameters_sha256'] = 'd'*64
-                    else:
-                        row['parameter_trajectory'][0]['gradient'] = 'e'*64
-                return [copy.deepcopy(row) for _ in range(8)]
             return []
+        def operator_checks(*args):
+            setup.append('operator')
+            if fail == 'operator':
+                raise ValueError('fixture operator gradient failure')
+            result = dict(completed=True, operator_gradients_validated=fail != 'operator-rejected', arm=p.COMBINED)
+            controller.write(root/'operator/report.json', result)
+            return result
         def ma11_probe(*args):
             setup.append('ma11-probe')
             if fail == 'ma11':
@@ -265,13 +216,10 @@ class Supervisor(unittest.TestCase):
             stack.enter_context(patch.object(controller.base, 'ma11_gpu_preflight', side_effect=ma11_probe))
             stack.enter_context(patch.object(optimizers, 'verify_all'))
             stack.enter_context(patch.object(controller, 'native_checks', side_effect=native_checks))
+            stack.enter_context(patch.object(controller, 'operator_checks', side_effect=operator_checks))
             stack.enter_context(patch.object(controller, 'worker_environment', return_value={}))
             stack.enter_context(patch.object(controller, 'window', side_effect=window))
-            if smoke_drift:
-                import op3_validation as validation
-                stack.enter_context(patch.object(validation, 'identity', return_value='CPU-FIXTURE'))
-            else:
-                stack.enter_context(patch.object(controller, 'check_identity', return_value='CPU-FIXTURE'))
+            stack.enter_context(patch.object(controller, 'check_identity', return_value='CPU-FIXTURE'))
             stack.enter_context(patch.object(p, 'summarize', side_effect=lambda rows, job: sample(job)))
             result = p.report([sample(j) for j in p.schedule()])
             stack.enter_context(patch.object(controller, 'replay', return_value=result))
@@ -282,26 +230,26 @@ class Supervisor(unittest.TestCase):
                 return calls, setup, exc
         return calls, setup, None
 
-    def test_complete_lifecycle_runs_all_gates_then_two_smokes_profiles_and_four_windows(self):
+    def test_complete_lifecycle_runs_all_gates_then_single_training_window(self):
         for fresh in (False, True):
             with self.subTest(fresh=fresh), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 calls, setup, error = self.execute_fixture(root, fresh=fresh)
                 self.assertIsNone(error)
                 self.assertEqual(setup, ['hardware']+(['prepare', 'compile'] if fresh else [])+
-                                 ['ma9', 'ma11', 'ma11-probe', 'native-probe'])
-                self.assertEqual([j['mode'] for j in calls], ['smoke']*2+['profile']*2+['timing']*4)
+                                 ['ma9', 'ma11', 'ma11-probe', 'native-probe', 'operator'])
+                self.assertEqual([j['mode'] for j in calls], ['smoke', 'profile', 'timing'])
                 self.assertEqual({j['arm'] for j in calls}, set(p.ARMS))
                 self.assertEqual(controller.read(root/'batch-state.json')['status'], 'completed')
-                self.assertEqual(controller.read(root/'report.json')['formal_optimizer_steps'], 200)
-                self.assertEqual(len(controller.read(root/'profile-summary.json')['profiles']), 16)
+                self.assertEqual(controller.read(root/'report.json')['formal_optimizer_steps'], 50)
+                self.assertEqual(len(controller.read(root/'profile-summary.json')['profiles']), 8)
 
     def test_failed_gates_never_admit_timing(self):
         for failure, expected_modes in (
-                ('ma11', []), ('native', []), ('smoke', ['smoke']),
-                ('profile', ['smoke']*2+['profile']*2),
-                ('profile-rejected', ['smoke']*2+['profile']),
-                ('profile-foreign', ['smoke']*2+['profile'])):
+                ('ma11', []), ('native', []), ('operator', []), ('operator-rejected', []), ('smoke', ['smoke']),
+                ('profile', ['smoke', 'profile']),
+                ('profile-rejected', ['smoke', 'profile']),
+                ('profile-foreign', ['smoke', 'profile'])):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 calls, setup, error = self.execute_fixture(root, fail=failure)
@@ -316,7 +264,7 @@ class Supervisor(unittest.TestCase):
             root = Path(tmp)
             calls, setup, error = self.execute_fixture(root, real_sources=True)
             self.assertIsNone(error)
-            self.assertEqual([j['mode'] for j in calls], ['smoke']*2+['profile']*2+['timing']*4)
+            self.assertEqual([j['mode'] for j in calls], ['smoke', 'profile', 'timing'])
             workers = controller.read(root/'workers.json')
             self.assertEqual(set(workers), set(p.ARMS))
             for arm, worker in workers.items():
@@ -326,17 +274,6 @@ class Supervisor(unittest.TestCase):
                 self.assertEqual((Path(worker['root'])/'worker.py').read_text(), sources.worker_source(arm))
             result = controller.read(root/'report.json')
             self.assertEqual(result['definitions'], {arm: sources.definition(arm) for arm in p.ARMS})
-
-    def test_smoke_gradient_or_parameter_drift_blocks_profiles_and_timing(self):
-        for field in ('grad_norms', 'parameter_trajectory', 'final_parameters_sha256'):
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                calls, setup, error = self.execute_fixture(root, smoke_drift=field)
-                self.assertIn('changed loss, gradients or parameter updates', str(error))
-                self.assertEqual([job['mode'] for job in calls], ['smoke', 'smoke'])
-                self.assertEqual(controller.read(root/'batch-state.json')['status'], 'failed')
-                self.assertFalse((root/'profile-summary.json').exists())
-                self.assertFalse((root/'report.json').exists())
 
     def test_modified_build_is_rejected_before_next_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,7 +285,8 @@ class Supervisor(unittest.TestCase):
 
     def test_early_stops_do_not_claim_completed_benchmark(self):
         for flag, expected in (('--preflight-only', 'preflight_completed'),
-                               ('--transport-smoke-only', 'transport_smoke_completed')):
+                               ('--transport-smoke-only', 'transport_smoke_completed'),
+                               ('--operator-only', 'operator_completed')):
             with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 calls, setup, error = self.execute_fixture(root, stop=flag)
@@ -356,7 +294,7 @@ class Supervisor(unittest.TestCase):
                 self.assertEqual(calls, [])
                 state = controller.read(root/'batch-state.json')
                 self.assertEqual(state['status'], expected)
-                self.assertFalse(state['gpu_benchmark_completed'])
+                self.assertEqual(state['gpu_benchmark_completed'], flag == '--operator-only')
                 self.assertFalse((root/'report.json').exists())
                 if flag == '--preflight-only':
                     self.assertEqual(setup, ['hardware'])

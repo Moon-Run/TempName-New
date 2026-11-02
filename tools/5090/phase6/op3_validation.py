@@ -16,9 +16,9 @@ CHUNKS = [dict(index=0, begin=0, count=8192, raw_groups=0, peer_bytes=8192*136)]
 
 
 def validate_codec_state(state, arm, calls, rank, fused_calls=0):
-    require(arm in p.ARMS and type(calls) is int and calls > 0
+    require(arm in p.ALL_ARMS and type(calls) is int and calls > 0
             and type(rank) is int and 0 <= rank < 8 and type(fused_calls) is int
-            and 0 <= fused_calls <= calls and (arm == 'op3-r' or fused_calls == 0),
+            and 0 <= fused_calls <= calls and (p.fused(arm) or fused_calls == 0),
             'Invalid OP3 arm/call/rank/consumer identity')
     require(state['protocol'] == CODEC_PROTOCOL and state['arm'] == arm and state['chunks'] == CHUNKS
             and state['transport'] == 'NCCL-byte-AllToAll' and state['arrival_trigger'] == 'whole-exchange'
@@ -31,9 +31,9 @@ def validate_codec_state(state, arm, calls, rank, fused_calls=0):
     require(all(type(state[key]) is int and state[key] == value for key, value in counters.items()),
             'OP3 stage or fused/projection call counts are stale or incomplete')
     require(state['encoder'] == ('upstream-cta128' if arm == 'op3-r' else 'warp-owned-four-groups')
-            and state['decoder'] == ('r-packed-source-prefetch' if arm == 'op3-r'
+            and state['decoder'] == ('r-packed-source-prefetch' if p.fused(arm)
                                     else 'basic-ring-bf16-h128-direct-v1')
-            and state['consumer_fusion'] is (arm == 'op3-r')
+            and state['consumer_fusion'] is (p.fused(arm))
             and state['independent_output'] is True and state['calibration_used'] is False
             and state['original_peer_overlap_preserved'] is False and state['failed'] is False
             and state['pending_exchange'] is False, 'Wrong/failed OP3 codec or output ownership')
@@ -55,11 +55,11 @@ def validate_transport(row, arm, calls, names, layouts):
             f'Missing OP3 transport modules: expected {len(names)}, observed {len(states)}')
     pointers = []
     for state in states.values():
-        validate_codec_state(state, arm, calls, row['rank'], fused_calls=calls if arm == 'op3-r' else 0)
+        validate_codec_state(state, arm, calls, row['rank'], fused_calls=calls if p.fused(arm) else 0)
         pointers.extend(state['tx_ptrs']+state['rx_ptrs'])
     require(len(set(pointers)) == len(pointers), 'OP3 packet storage aliases another module')
     consumer = row['op3_consumer_state']
-    if arm == 'op3-r':
+    if p.fused(arm):
         require(set(consumer) == names, 'R consumer fusion is missing target modules')
         bias_ids = []
         for name, value in consumer.items():

@@ -9,8 +9,8 @@ from op1_a_swizzle import TYPE_NAME
 
 base = load('profile')
 require, contains, end = base.require, base.contains, base.end
-ENCODERS = {'op3-r': 'op1_abc_encode_kernel', 'op3-improved': 'op3_warp_encode_kernel'}
-DECODERS = {'op3-r': 'op3_r_decode_kernel', 'op3-improved': 'op1_abc_decode_kernel'}
+ENCODERS = {'op3-combined': 'op3_warp_encode_kernel', 'op3-r': 'op1_abc_encode_kernel', 'op3-improved': 'op3_warp_encode_kernel'}
+DECODERS = {'op3-combined': 'op3_r_decode_kernel', 'op3-r': 'op3_r_decode_kernel', 'op3-improved': 'op1_abc_decode_kernel'}
 
 
 def one(events, message):
@@ -22,11 +22,13 @@ def before(first, second, message):
     require(end(first) <= second['ts'] + .01, message)
 
 
-def chunk_records(events, arm, rank):
-    require(arm in p.ARMS, 'Unknown OP3 forward arm')
+def chunk_records(events, arm, rank, *, role_counts=None, operator=False):
+    require(arm in p.ALL_ARMS, 'Unknown OP3 forward arm')
+    role_counts = role_counts or {'attn': 128, 'mlp': 128}
+    require(set(role_counts) <= {'attn', 'mlp'} and all(type(n) is int and n > 0 for n in role_counts.values()), 'Invalid OP3 profile counts')
     chunks = 1
     ENCODER, DECODER = ENCODERS[arm], DECODERS[arm]
-    fused = arm == 'op3-r'
+    fused = p.fused(arm)
     index = base.Index(events)
     cpu_by_external = defaultdict(list)
     for event in index.cpu:
@@ -36,7 +38,7 @@ def chunk_records(events, arm, rank):
     scopes = [e for e in events if e.get('cat') == 'user_annotation' and e.get('ph') == 'X'
               and e.get('name') in ('scope.attn.flux_tensor', 'scope.mlp.flux_tensor')]
     require(Counter(e['name'] for e in scopes) == Counter(
-        {'scope.attn.flux_tensor': 128, 'scope.mlp.flux_tensor': 128}), 'Incomplete OP3 projection coverage')
+        {f'scope.{role}.flux_tensor': count for role, count in role_counts.items()}), 'Incomplete OP3 projection coverage')
     markers = [e for e in events if e.get('cat') == 'user_annotation' and e.get('ph') == 'X'
                and (e.get('name', '').startswith('op3.') or e.get('name') == 'ablation6.flux_gemm_only')]
     cuda_waits = [e for e in events if e.get('cat') in ('cuda_runtime', 'cuda_driver')
@@ -138,42 +140,49 @@ def chunk_records(events, arm, rank):
         # candidate must retain both separately rounded BF16 addition kernels.
         tail = max((e for e in work if e['args'].get('stream') == compute), key=end)
         _, pos = positions[id(tail)]
-        successor_count = 1 if fused else 3
-        successors = streams[compute][pos+1:pos+1+successor_count]
-        require(len(successors) == successor_count
-                and (fused or all(base._bf16_add(e) for e in successors[:2]))
-                and base._layernorm_backend(successors[-1]) is not None,
-                'OP3 output has the wrong fused/separate bias/residual/LayerNorm consumers')
-        for e in decoders:
-            before(e, successors[0], 'OP3 consumer raced an unfinished decoder')
-        for first, second in zip(successors, successors[1:]):
-            before(first, second, 'OP3 consumer order changed')
-        for i, e in enumerate(successors):
-            external = e.get('args', {}).get('External id')
-            owners = [owner for owner in cpu_by_external[external] if external is not None
-                      and any(id(w) == id(e) for w in index.work(owner)[0])]
-            expected_name = ('aten::add' if not fused and i < 2 else
-                '_OperationFuserAutogradFunction' if base._layernorm_backend(e) == 'transformer_engine'
-                else 'FusedLayerNormAffineFunction')
-            require(any(owner['name'] == expected_name for owner in owners), 'OP3 consumer lacks launch owner')
+        successors = []
+        if not operator:
+            successor_count = 1 if fused else 3
+            successors = streams[compute][pos+1:pos+1+successor_count]
+            require(len(successors) == successor_count
+                    and (fused or all(base._bf16_add(e) for e in successors[:2]))
+                    and base._layernorm_backend(successors[-1]) is not None,
+                    'OP3 output has the wrong fused/separate bias/residual/LayerNorm consumers')
+            for e in decoders:
+                before(e, successors[0], 'OP3 consumer raced an unfinished decoder')
+            for first, second in zip(successors, successors[1:]):
+                before(first, second, 'OP3 consumer order changed')
+            for i, e in enumerate(successors):
+                external = e.get('args', {}).get('External id')
+                owners = [owner for owner in cpu_by_external[external] if external is not None
+                          and any(id(w) == id(e) for w in index.work(owner)[0])]
+                expected_name = ('aten::add' if not fused and i < 2 else
+                    '_OperationFuserAutogradFunction' if base._layernorm_backend(e) == 'transformer_engine'
+                    else 'FusedLayerNormAffineFunction')
+                require(any(owner['name'] == expected_name for owner in owners), 'OP3 consumer lacks launch owner')
         overlaps = sum(max(0., min(end(decoder), end(comm))-max(decoder['ts'], comm['ts']))
                        for i, decoder in enumerate(decoders) for later in communication[i+1:]
                        for comm in later if comm['cat'] == 'kernel')
         results[role].append(dict(overlap=overlaps,
-            decode_to_consumer_us=end(successors[-1])-min(e['ts'] for e in decoders),
+            decode_to_consumer_us=end(successors[-1] if successors else tail)-min(e['ts'] for e in decoders),
+            gemm_us=gemm['dur'], encode_us=encoder['dur'], decode_us=decoder['dur'],
+            nccl_us=sum(e['dur'] for wave in communication for e in wave if e['cat'] == 'kernel'),
+            cpu_us=scope['dur'], gpu_span_us=end(tail)-gemm['ts'],
             communication_kernels=sum(sum(e['cat'] == 'kernel' for e in wave) for wave in communication)))
     require(claimed_markers == {id(e) for e in markers}, 'Unowned OP3 stage marker')
     actual = {id(e) for e in events if e.get('cat') == 'kernel'
               and any(token in e.get('name', '') for token in
                       (*ENCODERS.values(), *DECODERS.values(), TYPE_NAME))}
-    require(actual <= claimed and len(actual) == 256*(1+2*chunks), 'Unowned/missing OP3 native work')
-    return {role: dict(calls=128, chunks_per_call=chunks, fused_consumer=fused,
-        consumer_add_kernels=0 if fused else 256, encode_kernels=128*chunks,
-        decode_kernels=128*chunks, all_to_all_calls=128*chunks, independent_decode_stream=chunks > 1,
+    require(actual <= claimed and len(actual) == sum(role_counts.values())*(1+2*chunks), 'Unowned/missing OP3 native work')
+    return {role: dict(calls=role_counts[role], chunks_per_call=chunks, fused_consumer=fused,
+        consumer_add_kernels=0 if fused else role_counts[role]*2, encode_kernels=role_counts[role]*chunks,
+        decode_kernels=role_counts[role]*chunks, all_to_all_calls=role_counts[role]*chunks, independent_decode_stream=chunks > 1,
         original_peer_overlap_preserved=False, gemm_communication_overlap=False,
         calls_with_observed_decode_communication_overlap=sum(v['overlap'] > 0 for v in rows),
         median_decode_communication_overlap_us=median(v['overlap'] for v in rows),
         median_decode_to_consumer_us=median(v['decode_to_consumer_us'] for v in rows),
+        median_stage_us={key: median(v[key] for v in rows) for key in
+            ('gemm_us', 'encode_us', 'nccl_us', 'decode_us', 'cpu_us', 'gpu_span_us')},
         nccl_kernels=sum(v['communication_kernels'] for v in rows)) for role, rows in results.items()}
 
 
@@ -181,7 +190,7 @@ def chunk_records(events, arm, rank):
 def row_backward(events, arm, rank):
     if arm == 'op3-improved':
         return previous.row_backward(events, rank)
-    require(arm == 'op3-r', 'Unknown OP3 backward arm')
+    require(p.fused(arm), 'Unknown OP3 backward arm')
     # R owns the consumer: its bias gradient is inside the row Function.
     # Retain the observed PyTorch 2.8 split-K dgrad and ordered same-stream gather.
     index = base.ma8_profile.TraceIndex(events)
@@ -243,7 +252,7 @@ def row_backward(events, arm, rank):
 
 
 def analyze(events, arm, rank):
-    require(arm in p.ARMS and type(rank) is int and 0 <= rank < 8, 'Wrong OP3 profile identity')
+    require(arm in p.ALL_ARMS and type(rank) is int and 0 <= rank < 8, 'Wrong OP3 profile identity')
     require(not any(token in e.get('name', '') for e in events for token in
         ('CudaIpcBarrier', 'rtx5090_pack_tiles_kernel', 'rtx5090_unpack_tiles_kernel', 'op1_abc.')),
         'Foreign transport or stale OP1 profile markers')

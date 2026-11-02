@@ -14,7 +14,7 @@ from rtx5090_loader import HERE, REPO
 import op1_abc_probe as original
 import op3_protocol as p
 
-PROTOCOL = 'rtx5090-op3-distributed-probe-v1'
+PROTOCOL = 'rtx5090-op3-combined-probe-v2'
 ROLES, CASES = original.ROLES, original.CASES
 FUSION_CASES = ('zero', 'half_ulp', 'signed_zero', 'subnormal', 'cancellation', 'random')
 read, write, require, sha = p.read, p.write, p.require, p.sha
@@ -37,7 +37,7 @@ def _check_wire(value, rank, peers):
 
 
 def check_rows(rows, arm, manifest, hardware=None, libraries=None, codec_library=None):
-    require(arm in p.ARMS and len(rows) == 8, 'Eight OP3 probe ranks required')
+    require(arm in p.ALL_ARMS and len(rows) == 8, 'Eight OP3 probe ranks required')
     for rank, row in enumerate(rows):
         require(row['protocol'] == PROTOCOL and row['completed'] is True and row['rank'] == rank
                 and row['arm'] == arm and row['build_manifest_sha256'] == manifest
@@ -73,7 +73,7 @@ def check_rows(rows, arm, manifest, hardware=None, libraries=None, codec_library
                         other = rows[peer]['roles'][role]['cases'][case]['wire']
                         require(value['wire']['sent'][str(peer)] == other['received'][str(rank)],
                                 'OP3 NCCL directed packet mismatch')
-        if arm == 'op3-r':
+        if p.fused(arm):
             fusion = row['consumer_fusion']
             require(set(fusion['cases']) == set(FUSION_CASES) and fusion['retained_outputs'] == 6
                     and fusion['reuse_calls'] == 7 and fusion['retention_passed'] is True
@@ -101,7 +101,7 @@ def check_rows(rows, arm, manifest, hardware=None, libraries=None, codec_library
             require(row['consumer_fusion'] is None, 'Candidate silently enabled CR3 consumer fusion')
     return dict(completed=True, arm=arm, protocol=PROTOCOL, directed_links=56,
         actual_sorted_gemm_mapping_passed=True, upstream_packet_decode_bitwise=True,
-        fused_two_rounding_bitwise=arm == 'op3-r', performance_measured=False)
+        fused_two_rounding_bitwise=p.fused(arm), performance_measured=False)
 
 
 def check_records(root, hardware, plan):
@@ -111,14 +111,7 @@ def check_records(root, hardware, plan):
     for arm in p.ARMS:
         groups[arm] = [read(root/arm/f'rank{rank}.json') for rank in range(8)]
         summaries[arm] = check_rows(groups[arm], arm, plan['build']['manifest_sha256'],
-            hardware, builder.libraries(build, arm), builder.codec_library(build))
-    for rank in range(8):
-        for role in ROLES:
-            for case in CASES:
-                left, right = [groups[arm][rank]['roles'][role]['cases'][case] for arm in p.ARMS]
-                require(all(left[key] == right[key] for key in
-                    ('input_sha256', 'weight_sha256', 'output_sha256', 'wire')),
-                    'OP3 arms changed raw projection arithmetic or wire bytes')
+            hardware, builder.libraries(build, p.build_arm(arm)), builder.codec_library(build))
     return dict(protocol=PROTOCOL, completed=True, arms=summaries,
         raw_projection_packet_output_bitwise=True, fused_two_rounding_bitwise=True,
         build_manifest_sha256=plan['build']['manifest_sha256'],
@@ -251,7 +244,7 @@ def run(args):
     try:
         dist.init_process_group('nccl', timeout=timedelta(seconds=300))
         initialized = True
-        native = builder.native_root(args.build, args.arm)
+        native = builder.native_root(args.build, p.build_arm(args.arm))
         scripts = args.out.parent.parent/'workers'/args.arm/'scripts'
         sys.path.insert(0, str(native/'python'))
         sys.path.insert(0, str(scripts))
@@ -305,7 +298,7 @@ def run(args):
                     delayed_reference=original.reference_check(torch, dist, reference,
                         delayed_x.matmul(delayed_weight.t()), output, False))
                 op.tensor_codec.close()
-            record['consumer_fusion'] = fusion_probe(torch, dist, codec, stream, rank) if args.arm == 'op3-r' else None
+            record['consumer_fusion'] = fusion_probe(torch, dist, codec, stream, rank) if p.fused(args.arm) else None
         record['completed'] = True
         write(args.out/f'rank{rank}.json', record)
         dist.barrier(device_ids=[rank])
@@ -328,7 +321,7 @@ def main(argv=None):
     args.build, args.out = args.build.resolve(), args.out.resolve()
     if not args.execute:
         print(json.dumps(dict(protocol=PROTOCOL, preview=True, arm=args.arm, roles=ROLES,
-            cases=CASES, fusion_cases=FUSION_CASES if args.arm == 'op3-r' else [], performance_measured=False)))
+            cases=CASES, fusion_cases=FUSION_CASES if p.fused(args.arm) else [], performance_measured=False)))
         return
     run(args)
 

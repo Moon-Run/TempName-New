@@ -36,7 +36,7 @@ def fixture(arm):
             row['roles'][role] = dict(k_local=k, cases=cases, retained_outputs=6, reuse_calls=7,
                 retention_passed=True, independent_storage=True, delayed_reference=reference,
                 state=dict(arm=arm, calls=10, rank=rank, fused_calls=0))
-        if arm == 'op3-r':
+        if probe.p.fused(arm):
             cases = {case: dict(two_rounding_bitwise=True, single_rounding_differs=True, inputs_unchanged=True,
                 **{key: digest(case) for key in ('partial_sha256', 'bias_sha256', 'residual_sha256',
                                                'raw_sha256', 'expected_sha256', 'output_sha256')},
@@ -86,21 +86,22 @@ class ProbeEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'lifetime'):
             probe.check_rows(rows, 'op3-r', 'manifest')
 
-    def test_rejects_changed_raw_output_between_arms(self):
+    def test_single_combined_probe_keeps_upstream_and_fusion_evidence(self):
         import op3_build as builder
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for arm in probe.p.ARMS:
-                for rank, row in enumerate(fixture(arm)):
-                    probe.write(root/arm/f'rank{rank}.json', row)
+            for rank, row in enumerate(fixture(probe.p.COMBINED)):
+                probe.write(root/probe.p.COMBINED/f'rank{rank}.json', row)
             plan = dict(build=dict(root=str(root/'build'), manifest_sha256='manifest'))
             with patch.object(builder, 'libraries', return_value=None), patch.object(builder, 'codec_library', return_value=None):
-                self.assertTrue(probe.check_records(root, None, plan)['raw_projection_packet_output_bitwise'])
-                path = root/'op3-improved/rank0.json'
+                report = probe.check_records(root, None, plan)
+                self.assertEqual(set(report['arms']), {probe.p.COMBINED})
+                self.assertEqual(len(report['evidence_files']), 8)
+                path = root/probe.p.COMBINED/'rank0.json'
                 row = probe.read(path)
-                row['roles']['mlp']['cases']['outlier']['output_sha256'] = digest('changed')
+                row['roles']['mlp']['cases']['outlier']['wire']['upstream_packet_bitwise'] = False
                 probe.write(path, row)
-                with self.assertRaisesRegex(ValueError, 'raw projection arithmetic'):
+                with self.assertRaisesRegex(ValueError, 'upstream bitwise oracle'):
                     probe.check_records(root, None, plan)
 
 

@@ -1,8 +1,8 @@
-# OP3：A＋MA89＋MA11 上的 R＋CR3 融合与编码器改进
+# OP3：R＋CR3 融合与编码器改进的对比及组合测试
 
-更新：2026-11-02。目标为单机 8×RTX 5090，TP8/DP1。**已实现两组代码和测试入口；新 OP3 的 GPU 正确性与性能结果尚待目标机运行。** 默认仍为 **2 个 block**，对应 `block00`、`block01`，每窗口 10 个 warmup＋50 个正式 optimizer step。
+更新：2026-11-02。目标为单机 8×RTX 5090，TP8/DP1。**v1 两方案已完成 2 trial × 20 blocks 对比，结果保留在第 6 节；当前 v2 脚本改为只测“A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 编码器改进”，先做独立算子测试，再做完整训练，命令见第 4 节。** 新组合组尚无 GPU 实测结果。当前按要求默认只测 1 个 block，即 1 个完整训练窗口、50 个正式 step；算子每种形状也只测 1 个计时窗口。
 
-## 1. 本次比较内容
+## 1. 已完成的 v1 比较内容
 
 这里的 A 是 [OP1](op-1-A&B&C.md) 的 `flux-basic-interleaved`，即 Flux GemmOnly＋基础全远端量化＋交替 CTA 排序；不是 [baseline.md](baseline.md) 中使用另一套 native producer 的 `a`。MA89 取 MA8 激活缓存和 MA9 零梯度统计，MA11 取精确 causal softmax，三项沿用 [OP2](op2-ma11&ma89.md) 的安装方式，每个 worker 各安装一次。
 
@@ -15,17 +15,9 @@
 
 ## 2. 回传数据与改进依据
 
-### OP2 A 的正式结果和原始 trace
+### 编码器改进的 profile 依据
 
-使用批次 [`op2-abc-ma11-v1-1x-50steps-20261102-013244-945721`](../../../../Load-5090/logs/5090/phase6/op2-abc-ma11-v1-1x-50steps-20261102-013244-945721/report.md)。已核对 96 份 rank 记录和 24 份 trace 的哈希；用正式 rank 记录重新计算全部 6 个窗口和比较统计，与原报告一致。A 的八 rank profile 也重新解析通过，覆盖 **2048 次投影**。跨 Python 版本重算的累加浮点字段存在小于 `1e-10` 的差异，离散计数一致。
-
-| OP2 组 | 两个正式窗口（ms/step） | 平均（ms/step） |
-| --- | --- | ---: |
-| A＋MA89＋MA11 | 861.025 / 861.425 | **861.225** |
-| B＋MA89＋MA11 | 990.580 / 998.847 | 994.713 |
-| C＋MA89＋MA11 | 997.457 / 1006.530 | 1001.993 |
-
-B/C 的分块路径未观察到通信与解码重叠。本次继续使用 A 的一次完整交换。
+使用 A 路径的八 rank profile，覆盖 **2048 次投影**；trace 来自 [OP2 回传批次](../../../../Load-5090/logs/5090/phase6/op2-abc-ma11-v1-1x-50steps-20261102-013244-945721/report.md)。
 
 以下 profile 指标先求每 rank、每角色的调用中位数，再求八 rank 中位数；单位 μs。它们来自独立 profile，不能直接当作正式步时节省。
 
@@ -54,7 +46,7 @@ B/C 的分块路径未观察到通信与解码重叠。本次继续使用 A 的�
 
 因此，本次 **纳入 R＋CR3 的消费者融合部分**。是否对当前 5090 A 路径有效，由新的 `op3-r` 结果判断；不迁入 C 的选择性量化和分块到达路径。
 
-## 3. 实现与算术约束
+## 3. v1 组件实现与算术约束（v2 组合复用）
 
 ### R＋CR3 组
 
@@ -62,7 +54,7 @@ B/C 的分块路径未观察到通信与解码重叠。本次继续使用 A 的�
 
 解码按 `rank+1 → … → rank+7 → local` 顺序，每个解码值及每次累加均保留 BF16 舍入。R 的收益机制作用于本地 decoder；它不恢复 H100 的跨卡直接访存或 peer 到达重叠。原 A 已有实例配置和独立输出，本轮不把这些已有机制再记为新增优化。
 
-写回执行严格的 `BF16(residual + BF16(projection + bias))`，而不是三项 FP32 求和后只舍入一次。保留原 LayerNorm。融合 wrapper 绑定当前层实际 residual 和原 bias 参数，autograd 继续返回 input、weight、bias、residual 梯度；bias 归约先于原线性 backward 的序列 AllGather、dgrad 和 wgrad。相关生成器复用已验证的 [MA4-F adapter](../../../tools/h100/phase6/ma4_f_adapter.py)，由 `E2E_POLICY=op3-r` 显式启用。
+写回执行严格的 `BF16(residual + BF16(projection + bias))`，而不是三项 FP32 求和后只舍入一次。保留原 LayerNorm。融合 wrapper 绑定当前层实际 residual 和原 bias 参数，autograd 继续返回 input、weight、bias、residual 梯度；bias 归约先于原线性 backward 的序列 AllGather、dgrad 和 wgrad。相关生成器复用已验证的 [MA4-F adapter](../../../tools/h100/phase6/ma4_f_adapter.py)，v1 由 `E2E_POLICY=op3-r` 启用，v2 的 `op3-combined` 同样显式启用。
 
 ### 编码器改进组
 
@@ -85,74 +77,106 @@ B/C 的分块路径未观察到通信与解码重叠。本次继续使用 A 的�
 | [op3_sources.py](../../../tools/5090/phase6/op3_sources.py) | 两组完整训练 worker、融合 adapter 和三项通用优化 |
 | [op3_probe.py](../../../tools/5090/phase6/op3_probe.py)、[op3_validation.py](../../../tools/5090/phase6/op3_validation.py) | upstream 位串、融合舍入、完整模型及最终运行计数校验 |
 | [op3_profile.py](../../../tools/5090/phase6/op3_profile.py) | 实际 kernel、NCCL、消费者、反向和 MA8/MA9/MA11 路径审计 |
-| [op3.py](../../../tools/5090/phase6/op3.py)、[op3_protocol.py](../../../tools/5090/phase6/op3_protocol.py) | 分阶段执行、平衡配对、报告和只读重放 |
+| [op3_operator.py](../../../tools/5090/phase6/op3_operator.py) | 组合组算子梯度、更新、延迟和独立 profile |
+| [op3.py](../../../tools/5090/phase6/op3.py)、[op3_protocol.py](../../../tools/5090/phase6/op3_protocol.py) | 分阶段执行、当前单组统计、报告和只读重放 |
 
-## 4. 测试与对比脚本
+## 4. 当前脚本：只测组合组（v2）
 
-在**目标 5090 机器的 `TempName-New` 仓库根目录**运行，继续使用已配置的 5090 环境。本轮复用 OP2 已使用过的 ABC build；以下 `/workspace` 是该批次记录中的目标机路径，需要它及其依赖目录仍完整存在。更新整套 `tools/5090/phase6/` 新代码后再启动；正在运行的批次会校验冻结 controller 哈希。
+本节替代原两组运行命令。新组为 **A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 编码器改进**，ID 为 `op3-combined`，协议为 `rtx5090-phase6-op3-combined-v2`。将 v1 的 `op3-improved` 编码器与 `op3-r` 的解码、消费者接在同一条投影路径上；MA8/MA9/MA11 继续各安装一次。v1 结果保留在第 6 节，不能当作本次组合组结果。
 
-### 仅原生正确性测试
+只生成一个 worker 配置，只计时组合组。原生正确性参考和非融合 autograd 参考用于校验，不作为第二个性能组运行。默认 `--trials 1 --blocks 1`，只有 **1 个完整训练计时窗口、50 个正式 step**。需要手动扩展采样时仍可显式设置 `--trials`/`--blocks`，当前命令均保持单窗口。单组没有 AB/BA、同期相对收益或配对 CI，报告只给每轮全部窗口的均值、中位数、最快/最慢、吞吐和显存。
 
-可选的独立检查：编译 OP3 小库并检查两组完整形状、56 条有向 packet、原始 upstream 码流/解码 oracle、真实 GemmOnly 映射、独立输出复用及 R 融合边界；不运行完整模型：
+在目标机 `TempName-New` 仓库根目录运行，使用已配置的 5090 环境。下面复用本次已成功批次的 build：
+
+```bash
+op3_build=/workspace/Load-5090/logs/5090/phase6/op3-two-arm-v1-2x-50steps-20261102-022324-519378/build
+```
+
+CUDA 文件 `op3_codec.cu`、`op3_native.py` 和 `op3_build.py` 与该批次冻结源码逐字节一致，原库已经包含新编码器和 R 融合解码两个导出；本次组合不需要修改旧构建。脚本仍检查整个依赖构建、库哈希及 Python/CUDA ABI，生成新的运行时副本；MA9/MA11 小库与 softmax 自检照常准备。若该 build 已不存在，可改用原 `--abc-build <ABC build>` 新建 OP3 小库。
+
+### 先只测算子
+
+```bash
+bash tools/5090/phase6/run_op3_operator.sh \
+  --op3-build "$op3_build" \
+  --foreground --execute
+```
+
+此入口等价于 `run_op3.sh --operator-only`。完成硬件/NCCL、原生码流/输出所有权、融合舍入检查后，测试 Attention 与 MLP 两种真实形状：`M=2048, N=4096, K_local=512/2048`。每 rank 输出为 `256×4096`，TP8，全远端量化、本地 BF16，逻辑传输量与 v1 相同。
+
+算子阶段先执行三步正确性检查，调用**实际生成的** `GemmRSFunction` 与 `ConsumerGemmRSFunction`，以裸投影后的两个 PyTorch BF16 add 作为融合参考，逐位检查输出、input/weight/bias/residual 四类梯度及三步更新；也检查输入没有被覆盖。这里的“更新”是简单的诊断更新，不是完整训练的 Adam。任一结果不符就停止，不能进入性能测量。
+
+正确性通过后，**仅组合组**每角色预热 20 次，执行 **1 个窗口×100 次 forward**。输入、weight、bias、residual 预先分配，operator 实例和工作区复用；计时包含新输出分配、GemmOnly、编码、NCCL 等待、R 解码与两次 BF16 消费加法。每窗口开始前八 rank 同步，分别记录 CUDA event 与等待完成后的墙钟时间，先逐窗口取最慢 rank，再汇总全部窗口。
+
+性能窗口不含独立 backward、LayerNorm、optimizer 或 MA8/MA9/MA11 训练工作，不使用 CUDA Graph。MA89/MA11 在后续完整训练中验证，不能把它们算成这份投影微测的收益。
+
+另采每角色 10 次 forward 的独立 profile，核对新编码器、R 融合解码器、唯一 All-to-All、`Work.wait`、流依赖、启动归属与次数。报告列出 GEMM、编码、NCCL kernel 合计、解码含融合、CPU 提交和 GPU 起止跨度；这些 profile 数值用于定位瓶颈，不直接相加推导正式步时收益。
+
+结果在新批次的 `operator/report.md` / `operator/report.json`，附八份 rank 记录和 16 份 `attn/mlp-rank*-profile.json.gz`。算子成功状态为 `operator_completed`、`full_step_completed=false`。这个命令使用前台运行，返回成功后才能再启动完整实验。
+
+### 完整单组测试：自动先测算子
 
 ```bash
 bash tools/5090/phase6/run_op3.sh \
-  --abc-build /workspace/Load-5090/logs/5090/phase6/op1-abc-staged-v1-1x-50steps-20261102-000347-679838/build \
-  --transport-smoke-only --execute
+  --op3-build "$op3_build" \
+  --trials 1 --blocks 1 --execute
 ```
 
-完整两组对比会重复这些前置检查；无需先单独运行本节。若已启动独立检查，等待 `batch-state.json` 的状态为 `transport_smoke_completed` 后再启动完整对比，避免同时启动两个后台实验。
+完整入口自动依次执行：硬件/NCCL → 原生数值/传输 → 算子正确性、性能和 profile → 单组全模型 smoke → 八 rank 全模型 profile → 单组正式计时。无需先单独运行算子命令；若已单独运行，完整批次仍重复前置检查，避免跨批次借用验证结果。
 
-零值、随机、离群输入都需通过；融合另测 half-ULP、signed zero、subnormal、cancellation 等边界，half-ULP 必须能区分一次和两次 BF16 舍入。六个仍存活的输出在后续复用后必须保持不变。目标机任一探针失败就停止，不能把仅编译成功写成 GPU 验证成功。
+原 `run_op3_compare.sh` 保留为兼容入口，**现在同样只测组合组**。`--transport-smoke-only` 仍可停在原生正确性阶段，它不测算子延迟。不加 `--execute` 只预览；完整实验默认后台运行，可加 `--foreground`。查看打印的 `handoff/supervisor.log` 和 `batch-state.json`，不要同时启动独立算子与完整实验。
 
-### 完整两组对比：默认两个 block
+所有新结果写入 `Load-5090/logs/5090/phase6/op3-combined-v2-<trials>x-50steps-<时间>/`，不追加到历史两组目录。完整报告为根目录 `report.md` / `report.json`；各窗口在 `results/compare1/`、`results/compare2/` 下。算子报告与整步报告分开保留。
+
+### 只读复核新批次
+
+算子批次与完整批次都使用基础入口复核，不能给此命令额外加 `--operator-only`：
 
 ```bash
-bash tools/5090/phase6/run_op3_compare.sh \
-  --abc-build /workspace/Load-5090/logs/5090/phase6/op1-abc-staged-v1-1x-50steps-20261102-000347-679838/build \
-  --execute
+bash tools/5090/phase6/run_op3.sh --out /path/to/completed-combined-batch --report
 ```
 
-入口默认 `--trials 1 --blocks 2`，正式顺序是：
+需要保留目标机绝对路径对应的构建和全部证据。复核会验证源码/库/worker 身份、原生数值、算子原始 trace；完整批次再验证模型与全部正式窗口。v1 两组批次须使用当批冻结版本重放；当前脚本不会将其解释为新的单组协议。
 
-```text
-block00: op3-r → op3-improved
-block01: op3-improved → op3-r
-```
+## 5. 组合组的验证与边界
 
-共 **4 个正式窗口、200 个正式 optimizer step、32 份正式 rank 记录**；两组各自先完成全模型 smoke 和八 rank profile，再开始计时。保留 TP8、32 层、hidden=4096、sequence=2048、micro batch=1、global batch=4。每窗口独立启动，八 rank 最大 elapsed / 50 作为步时。
+- 全模型仍为 TP8/DP1、32 层、hidden=4096、sequence=2048、micro batch=1、global batch=4，每窗口 10 步预热＋50 步正式。未减少模型、量化范围或 MA8 缓存。
+- 正式计时要求原生 upstream packet/解码逐位一致、融合两次 BF16 舍入和输出保持、独立算子四类梯度及三步更新一致、完整模型 smoke 和八 rank profile 全部通过。
+- 每模块持久的收发包保持独立，完成 NCCL 后才解码，输出每次独立分配。全模型最终同步后读取 64 个模块状态，timing 每模块恰好 240 次新编码、交换、R 解码和融合消费；BDA 计数须一致。算子计数另算，每角色共 136 次投影，其中 133 次融合、3 次裸投影参考，不能混入全模型计数。
+- 单组没有第二个全模型训练轨迹可比；替代检查是算子真实 autograd 与非融合参考逐位对照，加完整训练的数值预算、全部参数梯度/更新记录和消费者生命周期审计。报告明确记录 `full_training_cross_arm_comparison=false`，不声称完成两组训练等价验证。
+- 全模型 profile 要求 `op3_warp_encode_kernel` 与 `op3_r_decode_kernel<true>` 同时执行，后继保持原 LayerNorm、没有两个独立消费者 add；反向、MA8/MA9/MA11 各自审计。
+- 这是一次组合实验，历史 v1 两组结果不能作为同期控制，也不能将其局部收益直接相加。当前组合组的 GPU 正确性、算子延迟及正式步时仍待目标机新批次产生；本地没有可用 GPU。
 
-不加 `--execute` 只打印计划。默认后台启动，查看打印的 `handoff/supervisor.log` 和 `batch-state.json`；可加 `--foreground` 前台执行。结果写入新目录 `Load-5090/logs/5090/phase6/op3-two-arm-v1-1x-50steps-<时间>/`，不会向历史 OP1/OP2 批次追加结果。
-
-可将上述命令的 `--abc-build ...` 替换为 `--op3-build /path/to/completed-op3-batch/build`，只读复用本轮已编译的小库及原 ABC 依赖，避免重复编译该 codec；MA9/MA11 兼容小库及其数值检查仍由每个新批次准备。构建的 source、binary、SM120、Python/CUDA ABI 任一身份不符都会拒绝复用。
-
-### 完成后的报告复核
-
-```bash
-bash tools/5090/phase6/run_op3_compare.sh \
-  --out /path/to/completed-op3-batch --report
-```
-
-`--report` 只接受完整批次，重新验证冻结源码、构建/库身份、native probe、所有窗口和原始 profile，打印两组结果；不是失败批次的续跑入口。完整重放需要在仍持有构建及绝对路径依赖的目标环境执行。
-
-主报告为 `report.md` / `report.json`，并保留 `results/compare1/` 下的每窗口 rank 记录、`native-probe/report.json`、`preflight.json` 和 `profile-summary.json`。正降幅表示**编码器改进组比 R＋融合组更快**；保留负收益及全部窗口。两块仅给描述统计与配对点估计，不计算 95% CI。需要更稳定统计时使用 `--blocks 6` 或更大的偶数；默认值仍为 2。
-
-## 5. 验证范围和判读
-
-- 源码生成检查在硬件预检前执行。GPU 正式计时必须先通过独立码流/映射/输出所有权、两组全模型 smoke、全部 16 份实际 profile。
-- 全模型结束后、同步完成后才读取 64 个惰性创建投影实例的状态；timing 每模块必须恰好 `(10+50)×4=240` 次调用。R 的每次调用都必须经过融合消费；改进组保持裸投影。安装 MA8/MA9/MA11 各一次，并核对实际调用计数。
-- profile 要求 R 的实际预取 decoder 后直接进入原 LayerNorm；改进组要求新编码器、原 decoder、两个独立 add 和原 LayerNorm。反向序列通信与两个 GEMM、允许的 split-K 归约、三项通用优化均单独审计。
-- native probe 强制两组相同输入的裸投影 packet/output 逐位相同。两组全模型 smoke 必须具有相同 loss、grad_norm、最终参数及全部 389 个参数的逐步梯度/更新轨迹，任何差异都会阻止进入 profile 和计时；后续 profile/timing 的跨组轨迹继续完整记录。R 的 smoke 输出包含 bias/residual，另一组采样裸投影，两者输出指纹所处语义位置不同，不能直接用该指纹判定训练失配。
-- 当前开发环境没有可用 GPU。新 CUDA 源码已经通过 CUDA 12.8 的 `sm_120` 编译及 SASS 检查：R 两个模板各 40 registers，新编码器 26 registers，均无 spill、无 CTA barrier；已检查 R 下一 source 和末尾本地贡献的提前加载。目标机仍会重新编译并归档自己的 `codec/compiled.sass`，CPU 检查不代替目标 CUDA 12.9 的数值或性能结果。
-
-全套 5090 CPU 回归 **280 项通过**；在补强 smoke 训练等价门禁后，最终 **47 项 OP3 专项 CPU 测试重新通过**，覆盖算术映射、构建溯源、探针证据、实际 worker 生命周期、完整控制流程、profile 审计和 smoke 训练等价拒绝。两个 shell 入口的语法与只预览模式通过；新增文件的空白和文档链接检查通过。
-
-本地回归命令：
+本地回归入口：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/5090/phase6 -p 'test_*.py' -v
-bash -n tools/5090/phase6/run_op3.sh tools/5090/phase6/run_op3_compare.sh
+bash -n tools/5090/phase6/run_op3.sh tools/5090/phase6/run_op3_compare.sh tools/5090/phase6/run_op3_operator.sh
 git diff --check
 ```
 
-本次 OP3 的正式步时、显存峰值和胜出组均保持待测，不从 OP2 profile 的 kernel 时长外推出收益百分比。
+本次单窗口版本的 **49 项 OP3 专项测试、283 项完整 5090 CPU 回归均通过**。三个 shell 入口语法、单窗口预览、源码生成和文档链接检查通过；已用新分析器重新解析 v1 两组各自的 rank0 原始 profile，均通过实际 trace 格式与执行路径审计。该离线复核属于历史数据兼容性检查，新组合组仍待目标机 GPU 验证。
+
+## 6. OP3 回传结果（2026-11-02）
+
+数据来自 [OP3 原始报告](../../../../Load-5090/logs/5090/phase6/op3-two-arm-v1-2x-50steps-20261102-022324-519378/report.md)、[报告数据](../../../../Load-5090/logs/5090/phase6/op3-two-arm-v1-2x-50steps-20261102-022324-519378/report.json) 和 [批次状态](../../../../Load-5090/logs/5090/phase6/op3-two-arm-v1-2x-50steps-20261102-022324-519378/batch-state.json)。该批次状态为 `completed`，使用 **2 trial × 20 blocks × 2 组**，共 **80 个正式窗口、640 份正式 rank 记录、4000 个正式 optimizer step**。每两个 block 采用 AB/BA 顺序；每窗口 10 步预热＋50 步正式计时。两个 trial 分别报告，未与 OP2 历史窗口合并。
+
+| trial | 指标 | R＋CR3 消费者融合 | OP3 编码器改进 |
+| --- | --- | ---: | ---: |
+| compare1 | 平均 ms/step | 855.544 | **854.444** |
+| compare1 | 中位数 / 最慢 ms/step | 855.230 / 858.047 | 854.322 / 857.537 |
+| compare1 | tokens/s | 9575.19 | 9587.53 |
+| compare2 | 平均 ms/step | 855.393 | **855.132** |
+| compare2 | 中位数 / 最慢 ms/step | 855.318 / 857.690 | 854.721 / 857.011 |
+| compare2 | tokens/s | 9576.88 | 9579.80 |
+
+| 同期配对：编码器改进 / R＋融合 | 配对降幅及 95% CI | 改进组更快的块数 |
+| --- | ---: | ---: |
+| compare1 | +0.129% ［+0.067%, +0.191%］ | 19/20 |
+| compare2 | +0.031% ［-0.024%, +0.083%］ | 13/20 |
+
+正降幅表示编码器改进组更快；配对估计使用块内对数耗时比和 10000 次 bootstrap。两次 trial 的平均耗时差分别约 **1.100 ms/step** 和 **0.261 ms/step**。改进组在两次的均值都较低，但第二次置信区间跨过零，不能把首次的收益幅度视为稳定复现。两个方案是不同改动的直接比较，并非单独编码器消融；本批没有同期原 OP2 A 对照，不能从与 OP2 的跨批次差值推断任一方案相对原 A 的净收益。
+
+R＋融合和改进组的最大 Torch allocated 分别为 **19.423 / 19.412 GiB**；报告的 allocated＋native 与各自 allocated 相同，仍不含 CUDA context、NCCL 等内部显存，不代表整卡峰值。报告记录 `correctness_passed=true`、`execution_path_validated=true`、`native_staged_runtime_validated=true`；裸投影 packet/输出要求逐位一致，smoke 要求 loss、gradient norm 及全部参数梯度和更新轨迹一致。报告中后续数值观测的 loss 和 gradient norm 最大绝对差均为 0，但不能由此推断长期收敛或模型质量。两组 smoke 采样输出的位置不同，融合输出和裸投影的哈希不能直接比较。
+
+以上为对回传报告和批次状态的整理；此处没有在本地重跑 GPU 或完整 `--report` 重放。

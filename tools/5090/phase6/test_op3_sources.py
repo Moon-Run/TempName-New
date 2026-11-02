@@ -110,9 +110,9 @@ class GeneratedWorkers(unittest.TestCase):
                 self.assertEqual(report['ma11_softmax_state']['calls'], steps)
                 self.assertEqual(report['op3_optimization_libraries'], libraries)
                 self.assertEqual(report['op3_optimization_stack'], sources.STACK)
-                expected_trackers = ['zero', 'softmax']+(['consumer'] if arm == 'op3-r' else [])
+                expected_trackers = ['zero', 'softmax']+(['consumer'] if p.fused(arm) else [])
                 self.assertEqual(tracker_snapshots, [(name, steps, steps) for name in expected_trackers])
-                self.assertEqual(report['op3_consumer_state'], {'calls': steps} if arm == 'op3-r' else {})
+                self.assertEqual(report['op3_consumer_state'], {'calls': steps} if p.fused(arm) else {})
                 sources.base.validate_worker(sources.worker_source(arm))
 
     def test_startup_or_warmup_snapshot_fails_before_rank_record(self):
@@ -153,8 +153,8 @@ class GeneratedWorkers(unittest.TestCase):
                 cfg = json.loads((scripts/'config.json').read_text())
                 self.assertEqual(cfg['op3_optimization_libraries'], optimizers.libraries(plan))
                 self.assertEqual(cfg['op3_optimization_stack'], sources.STACK)
-                self.assertEqual(cfg['op3_implementation']['r_decoder'], arm == 'op3-r')
-                self.assertEqual(cfg['op3_implementation']['cr3_consumer_fusion'], arm == 'op3-r')
+                self.assertEqual(cfg['op3_implementation']['r_decoder'], p.fused(arm))
+                self.assertEqual(cfg['op3_implementation']['cr3_consumer_fusion'], p.fused(arm))
                 self.assertEqual(cfg['codec_identity']['receiver_implementation'], sources.implementation(arm)['decoder'])
                 self.assertEqual((scripts/'build'/arm).resolve(), native)
                 for name, digest in worker['files'].items():

@@ -1,4 +1,4 @@
-"""Two OP3 single-exchange paths; immutable instance and independent outputs."""
+"""OP3 components and their combined path; one exchange and owned outputs."""
 from contextlib import nullcontext
 import ctypes
 import os
@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 import op3_reference_codec as reference
 
-ARMS = ('op3-r', 'op3-improved')
+ARMS = ('op3-r', 'op3-improved', 'op3-combined')
 PROTOCOL = 'rtx5090-op3-direct-h128-v1'
 _BOUND = False
 _LOCKS = {}
@@ -155,7 +155,7 @@ class TensorTacoRS:
             raise ValueError('Persistent OP3 packets require the original caller stream')
         local = partial.reshape(8, self.rows, self.n)[self.rank]
         _consumer(local, bias, residual)
-        if bias is not None and self.arm != ARMS[0]:
+        if bias is not None and self.arm == ARMS[1]:
             raise ValueError('Only the R arm enables the fused consumer')
         output = torch.empty_like(local)
         self.calls += 1
@@ -200,8 +200,8 @@ class TensorTacoRS:
             tx_ptrs=[x.data_ptr() for x in self.tx], rx_ptrs=[x.data_ptr() for x in self.rx],
             packet_layout='H128-AoS-136', calibration_used=False,
             encoder='upstream-cta128' if self.arm == ARMS[0] else 'warp-owned-four-groups',
-            decoder='r-packed-source-prefetch' if self.arm == ARMS[0] else 'basic-ring-bf16-h128-direct-v1',
-            consumer_fusion=self.arm == ARMS[0], original_peer_overlap_preserved=False,
+            decoder='r-packed-source-prefetch' if self.arm != ARMS[1] else 'basic-ring-bf16-h128-direct-v1',
+            consumer_fusion=self.arm != ARMS[1], original_peer_overlap_preserved=False,
             failed=self._failed)
 
     def debug_packets(self):

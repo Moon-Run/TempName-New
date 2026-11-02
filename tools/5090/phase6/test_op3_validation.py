@@ -14,7 +14,7 @@ from test_baseline_workers import fixture as model_fixture
 
 def state(arm, rank=0, calls=240, offset=0, fused_calls=None):
     if fused_calls is None:
-        fused_calls = calls if arm == 'op3-r' else 0
+        fused_calls = calls if p.fused(arm) else 0
     splits = [[0 if peer == rank else 8192*136 for peer in range(8)]]
     return dict(protocol=validation.CODEC_PROTOCOL, arm=arm, calls=calls, chunks=copy.deepcopy(validation.CHUNKS),
         transport='NCCL-byte-AllToAll', arrival_trigger='whole-exchange', selection='all-remote',
@@ -26,8 +26,8 @@ def state(arm, rank=0, calls=240, offset=0, fused_calls=None):
         send_split_bytes=splits, receive_split_bytes=copy.deepcopy(splits),
         tx_ptrs=[offset+1024], rx_ptrs=[offset+2048], packet_layout='H128-AoS-136', calibration_used=False,
         encoder='upstream-cta128' if arm == 'op3-r' else 'warp-owned-four-groups',
-        decoder='r-packed-source-prefetch' if arm == 'op3-r' else 'basic-ring-bf16-h128-direct-v1',
-        consumer_fusion=arm == 'op3-r', original_peer_overlap_preserved=False, failed=False)
+        decoder='r-packed-source-prefetch' if p.fused(arm) else 'basic-ring-bf16-h128-direct-v1',
+        consumer_fusion=p.fused(arm), original_peer_overlap_preserved=False, failed=False)
 
 
 def fixture(arm, mode='timing'):
@@ -49,7 +49,7 @@ def fixture(arm, mode='timing'):
         calls = (row['warmup_steps']+len(row['losses']))*4
         row['op3_transport'] = {name: state(arm, row['rank'], calls, i*10000)
                                 for i, name in enumerate(row['target_modules'])}
-        if arm == 'op3-r':
+        if p.fused(arm):
             row['op3_consumer_state'] = {name: dict(projection_calls=calls, bda_calls=calls,
                 bias_parameter_id=i+100, native=copy.deepcopy(row['op3_transport'][name]))
                 for i, name in enumerate(row['target_modules'])}
@@ -75,7 +75,7 @@ class CodecAdmission(unittest.TestCase):
                 lambda s: s.update(pending_exchange=True),
                 lambda s: s.update(decode_stream=101),
                 lambda s: s.update(join_calls=True),
-                lambda s: s.update(consumer_fusion=arm != 'op3-r'),
+                lambda s: s.update(consumer_fusion=not p.fused(arm)),
                 lambda s: s['tx_ptrs'].__setitem__(0, s['rx_ptrs'][0]),
                 lambda s: s['receive_split_bytes'][0].__setitem__(0, 8192*136),
                 lambda s: s['chunks'][0].update(raw_groups=1),
@@ -83,7 +83,7 @@ class CodecAdmission(unittest.TestCase):
                 sample = state(arm)
                 mutate(sample)
                 with self.subTest(arm=arm, mutation=mutate), self.assertRaises(ValueError):
-                    validation.validate_codec_state(sample, arm, 240, 0, fused_calls=240 if arm == 'op3-r' else 0)
+                    validation.validate_codec_state(sample, arm, 240, 0, fused_calls=240 if p.fused(arm) else 0)
 
 
 class ModelAdmission(unittest.TestCase):
@@ -102,22 +102,22 @@ class ModelAdmission(unittest.TestCase):
             lambda row: list(row['op3_consumer_state'].values())[1].update(
                 bias_parameter_id=list(row['op3_consumer_state'].values())[0]['bias_parameter_id']),
         ):
-            rows, job, plan, worker = fixture('op3-r')
+            rows, job, plan, worker = fixture(p.COMBINED)
             mutate(rows[0])
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
                 validation.validate_rows(rows, job, plan, worker)
-        rows, job, plan, worker = fixture('op3-improved')
+        rows, job, plan, worker = fixture(p.COMBINED)
         rows[0]['op3_consumer_state'] = {'unexpected': {}}
-        with self.assertRaisesRegex(ValueError, 'unexpectedly enabled'):
+        with self.assertRaisesRegex(ValueError, 'missing target modules'):
             validation.validate_rows(rows, job, plan, worker)
 
     def test_packet_buffers_are_private_across_all_64_modules(self):
-        rows, job, plan, worker = fixture('op3-improved')
+        rows, job, plan, worker = fixture(p.COMBINED)
         values = list(rows[0]['op3_transport'].values())
         values[1]['tx_ptrs'] = values[0]['tx_ptrs'][:]
         with self.assertRaisesRegex(ValueError, 'another module'):
             validation.validate_rows(rows, job, plan, worker)
-        rows, job, plan, worker = fixture('op3-r')
+        rows, job, plan, worker = fixture(p.COMBINED)
         rows[0]['op3_transport'] = {}
         with self.assertRaisesRegex(ValueError, 'transport modules'):
             validation.validate_rows(rows, job, plan, worker)
@@ -147,7 +147,7 @@ class ModelAdmission(unittest.TestCase):
             lambda row: row['selection_checks'][next(iter(row['selection_checks']))].update(wire_bytes=14680064),
             lambda row: row.update(smoke_output_sha256={}),
         ):
-            rows, job, plan, worker = fixture('op3-r', 'smoke')
+            rows, job, plan, worker = fixture(p.COMBINED, 'smoke')
             mutate(rows[0])
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
                 validation.validate_rows(rows, job, plan, worker)
