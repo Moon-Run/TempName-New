@@ -20,6 +20,7 @@ from rtx5090_defaults import default_build_jobs
 import op3
 import op4
 import op3_protocol as p
+import op6_controllers
 from op6_child import PROTOCOL
 
 ARMS = ('op4', 'op6')
@@ -143,7 +144,7 @@ def prepare_initial_build(args, root, state):
     import op1_abc_build as abc_builder
     baseline_builder = load('build')
     # Preserve the GPU/environment check before an expensive first build.
-    command = [str(args.python), str(HERE/'op3.py'), '--execute', '--foreground',
+    command = [str(args.python), str(HERE/'op6_child.py'), '--variant', 'op4', '--execute', '--foreground',
                '--preflight-only', '--out', str(root/'initial-preflight')]
     for key in ('python', 'megatron', 'cuda_home', 'build_cuda_home', 'jobs', 'worker_timeout'):
         command += ['--'+key.replace('_', '-'), str(getattr(args, key))]
@@ -403,7 +404,7 @@ def main(argv=None):
     (args.out/'handoff').mkdir()
     write(args.out/'batch-state.json', dict(protocol=PROTOCOL, status='launching', stage='freeze-controllers'))
     try:
-        files = op3.base.controller_files()
+        files = op6_controllers.collect(op3.base.controller_files)
         for name in files:
             destination = args.out/'handoff/source'/name
             destination.parent.mkdir(parents=True, exist_ok=True)

@@ -157,3 +157,31 @@ git diff --check
 ```
 
 本地默认 python 若未安装 PyTorch，5项真实 CPU autograd 测试会跳过；应在已有 PyTorch 环境再运行 `test_op6_adapter.py`，不能把跳过记为通过。本次尚未在目标机编译／捕获／训练；800ms、实际显存、CUPTI 图节点归属和端到端位串等价，均由上述完整脚本的目标 GPU 运行决定。
+
+## 7. 编译后因 OP5 源码变化中止的修复（2026-11-03）
+
+[003522 批次日志](../../../../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-2blocks-20261103-003522-661167/handoff/supervisor.log) 显示 baseline 和 ABC 编译调用返回后，父控制器在启动第一个子批次前报错：
+
+```text
+ValueError: Missing/changed evidence: /workspace/TempName-New/tools/5090/phase6/op5.py
+```
+
+该批次的硬件/NCCL 预检已完成，但尚未进入 OP4/OP6 模型 smoke、图捕获或正式训练。原因是原通用源码收集器把整个 phase6 目录都冻结，独立 OP5 文件的更新也会中止 OP6。保存清单中的 `op5.py` 哈希与当前源码不同；OP6 主控制器在修复前的哈希与该批次保存值相同。这个错误不构成 CUDA Graph 或模型数值失败证据。
+
+新增 [op6_controllers.py](../../../tools/5090/phase6/op6_controllers.py)，仅在**新建 OP6 快照**时排除七个明确无运行依赖的 OP5 文件：`op5.py`、`op5_evidence.py`、`op5_probe.py`、`run_op5.sh`、`analyze_op5_baseline.py`、`test_op5.py`、`test_op5_packet_probe.py`。OP6 父批次和两个子组共用该规则；首次硬件预检也改经 `op6_child.py --variant op4 --preflight-only` 启动。独立历史分析工具 `analyze_op6_baseline.py` 仍使用 `op5_evidence`，但它不参与本次启动、构建、计时或报告复核。
+
+原 SHA256 验证器未修改。其余源码、图适配器、H100 helper、OP3 依赖、已保存快照及 native 构建验证继续执行；运行中修改这些实际依赖仍会失败。**不会在复核旧清单时删除条目、更新旧哈希或把失败批次改为成功。** 修复也不影响 OP5 的控制器行为。
+
+同步当前 `op6.py`、`op6_child.py` 和新增 `op6_controllers.py` 后，创建新批次。若目标机保留了这次生成的完整 ABC 构建和依赖，可直接复用，避免重编主要 baseline/ABC 库：
+
+```bash
+bash tools/5090/phase6/run_op6.sh \
+  --place 60 --trials 1 --blocks 2 --execute \
+  --build /workspace/Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-2blocks-20261103-003522-661167/dependencies/abc
+```
+
+该命令由原构建验证器核对来源和二进制，再编译 OP3 codec；MA9/MA11 小库仍按原流程准备。回传目录未包含这些构建二进制，本地未将它们标记为验证通过。如果目标机未保留构建，去掉 `--build` 重新构建即可。不要将旧失败目录传作 `--out`，也不要使用 `--report` 续跑。
+
+新增回归测试覆盖：编译期间修改独立 OP5 文件不再中止新 OP6 批次；修改 OP6/OP3、CUDA 源码、H100 helper 或冻结副本仍失败；旧清单仍严格验证；父批次、两个子组及预检均采用正确入口，退出后恢复原收集器。
+
+本次在已有 PyTorch 环境运行全部 **53项 OP6 CPU 测试，全部通过、无跳过**；shell 语法、复用 ABC 构建的命令预览、文档链接及 `git diff --check` 通过。尚未在目标机重跑 GPU 实验，此次修复不构成800ms或图捕获通过的实测结论。

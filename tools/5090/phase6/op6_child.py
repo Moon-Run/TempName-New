@@ -8,6 +8,7 @@ import sys
 sys.dont_write_bytecode = True
 import op3
 import op3_protocol as p
+import op6_controllers
 
 PROTOCOL = 'rtx5090-phase6-op6-local-attention-graph-paired-v1'
 VARIANTS = ('op4', 'op6')
@@ -27,6 +28,7 @@ def configured(variant):
             value.update(op6_variant=variant, op6_protocol=PROTOCOL)
         return original_write(path, value)
     try:
+        restore.append(op6_controllers.install(op3.base))
         for module in (op6_sources, op6_validation, op6_profile):
             restore.append(module.install(variant))
         op3.write = write
