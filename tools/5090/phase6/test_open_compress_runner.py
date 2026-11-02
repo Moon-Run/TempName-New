@@ -19,9 +19,11 @@ from test_baseline_workers import fixture as original_fixture
 def fixture(arm, mode='timing'):
     rows,job,plan,worker = original_fixture('flux-basic',mode)
     job['arm'] = arm
-    codec = None if arm == p.ARMS[0] else dict(path='/CPU-ONLY/codec.so',sha256='a'*64)
+    codec = None if arm in p.BF16_ARMS else dict(path='/CPU-ONLY/codec.so',sha256='a'*64)
     worker.update(selection=sources.selection_metadata(),definition=sources.definition(arm))
     worker['config'] = sources.configuration(arm,worker['selection'],plan['communication'],codec)
+    if arm in p.MEGATRON_ARMS:
+        worker['config']['native_source_sha256'] = {'layers.py':'c'*64,'mappings.py':'d'*64}
     plan['protocol'] = p.PROTOCOL
     for row in rows:
         calls = (row['warmup_steps']+len(row['losses']))*4
@@ -31,12 +33,12 @@ def fixture(arm, mode='timing'):
             smoke_output_sha256={},retained_output_checks={},compression_states={})
         names = row['target_modules']
         row['selection_checks'] = {name:dict(mask_sha256=None,plan_sha256=None,
-            wire_bytes=7*256*4096*2 if arm == p.ARMS[0] else 7*p.PACKET_BYTES,
+            wire_bytes=7*256*4096*2 if arm in p.BF16_ARMS else 7*p.PACKET_BYTES,
             bf16_wire_bytes=7*256*4096*2) for name in names}
         for name in names:
             state = dict(calls=calls,owns_output=True,encode_calls=0,decode_calls=0,all_to_all_calls=0,
                          collective='reduce_scatter_tensor',quantization='none')
-            if arm != p.ARMS[0]:
+            if arm not in p.BF16_ARMS:
                 splits = [0 if r == row['rank'] else p.PACKET_BYTES for r in range(8)]
                 state.update(encode_calls=calls,decode_calls=calls,all_to_all_calls=calls,wait_calls=calls,
                     logical_remote_bytes=7*p.PACKET_BYTES,send_split_bytes=splits,receive_split_bytes=list(splits),
@@ -46,6 +48,15 @@ def fixture(arm, mode='timing'):
                     finite_input_checks=calls if mode == 'smoke' else 0,arrival=False,selective=False,
                     calibration_used=False,peer_overlap_preserved=False,failed=False,pending_exchange=False)
             row['compression_states'][name] = state
+        if arm in p.MEGATRON_ARMS:
+            route = 'megatron_native' if arm == 'megatron-bf16' else 'megatron_int8'
+            row.update(flux_library_loaded=False,native_linear_forward_preserved=True,
+                forward_preserved=dict.fromkeys(names,True),module_policies=dict.fromkeys(names,route),
+                post_audit_routes=dict.fromkeys(names,route),native_execution={name:dict(
+                    arm=arm,calls=calls,linear_calls=calls,native_forward_preserved=True,
+                    native_linear_backward_preserved=True,native_rs_backward_preserved=True,
+                    private_function_globals=True,original_rs_forward=arm == 'megatron-bf16',
+                    source_sha256=worker['config']['native_source_sha256'],flux_loaded=False) for name in names})
         if mode == 'smoke':
             row['smoke_output_sha256'] = dict.fromkeys(names,'a'*64)
             for role,suffix in (('attn','.self_attention.linear_proj'),('mlp','.mlp.linear_fc2')):
@@ -64,25 +75,29 @@ class Protocol(unittest.TestCase):
     def test_balanced_cycles_and_single_block(self):
         for blocks in (1,6,12,13):
             jobs = p.schedule(2,blocks)
-            self.assertEqual(len(jobs),6*blocks)
+            self.assertEqual(len(jobs),2*len(p.ARMS)*blocks)
             for trial in (1,2):
                 for block in range(blocks):
                     self.assertEqual({j['arm'] for j in jobs if j['trial']==trial and j['block']==block},set(p.ARMS))
                 if blocks % 6 == 0:
                     own = [j for j in jobs if j['trial']==trial]
-                    for position in range(3):
-                        self.assertEqual(Counter(j['arm'] for j in own if j['index']%3==position),
-                                         Counter(dict.fromkeys(p.ARMS,blocks//3)))
+                    for position in range(len(p.ARMS)):
+                        self.assertEqual(Counter(j['arm'] for j in own if j['index']%len(p.ARMS)==position),
+                                         Counter(dict.fromkeys(p.ARMS,blocks//len(p.ARMS))))
+                    orders = [[j['arm'] for j in own if j['block']==b] for b in range(blocks)]
+                    self.assertEqual(Counter(pair for order in orders for pair in zip(order,order[1:])),
+                        Counter({pair:blocks//6 for pair in itertools.permutations(p.ARMS,2)}))
         for trials,blocks in ((0,1),(1,0),(-1,1),(True,1),(1,1.5)):
             with self.assertRaises(ValueError): p.schedule(trials,blocks)
 
     def test_one_block_has_no_ci_and_retains_slowdowns(self):
         result = p.report(samples(1),1,1)
         self.assertTrue(result['exploratory'])
-        self.assertEqual(result['formal_optimizer_steps'],150)
+        self.assertEqual(result['formal_optimizer_steps'],300)
         for pair in result['comparisons']['compare1']['pairs'].values():
             self.assertIsNone(pair['ci95'])
-            self.assertLess(pair['percent'],0)
+        self.assertLess(result['comparisons']['compare1']['pairs']['flux-int8/flux-bf16']['percent'],0)
+        self.assertEqual(len(result['comparisons']['compare1']['pairs']),15)
         self.assertIn('不足六个',p.markdown(result))
 
     def test_six_blocks_ci_and_invalid_evidence_rejected(self):
@@ -102,6 +117,16 @@ class Protocol(unittest.TestCase):
                 controller.main(['--trials','1','--blocks','1','--out',str(out)])
             self.assertFalse(out.exists())
             self.assertIn('PLAN ONLY',output.getvalue())
+
+    def test_v1_results_are_not_reinterpreted_by_v2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            p.write(root/'plan.json',dict(protocol='rtx5090-open-compress-int8-three-arm-v1'))
+            before = (root/'plan.json').read_bytes()
+            with patch.object(controller.base,'verify_controllers',side_effect=AssertionError('wrong reader used')):
+                with self.assertRaisesRegex(ValueError,'six-arm v2 reader'):
+                    controller.replay(root)
+            self.assertEqual((root/'plan.json').read_bytes(),before)
 
 
 class Evidence(unittest.TestCase):
@@ -130,9 +155,20 @@ class Evidence(unittest.TestCase):
             with self.subTest(changes=changes),self.assertRaises(ValueError): validation.validate_rows(bad,job,plan,worker)
 
     def test_bf16_cannot_claim_compression(self):
-        rows,job,plan,worker = fixture(p.ARMS[0])
-        next(iter(rows[0]['compression_states'].values()))['encode_calls'] = 240
-        with self.assertRaises(ValueError): validation.validate_rows(rows,job,plan,worker)
+        for arm in p.BF16_ARMS:
+            rows,job,plan,worker = fixture(arm)
+            next(iter(rows[0]['compression_states'].values()))['encode_calls'] = 240
+            with self.assertRaises(ValueError): validation.validate_rows(rows,job,plan,worker)
+
+    def test_native_identity_and_backward_are_required(self):
+        for arm in p.MEGATRON_ARMS:
+            for key,value in (('native_forward_preserved',False),('native_linear_backward_preserved',False),
+                              ('native_rs_backward_preserved',False),('private_function_globals',False),
+                              ('flux_loaded',True),('linear_calls',239),('source_sha256',{})):
+                rows,job,plan,worker = fixture(arm)
+                next(iter(rows[0]['native_execution'].values()))[key] = value
+                with self.subTest(arm=arm,key=key),self.assertRaises(ValueError):
+                    validation.validate_rows(rows,job,plan,worker)
 
 
 if __name__ == '__main__':

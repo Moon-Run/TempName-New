@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RTX5090: Flux BF16 / open block INT8 / INT8 with true GEMM tile interleaving."""
+"""RTX5090: Flux/Megatron, open INT8, interleaved and remote-first GEMM tiles."""
 import argparse
 from datetime import datetime
 import fcntl
@@ -31,7 +31,7 @@ def arguments(argv=None):
     parser.add_argument('--megatron', type=Path, default=REPO.parent/'Megatron-LM')
     parser.add_argument('--cuda-home', type=Path, default=Path('/usr/local/cuda'))
     parser.add_argument('--build-cuda-home', type=Path, default=Path('/usr/local/cuda'))
-    parser.add_argument('--build', type=Path, help='Reuse a completed open-compress build, never an old TACO build')
+    parser.add_argument('--build', type=Path, help='Reuse an open-compress build; a v1 build gets a new remote-first overlay')
     parser.add_argument('--trials', type=int, default=1)
     parser.add_argument('--blocks', type=int, default=6, help='Positive complete blocks; 1 is exploratory, multiples of 6 balanced')
     parser.add_argument('--jobs', type=int, default=2)
@@ -49,7 +49,7 @@ def arguments(argv=None):
               '--report requires --out without execution/stage flags')
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'open-compress-int8-v1-{args.trials}x-{args.blocks}blocks-{stamp}'
+        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'open-compress-int8-six-arm-v2-{args.trials}x-{args.blocks}blocks-{stamp}'
     for key, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, key, value.expanduser().absolute() if key == 'python' else value.expanduser().resolve())
@@ -72,9 +72,13 @@ def environment(args, build, scripts, job, dest, plan):
         E2E_BUILD=str(scripts/'build'), E2E_PROCESS_OUT=str(dest), E2E_TRIAL=str(job['trial']),
         E2E_BLOCK=str(job['block']), E2E_WINDOW=str(job['index']), CUDA_HOME=str(args.cuda_home),
         OPEN_COMPRESS_LIBRARY=str(build/'codec/libopen_compress.so'),
-        PATH=f'{args.python.parent}:{args.cuda_home}/bin:'+env.get('PATH', ''),
-        PYTHONPATH=':'.join(map(str, (scripts, build/'megatron', native/'python'))))
-    libraries = [native/'python/flux/lib', native, native/'build/lib', args.cuda_home/'lib64']
+        PATH=f'{args.python.parent}:{args.cuda_home}/bin:'+env.get('PATH', ''))
+    python_paths = [scripts, build/'megatron']
+    libraries = [args.cuda_home/'lib64']
+    if native is not None:
+        python_paths.append(native/'python')
+        libraries = [native/'python/flux/lib', native, native/'build/lib'] + libraries
+    env['PYTHONPATH'] = ':'.join(map(str, python_paths))
     libraries += [Path(value) for value in os.environ.get('LD_LIBRARY_PATH','').split(':') if value
                   and not any((Path(value)/name).exists() for name in ('libflux_cuda.so','libflux_cuda_ths_op.so'))]
     env['LD_LIBRARY_PATH'] = ':'.join(map(str, libraries))
@@ -120,7 +124,8 @@ def operator_summary(root, plan, workers, recompute_profiles=True):
                     p.require(len({records[a][rank]['roles'][role]['cases'][case][key] for a in p.ARMS}) == 1,
                               'Operator arms received different inputs')
     return dict(protocol=p.PROTOCOL, run_id=plan['run_id'], completed=True, evidence_files=evidence, measurements=stats,
-        limitation='Components timed separately; their sums do not predict integrated latency. '
+        limitation='Forward-only operator probes use no_grad in every arm; full training retains autograd/backward. '
+          'Components timed separately; their sums do not predict integrated latency. '
           'Operator process is independent of full-model process. Peaks include live operator buffers. '
           'Wall time includes Python and synchronization; CUDA events cover caller stream with NCCL wait dependencies.')
 
@@ -145,8 +150,11 @@ def replay(root, recompute_profiles=True):
     import open_compress_profile as profiler
     import open_compress_validation as validation
     root = Path(root)
+    plan = p.read(root/'plan.json')
+    p.require(plan['protocol'] == p.PROTOCOL,
+              'This six-arm v2 reader cannot replay a v1 batch; retain its v1 source revision and build. Old results are unchanged.')
     base.verify_controllers(root)
-    plan, workers = p.read(root/'plan.json'), p.read(root/'workers.json')
+    workers = p.read(root/'workers.json')
     p.require(plan['protocol'] == p.PROTOCOL and plan['model'] == p.MODEL and plan['arms'] == list(p.ARMS)
               and plan['schedule'] == p.schedule(plan['trials'],plan['blocks']) and set(workers) == set(p.ARMS),
               'Wrong experiment plan')
@@ -241,6 +249,12 @@ def execute(args):
             builder.verify(build,True)
             p.require(p.read(build/builder.MANIFEST)['environment'] == builder.environment_identity(args.build_cuda_home),
                       'Reused build Python/CUDA ABI differs')
+            if not builder.has_remote_first(build):
+                reference, build = build, root/'build'
+                stage('prepare-remote-first-overlay')
+                builder.prepare(build,reference=reference)
+                stage('compile-remote-first-overlay')
+                builder.compile_build(build,args.megatron,args.build_cuda_home,args.jobs)
         else:
             stage('prepare-build')
             builder.prepare(build)
@@ -282,7 +296,7 @@ def execute(args):
             if job['mode'] != 'smoke':
                 p.require(smokes == set(p.ARMS),'All model smokes must pass first')
             if job['mode'] == 'timing':
-                p.require(len(profiles) == 24,'All training profiles must pass first')
+                p.require(len(profiles) == len(p.ARMS)*8,'All training profiles must pass first')
             base.verify_controllers(root)
             builder.verify(build,True)
             scripts = base.check_worker(root,job['arm'],workers[job['arm']])
@@ -343,7 +357,7 @@ def main(argv=None):
         print('PLAN ONLY: no files, GPU queries, builds or training. Add --execute to run.')
         print(json.dumps(dict(protocol=p.PROTOCOL,out=str(args.out),arms=p.ARMS,trials=args.trials,blocks=args.blocks,
             balanced_order=args.blocks%6 == 0,exploratory=args.blocks<6,model=p.MODEL,
-            warmup_steps=10,timed_steps=50,timing_windows=0 if args.preflight_only or args.operator_only else args.trials*args.blocks*3,
+            warmup_steps=10,timed_steps=50,timing_windows=0 if args.preflight_only or args.operator_only else args.trials*args.blocks*len(p.ARMS),
             build=str(args.build) if args.build else None,arrival=False,selective=False,
             stages='hardware/NCCL -> isolated Flux+codec build -> codec/operator/profile -> model smoke/profile -> full steps -> report'),
             indent=2,ensure_ascii=False))

@@ -6,23 +6,45 @@ import open_compress_protocol as p
 
 base = load('profile')
 GEMM_STAGE = 'ablation6.flux_gemm_only'
+NATIVE_GEMM_STAGE = 'open_compress.megatron_gemm'
+NATIVE_RS_STAGE = 'open_compress.megatron_bf16_reduce_scatter'
+
+
+def is_native_gemm(name):
+    lower = name.lower()
+    return (any(token in lower for token in ('gemm', 'xmma'))
+            and not any(token in lower for token in ('flux_', 'oc_int8_', 'nccl', 'splitkreduce', 'splitk_reduce')))
+
+
+def is_native_gemm_work(name):
+    lower = name.lower()
+    return is_native_gemm(name) or ('cublas' in lower and 'splitk' in lower and 'reduce' in lower)
 
 
 def analyze(events, arm, rank, expected_calls=128):
     p.require(arm in p.ARMS and type(rank) is int and 0 <= rank < 8
               and type(expected_calls) is int and expected_calls > 0, 'Unknown profile identity/count')
     index = base.Index(events)
+    native = arm in ('megatron-bf16', 'megatron-int8')
+    route = ('megatron_native' if arm == 'megatron-bf16' else 'megatron_int8') if native else 'flux_tensor'
+    gemm_stage = NATIVE_GEMM_STAGE if native else GEMM_STAGE
+    bf16_stage = NATIVE_RS_STAGE if native else 'flux_baseline.bf16_reduce_scatter'
+    scope_names = {f'scope.{role}.{route}' for role in ('attn', 'mlp')}
     scopes = [e for e in events if e.get('cat') == 'user_annotation' and e.get('ph') == 'X'
-              and e.get('name') in ('scope.attn.flux_tensor', 'scope.mlp.flux_tensor')]
+              and e.get('name') in scope_names]
     p.require(Counter(e['name'] for e in scopes) == Counter(
-        {'scope.attn.flux_tensor': expected_calls, 'scope.mlp.flux_tensor': expected_calls}), 'Missing projection scopes')
+        dict.fromkeys(scope_names, expected_calls)), 'Missing projection scopes')
     forbidden = ('taco_decode', 'fused_ash_', 'basic_quant_', 'rtx5090_pack_', 'rtx5090_unpack_',
                  'CudaIpcBarrier', 'nvshmem', 'ma11.attention', 'ma9.optimizer', '_MA8CachedRawLinear')
     p.require(not any(t.lower() in e.get('name', '').lower() for e in events for t in forbidden),
               'TACO or an unrequested mechanism executed')
+    if native:
+        p.require(not any('flux_' in e.get('name', '').lower() or 'Op1AInterleavedSwizzle' in e.get('name', '')
+                          or 'OpenCompressRemoteFirstSwizzle' in e.get('name', '')
+                          for e in events if e.get('cat') == 'kernel'), 'Megatron unexpectedly executed Flux kernels')
     claimed, claimed_markers, duration = set(), set(), {'attn': [], 'mlp': []}
-    quantized = arm != 'flux-bf16'
-    relevant = {GEMM_STAGE, 'open_compress.encode', 'open_compress.exchange',
+    quantized = arm not in ('flux-bf16', 'megatron-bf16')
+    relevant = {GEMM_STAGE, NATIVE_GEMM_STAGE, NATIVE_RS_STAGE, 'open_compress.encode', 'open_compress.exchange',
                 'open_compress.decode_reduce', 'flux_baseline.bf16_reduce_scatter'}
     all_markers = [e for e in events if e.get('cat') == 'user_annotation' and e.get('ph') == 'X'
                    and e.get('name') in relevant]
@@ -31,8 +53,8 @@ def analyze(events, arm, rank, expected_calls=128):
     for scope in scopes:
         work, _ = index.work(scope)
         markers = [e for e in all_markers if base.contains(scope, e)]
-        expected_names = [GEMM_STAGE] + (['open_compress.encode', 'open_compress.exchange',
-            'open_compress.decode_reduce'] if quantized else ['flux_baseline.bf16_reduce_scatter'])
+        expected_names = [gemm_stage] + (['open_compress.encode', 'open_compress.exchange',
+            'open_compress.decode_reduce'] if quantized else [bf16_stage])
         p.require(Counter(e['name'] for e in markers) == Counter(expected_names), 'Wrong projection stage coverage')
         p.require(not claimed_markers.intersection(map(id, markers)), 'Duplicate stage ownership')
         claimed_markers.update(map(id, markers))
@@ -49,14 +71,24 @@ def analyze(events, arm, rank, expected_calls=128):
                       'Wrong stage kernels/work '+name)
             return owned, kernels
 
-        gemm_work, gemms = stage(GEMM_STAGE, base.is_basic_gemm, memory=True)
-        p.require(len(gemms) == 1 and '_streamksk_' in gemms[0]['name'].lower(), 'Wrong Flux GEMM')
-        gemm = gemms[0]
-        # Stream-K's scratch clear is valid; copying a materialized output to
-        # simulate sorting is not part of either producer definition.
-        p.require(all(e['cat'] != 'gpu_memcpy' for e in gemm_work), 'Unexpected GEMM tensor copy')
-        p.require(('Op1AInterleavedSwizzle' in gemm['name']) == (arm == p.ARMS[2]),
-                  'Actual GEMM tile swizzle differs from selected arm')
+        gemm_work, gemms = stage(gemm_stage, is_native_gemm_work if native else base.is_basic_gemm, memory=True)
+        if native:
+            matrices = [e for e in index.cpu if base.contains(marker(gemm_stage), e) and e['name'] == 'aten::mm']
+            p.require(len(matrices) == 1, 'Native Megatron must execute exactly one ATen matrix multiplication')
+            mm_work, _ = index.work(matrices[0])
+            p.require({id(e) for e in gemm_work} <= {id(e) for e in mm_work},
+                      'Native GEMM work is not owned by its actual ATen matrix multiplication')
+            primary = [e for e in gemms if is_native_gemm(e['name'])]
+            p.require(len(primary) == 1, 'Expected one native cuBLAS GEMM, with optional split-K reduction')
+            gemm = primary[0]
+        else:
+            p.require(len(gemms) == 1 and '_streamksk_' in gemms[0]['name'].lower(), 'Wrong Flux GEMM')
+            gemm = gemms[0]
+            # Stream-K scratch clear is valid; a post-GEMM output permutation is not.
+            p.require(all(e['cat'] != 'gpu_memcpy' for e in gemm_work), 'Unexpected GEMM tensor copy')
+            p.require(('Op1AInterleavedSwizzle' in gemm['name']) == (arm == 'flux-int8-interleaved')
+                      and ('OpenCompressRemoteFirstSwizzle' in gemm['name']) == (arm == 'flux-int8-remote-first'),
+                      'Actual GEMM tile swizzle differs from selected arm')
         compute = gemm.get('args', {}).get('stream')
         if quantized:
             encode, _ = stage('open_compress.encode', lambda n: 'oc_int8_encode_kernel' in n)
@@ -68,9 +100,9 @@ def analyze(events, arm, rank, expected_calls=128):
             chain = [gemm_work, encode, exchange, decode]
             exchange_marker = marker('open_compress.exchange')
         else:
-            exchange, comm_kernels = stage('flux_baseline.bf16_reduce_scatter', lambda n: 'nccl' in n.lower(), memory=True)
+            exchange, comm_kernels = stage(bf16_stage, lambda n: 'nccl' in n.lower(), memory=True)
             chain = [gemm_work, exchange]
-            exchange_marker = marker('flux_baseline.bf16_reduce_scatter')
+            exchange_marker = marker(bf16_stage)
         for name, next_name in zip(expected_names, expected_names[1:]):
             p.require(base.end(marker(name)) <= marker(next_name)['ts']+.01, 'CPU stage submission order changed')
         calls = [e for e in index.cpu if base.contains(exchange_marker, e)
@@ -96,7 +128,11 @@ def analyze(events, arm, rank, expected_calls=128):
         p.require({id(e) for e in work} == expected and not claimed.intersection(expected),
                   'Extra/unowned work in projection or duplicate ownership')
         p.require(all(e.get('args', {}).get('device') == rank for e in work), 'Projection ran on wrong GPU')
-        cpu_names = [e['name'].lower().replace('_', '') for e in index.cpu if base.contains(scope, e)]
+        # The native INT8 autograd owner retains "ReduceScatter" in its
+        # class name because it reuses the original collective backward.
+        # Only actual c10d APIs establish that an extra collective ran.
+        cpu_names = [e['name'].lower().replace('_', '') for e in index.cpu
+                     if base.contains(scope, e) and e['name'].startswith('c10d::')]
         p.require(not any(('reducescatter' if quantized else 'alltoall') in n for n in cpu_names),
                   'Wrong collective API in projection')
         claimed.update(expected)
@@ -107,5 +143,6 @@ def analyze(events, arm, rank, expected_calls=128):
                    (base.is_basic_gemm(e['name']) or 'oc_int8_' in e['name'])]
     p.require(all(id(e) in claimed for e in owned_types), 'Unowned GEMM/codec kernel outside projection')
     return dict(protocol=p.PROTOCOL, arm=arm, rank=rank, execution_validated=True,
-        interleaved=arm == p.ARMS[2], arrival=False, selective=False,
+        interleaved=arm == 'flux-int8-interleaved', remote_first=arm == 'flux-int8-remote-first',
+        native_megatron=native, arrival=False, selective=False,
         roles={r: dict(calls=len(v), mean_profile_span_ms=mean(v)) for r,v in duration.items()})

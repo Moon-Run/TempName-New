@@ -22,7 +22,7 @@ def mechanisms(row, arm, mode, warmup, count, names, worker):
     p.require(set(row['compression_states']) == names, 'Missing per-module compression state')
     for state in row['compression_states'].values():
         p.require(state['calls'] == calls and state['owns_output'] is True, 'Wrong codec ownership/count')
-        if arm == 'flux-bf16':
+        if arm in p.BF16_ARMS:
             p.require(state['quantization'] == 'none' and state['collective'] == 'reduce_scatter_tensor'
                       and all(state[k] == 0 for k in ('encode_calls', 'decode_calls', 'all_to_all_calls')),
                       'BF16 control invoked compression')
@@ -47,8 +47,24 @@ def mechanisms(row, arm, mode, warmup, count, names, worker):
     p.require(set(row['selection_checks']) == names, 'Missing projection policy checks')
     for v in row['selection_checks'].values():
         p.require(v['mask_sha256'] is None and v['plan_sha256'] is None
-                  and v['wire_bytes'] == (7*256*4096*2 if arm == 'flux-bf16' else 7*p.PACKET_BYTES)
+                  and v['wire_bytes'] == (7*256*4096*2 if arm in p.BF16_ARMS else 7*p.PACKET_BYTES)
                   and v['bf16_wire_bytes'] == 7*256*4096*2, 'Selective mask or wrong wire accounting')
+    if arm in p.MEGATRON_ARMS:
+        p.require(worker['libraries'] == {} and row['flux_library_loaded'] is False
+                  and row['native_linear_forward_preserved'] is True
+                  and row['forward_preserved'] == dict.fromkeys(names, True)
+                  and set(row['native_execution']) == names,
+                  'Megatron arm replaced native forward or loaded Flux')
+        for state in row['native_execution'].values():
+            p.require(state['arm'] == arm and state['calls'] == state['linear_calls'] == calls
+                      and all(state[k] is True for k in ('native_forward_preserved',
+                          'native_linear_backward_preserved', 'native_rs_backward_preserved', 'private_function_globals'))
+                      and state['original_rs_forward'] == (arm == 'megatron-bf16')
+                      and state['source_sha256'] == cfg['native_source_sha256']
+                      and state['flux_loaded'] is False,
+                      'Native Megatron source, autograd or collective boundary changed')
+    else:
+        p.require(row.get('native_execution', {}) == {}, 'Flux arm claimed native Megatron forward')
     if mode == 'smoke':
         p.require(set(row['smoke_output_sha256']) == names, 'Missing output fingerprints')
         checks = row['retained_output_checks']
@@ -66,6 +82,9 @@ def transport(row, arm, calls, names, layouts):
 
 def _validator():
     source = inspect.getsource(base.validate_rows)
+    source = source.replace("route = 'flux_tensor' if arm == 'flux-basic' else 'candidate'",
+        "route = ('megatron_native' if arm == 'megatron-bf16' else "
+        "'megatron_int8' if arm == 'megatron-int8' else 'flux_tensor')")
     source = source.replace("arm != 'flux-basic'", 'False')
     source = source.replace("arm == 'flux-basic'", 'True')
     module = ModuleType('rtx5090_open_compress_frozen_validation')

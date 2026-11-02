@@ -14,7 +14,7 @@ import open_compress_sources as sources
 
 
 class Workers(unittest.TestCase):
-    def test_generated_adapter_imports_and_initializes_all_three_policies_without_p2p_api(self):
+    def test_generated_flux_adapters_initialize_without_p2p_api(self):
         torch = ModuleType('torch')
         torch.bfloat16, torch.float32 = object(), object()
         torch.autograd = SimpleNamespace(Function=object)
@@ -45,6 +45,8 @@ class Workers(unittest.TestCase):
         with patch.dict(sys.modules, modules):
             exec(sources.taco_source('flux-int8'), support.__dict__)
             for arm in sources.ARMS:
+                if arm in sources.MEGATRON_ARMS:
+                    continue
                 module = ModuleType('generated_adapter')
                 exec(sources.adapter_source(arm), module.__dict__)
                 rows = [(f'decoder.layers.{i}{suffix}', Row()) for i in range(32)
@@ -109,7 +111,7 @@ class Workers(unittest.TestCase):
                 original_read = Path.read_text
                 def read(path, *args, **kwargs):
                     if str(path) == '/proc/self/maps':
-                        return '\n'.join('fake mapping '+str(native/name) for name in ('libflux_cuda.so', 'libflux_cuda_ths_op.so'))
+                        return '' if arm in sources.MEGATRON_ARMS else '\n'.join('fake mapping '+str(native/name) for name in ('libflux_cuda.so', 'libflux_cuda_ths_op.so'))
                     return original_read(path, *args, **kwargs)
                 frozen = dict(cfg['common'], **cfg['cases'][0])
                 kwargs = {key: frozen[value] for key, value in [('num_layers','layers'),('hidden_size','hidden'),
@@ -149,8 +151,10 @@ class Workers(unittest.TestCase):
         observed = {f'decoder.layers.{layer}{suffix}': dict(M=2048, N=4096, K_global=k, K_local=k//8)
             for layer in range(32) for suffix, k in (('.self_attention.linear_proj', 4096), ('.mlp.linear_fc2', 16384))}
         for arm in sources.ARMS:
-            self.assertEqual(set(module['module_routes'](observed, arm).values()), {'flux_tensor'})
-            self.assertFalse(module['is_native'](arm))
+            expected = ('megatron_native' if arm == 'megatron-bf16' else
+                        'megatron_int8' if arm == 'megatron-int8' else 'flux_tensor')
+            self.assertEqual(set(module['module_routes'](observed, arm).values()), {expected})
+            self.assertEqual(module['is_native'](arm), arm in sources.MEGATRON_ARMS)
             self.assertFalse(module['is_fused_v2'](arm))
             self.assertTrue(module['is_tensor'](arm))
             self.assertFalse(sources.implementation(arm)['arrival'])

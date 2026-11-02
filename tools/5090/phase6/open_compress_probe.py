@@ -19,6 +19,62 @@ CASES = ('zero', 'random', 'outlier')
 CODEC_CASES = ('zero', 'signed_halfway', 'random', 'outlier', 'tiny')
 
 
+def is_quantized(arm):
+    return arm not in ('flux-bf16', 'megatron-bf16')
+
+
+def is_megatron(arm):
+    return arm in ('megatron-bf16', 'megatron-int8')
+
+
+def projection_scope(arm, role):
+    route = ('megatron_native' if arm == 'megatron-bf16' else 'megatron_int8') if is_megatron(arm) else 'flux_tensor'
+    return f'scope.{role}.{route}'
+
+
+def validate_remote_first_mapping(rows, rank):
+    """Independent oracle: all seven remote partitions precede local tiles."""
+    expected = [[((rank+1+slot//64) % 8)*2+(slot % 64)//32, slot % 32]
+                for slot in range(512)]
+    p.require(type(rank) is int and 0 <= rank < 8 and len(rows) == 512
+              and all(len(row) == 4 and all(type(x) is int for x in row) for row in rows)
+              and [row[:2] for row in rows] == expected
+              and len({tuple(row[2:]) for row in rows}) == 512
+              and all(0 <= row[2] < 16 and 0 <= row[3] < 32 for row in rows)
+              and all(row[0]//2 != rank for row in rows[:448])
+              and all(row[0]//2 == rank for row in rows[448:]),
+              'Actual GEMM CTA mapping is not remote-first/local-last')
+
+
+def loaded_libraries(native):
+    if native is not None:
+        from op1_a_probe import loaded_libraries as flux_libraries
+        return flux_libraries(native)
+    maps = Path('/proc/self/maps').read_text()
+    p.require(not any('/'+name in maps for name in ('libflux_cuda.so', 'libflux_cuda_ths_op.so')),
+              'Megatron process unexpectedly loaded a Flux native library')
+    return {}
+
+
+def close_operator(op, arm):
+    """Complete device work before breaking native Python reference cycles."""
+    import torch
+    torch.cuda.synchronize()
+    if is_megatron(arm):
+        op.close()
+
+
+def validate_native_execution(state, arm, calls, source_sha256):
+    p.require(is_megatron(arm) and state['arm'] == arm and state['calls'] == calls
+              and state['linear_calls'] == calls
+              and all(state[k] is True for k in ('native_forward_preserved',
+                        'native_linear_backward_preserved', 'native_rs_backward_preserved'))
+              and state['original_rs_forward'] == (arm == 'megatron-bf16')
+              and state['private_function_globals'] is True and state['flux_loaded'] is False
+              and state['source_sha256'] == source_sha256,
+              'Megatron must preserve its native forward/GEMM/collective backward implementation')
+
+
 def is_digest(value):
     return isinstance(value, str) and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
 
@@ -158,7 +214,8 @@ def validate(root, arm, plan, worker):
                   'Missing/foreign operator evidence')
         p.require(row['matmul_settings'] == dict(allow_tf32=False,
                   allow_bf16_reduced_precision_reduction=False), 'Operator GEMM reference precision changed')
-        if arm != p.ARMS[0]:
+        p.require(row['operator_grad_enabled'] is False, 'Operator microbenchmarks must uniformly disable autograd recording')
+        if is_quantized(arm):
             validate_codec_cases(row['codec_cases'])
         else:
             p.require(row['codec_cases'] is None, 'BF16 arm unexpectedly ran an INT8 codec')
@@ -168,8 +225,10 @@ def validate(root, arm, plan, worker):
                       and record['reuse_calls'] == 7 and record['changed_call_output_different'] is True
                       and record['delayed_rank'] == 7 and record['delay_seconds'] == .02,
                       'Incomplete shape/case/lifetime coverage')
-            if arm == p.ARMS[2]:
+            if arm == 'flux-int8-interleaved':
                 validate_mapping(record['mapping'], rank)
+            elif arm == 'flux-int8-remote-first':
+                validate_remote_first_mapping(record['mapping'], rank)
             else:
                 p.require(record['mapping'] is None, 'Unexpected interleaved mapping')
             for case, value in record['cases'].items():
@@ -179,7 +238,7 @@ def validate(root, arm, plan, worker):
                           and 0 <= value['relative_l2_vs_bf16'] <= .05 and 0 <= value['gemm_relative_l2'] <= .01
                           and all(is_digest(value[k]) for k in ('input_sha256', 'weight_sha256')),
                           'Operator numerical oracle failed')
-                if arm != p.ARMS[0]:
+                if is_quantized(arm):
                     p.require(value['encode_bitwise'] and value['decode_bitwise'] and value['reduce_bitwise'],
                               'Codec differs from independent Torch oracle')
                     peers = {str(i) for i in range(8) if i != rank}
@@ -193,7 +252,12 @@ def validate(root, arm, plan, worker):
             expected_calls = len(CASES)+7
             p.require(state['calls'] == expected_calls and state['owns_output'] is True,
                       'Incorrect lifetime probe call count/output ownership')
-            if arm != p.ARMS[0]:
+            if is_megatron(arm):
+                validate_native_execution(record['native_execution'], arm, expected_calls,
+                                          worker['config']['native_source_sha256'])
+            else:
+                p.require(record['native_execution'] is None, 'Flux cannot claim a native Megatron projection')
+            if is_quantized(arm):
                 p.require(all(state[k] == expected_calls for k in
                           ('encode_calls', 'decode_calls', 'all_to_all_calls', 'wait_calls'))
                           and state['caller_stream'] == state['current_stream'] == row['stream']
@@ -201,7 +265,12 @@ def validate(root, arm, plan, worker):
                           and state['send_split_bytes'] == state['receive_split_bytes'] ==
                           [0 if peer == rank else p.PACKET_BYTES for peer in range(8)],
                           'Missing completed current-stream encode/exchange/wait/decode evidence')
-            required = {'gemm', 'operator'} | (set() if arm == p.ARMS[0] else
+            else:
+                p.require(state['quantization'] == 'none' and state['collective'] == 'reduce_scatter_tensor'
+                          and state['dtype'] == 'bfloat16'
+                          and all(state[k] == 0 for k in ('encode_calls', 'decode_calls', 'all_to_all_calls')),
+                          'Uncompressed operator unexpectedly invoked a codec')
+            required = {'gemm', 'operator'} | (set() if not is_quantized(arm) else
                 {'encode', 'exchange', 'decode', 'decode_reduce'})
             p.require(set(record['timings']) == required, 'Missing component timings')
             for value in record['timings'].values():
@@ -215,8 +284,7 @@ def run(args):
     import open_compress_build as builder
     import open_compress_codec as codec
     import open_compress_profile as profile
-    from op1_a_probe import loaded_libraries, validate_mapping
-    from flux_tensor_taco import FluxTensorTaco
+    from op1_a_probe import validate_mapping
     rank = int(os.environ['LOCAL_RANK'])
     record = dict(protocol=p.PROTOCOL, arm=args.arm, rank=rank, run_id=os.environ['H100_RUN_ID'],
         completed=False, entrypoint_sha256=p.sha(__file__),
@@ -233,28 +301,45 @@ def run(args):
                           allow_tf32=torch.backends.cuda.matmul.allow_tf32,
                           allow_bf16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction))
         dist.init_process_group('nccl', timeout=timedelta(seconds=300))
+        if is_megatron(args.arm):
+            from megatron.core import parallel_state
+            from open_compress_megatron import MegatronProjection
+            parallel_state.initialize_model_parallel(tensor_model_parallel_size=8)
+            def make_operator(k):
+                return MegatronProjection(parallel_state.get_tensor_model_parallel_group(),
+                    2048, 4096, k, args.arm, retain_partial=True)
+        else:
+            from flux_tensor_taco import FluxTensorTaco
+            def make_operator(k):
+                return FluxTensorTaco(dist.group.WORLD, 2048, 4096, k)
         stream = torch.cuda.Stream()
         record.update(stream=int(stream.cuda_stream), default_stream=int(torch.cuda.default_stream().cuda_stream), roles={})
         native = builder.native_root(args.build, args.arm)
-        sorted_lib = None
-        if args.arm == p.ARMS[2]:
+        sorted_lib = mapping_function = None
+        if args.arm in ('flux-int8-interleaved', 'flux-int8-remote-first'):
             sorted_lib = ctypes.CDLL(str(native/'libflux_cuda.so'))
-            sorted_lib.op1_a_sorted_mapping.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
-            sorted_lib.op1_a_sorted_mapping.restype = ctypes.c_int
-        with torch.cuda.stream(stream):
-            record['codec_cases'] = codec_cases(rank) if args.arm != p.ARMS[0] else None
+            entry = 'op1_a_sorted_mapping' if args.arm == 'flux-int8-interleaved' else 'oc_remote_first_mapping'
+            mapping_function = getattr(sorted_lib, entry)
+            mapping_function.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            mapping_function.restype = ctypes.c_int
+        # All operator variants measure forward-only work without retaining an
+        # autograd graph. Native weights still require grad, preserving the
+        # native RowParallelLinear trainable-weight branch and kernel choice.
+        with torch.no_grad(), torch.cuda.stream(stream):
+            record['operator_grad_enabled'] = torch.is_grad_enabled()
+            record['codec_cases'] = codec_cases(rank) if is_quantized(args.arm) else None
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             for role, k in ROLES.items():
-                op = FluxTensorTaco(dist.group.WORLD, 2048, 4096, k)
+                op = make_operator(k)
                 op.profile = op.tensor_codec.profile = False
                 mapping = None
                 if sorted_lib is not None:
                     mapped = torch.empty((512, 4), dtype=torch.int32, device='cuda')
-                    p.require(sorted_lib.op1_a_sorted_mapping(mapped.data_ptr(), k, stream.cuda_stream) == 0,
+                    p.require(mapping_function(mapped.data_ptr(), k, stream.cuda_stream) == 0,
                               'Actual registered GEMM mapping probe failed')
                     mapping = mapped.cpu().tolist()
-                    validate_mapping(mapping, rank)
+                    (validate_mapping if args.arm == 'flux-int8-interleaved' else validate_remote_first_mapping)(mapping, rank)
                     del mapped
                 result = dict(k_local=k, mapping=mapping, cases={})
                 for case in CASES:
@@ -271,12 +356,12 @@ def run(args):
                     independent = torch.matmul(x, w.t())
                     delta = (partial.float()-independent.float()).norm()/independent.float().norm().clamp_min(1e-20)
                     reference = torch.empty_like(actual)
-                    dist.reduce_scatter_tensor(reference, independent, group=dist.group.WORLD)
+                    dist.reduce_scatter_tensor(reference, independent, group=op.tensor_codec.group)
                     relative = ((actual.float()-reference.float()).norm()/reference.float().norm().clamp_min(1e-20)).item()
                     value = dict(input_sha256=tensor_sha(x), weight_sha256=tensor_sha(w),
                         finite_partial=True, gemm_relative_l2=delta.item(), relative_l2_vs_bf16=relative,
                         passed=relative <= .05 and delta.item() <= .01)
-                    if args.arm != p.ARMS[0]:
+                    if is_quantized(args.arm):
                         c = op.tensor_codec
                         value.update(encode_bitwise=torch.equal(c.tx, codec.reference_packets(partial, rank)),
                             decode_bitwise=torch.equal(codec.decode(c.rx), codec.reference_decode(c.rx)),
@@ -300,32 +385,34 @@ def run(args):
                 p.require(retained and changed, 'Output storage reused/overwritten or changed data was not consumed')
                 result.update(retention_passed=True, retained_outputs=6, reuse_calls=7,
                               changed_call_output_different=changed, delayed_rank=7, delay_seconds=.02,
-                              transport=op.tensor_codec.state())
+                              transport=op.tensor_codec.state(),
+                              native_execution=op.state() if is_megatron(args.arm) else None)
                 del outputs, copies, new_output, actual, partial, independent, reference, delta, generator
-                if args.arm != p.ARMS[0]:
+                if is_quantized(args.arm):
                     del c, raw
-                stages = {'gemm': lambda: op.gemm.forward(x, w, output_buf=op.partial, fast_accum=False),
+                stages = {'gemm': (lambda: op.gemm_only(x, w)) if is_megatron(args.arm) else
+                          (lambda: op.gemm.forward(x, w, output_buf=op.partial, fast_accum=False)),
                           'operator': lambda: op.forward(x, w)}
                 result['timings'] = {name: measure(fn) for name,fn in stages.items()}
-                if args.arm != p.ARMS[0]:
+                if is_quantized(args.arm):
                     c = op.tensor_codec
                     decoded = torch.empty((7, 256, 4096), dtype=torch.bfloat16, device='cuda')
                     reduced = torch.empty((256, 4096), dtype=torch.bfloat16, device='cuda')
                     def exchange():
                         dist.all_to_all_single(c.rx, c.tx, output_split_sizes=c.splits,
-                            input_split_sizes=c.splits, async_op=True).wait()
+                            input_split_sizes=c.splits, group=c.group, async_op=True).wait()
                     stages = dict(encode=lambda: codec.encode(op.partial, c.tx, rank), exchange=exchange,
                         decode=lambda: codec.decode(c.rx, decoded),
                         decode_reduce=lambda: codec.decode_reduce(c.rx, op.partial, reduced, rank))
                     result['timings'].update({name: measure(fn) for name,fn in stages.items()})
-                if args.arm != p.ARMS[0]:
+                if is_quantized(args.arm):
                     del decoded, reduced, c
                 record['roles'][role] = result
+                close_operator(op, args.arm)
                 del op, x, w, stages
-                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             # A separate instrumented invocation; never pooled into operator timing.
-            operators = {role: FluxTensorTaco(dist.group.WORLD, 2048, 4096, k) for role,k in ROLES.items()}
+            operators = {role: make_operator(k) for role,k in ROLES.items()}
             # Warm lazy GEMM scratch/collective state before capture, using the
             # same stream as profiling. Constructors do not warm GEMM kernels.
             inputs = {role: (torch.zeros((2048, k), dtype=torch.bfloat16, device='cuda'),
@@ -337,7 +424,7 @@ def run(args):
             with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA]) as prof:
                 for role, op in operators.items():
-                    with torch.profiler.record_function(f'scope.{role}.flux_tensor'):
+                    with torch.profiler.record_function(projection_scope(args.arm, role)):
                         op.forward(*inputs[role])
                 torch.cuda.synchronize()
             trace = args.out/f'rank{rank}-profile.json'
@@ -348,11 +435,15 @@ def run(args):
                 output.write(trace.read_bytes())
             trace.unlink()
             record['profile_sha256'] = p.sha(str(trace)+'.gz')
+            for op in operators.values():
+                close_operator(op, args.arm)
         record['libraries'] = loaded_libraries(native)
         import megatron_taco
         record['codec_library'] = megatron_taco.loaded_library()
         record['completed'] = True
         p.write(args.out/f'rank{rank}.json', record)
+        if is_megatron(args.arm):
+            parallel_state.destroy_model_parallel()
         dist.destroy_process_group()
     except BaseException as exc:
         record['error'] = f'{type(exc).__name__}: {exc}'

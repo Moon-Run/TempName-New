@@ -10,21 +10,44 @@ import tarfile
 
 from rtx5090_loader import HERE, REPO
 import op1_a_swizzle
+import open_compress_remote_first as remote_first
 from common import MEGATRON_COMMIT, read, write, require, sha, verify_files, replace_once
 
-PROTOCOL = 'rtx5090-open-compress-native-sm120-v1'
+PROTOCOL = 'rtx5090-open-compress-native-sm120-v2'
+LEGACY_PROTOCOL = 'rtx5090-open-compress-native-sm120-v1'
 MANIFEST = 'open-compress-build.json'
-ARMS = ('flux-bf16', 'flux-int8', 'flux-int8-interleaved')
-VARIANTS = ('flux-original', 'flux-interleaved')
+LEGACY_ARMS = ('flux-bf16', 'flux-int8', 'flux-int8-interleaved')
+FLUX_ARMS = LEGACY_ARMS + ('flux-int8-remote-first',)
+ARMS = LEGACY_ARMS + ('megatron-bf16', 'megatron-int8', 'flux-int8-remote-first')
+LEGACY_VARIANTS = ('flux-original', 'flux-interleaved')
+VARIANTS = LEGACY_VARIANTS + ('flux-remote-first',)
+# Exact released three-arm recipe at d34f914e055a9981752954f356ecc52c841f0543.
+# Only these old inputs are admitted. Every binary/source/dependency remains
+# verified; the old manifest and files are never rewritten for an overlay.
+LEGACY_INPUTS = {
+    'open_compress_build.py': 'b3303f686112f2236f132656f50987cfb92ad351912985bb975fd722c45de792',
+    'open_compress_codec.cu': '2f6f928d43be75ae42c5fa846d9b67e612ad0d46732373ece39aa7eec4eb6a38',
+    'open_compress_codec.py': 'b5e9f3aef8c02130eeeed2ed94e06c67806a980c4643928d43e1d38f1ce40b62',
+    'gemm_only_generator.cc': '34425a1a8d9d861ca682600b24de78ce4b90557dc1f47ba2630e158b9307c0f7',
+    'op1_a_swizzle.py': 'cca9e802d3c51441a5c5cd7a29e49df7400b32db026aa19bd6e0d63cc3e0f81f',
+    'op1_a_swizzle.hpp': '40c1e5c02bf89cfd9d7fa6719d0a0db2b105ad61bc2d62db793af6037bc720eb',
+    'op1_a_swizzle_probe.cuh': '19df80378b736b08de49e0e60ad6b82bff428d3e98fb47d9cb30045047b9aef4',
+}
 
 
 def native_root(root, arm):
     require(arm in ARMS, 'Unknown open compression arm')
+    if arm.startswith('megatron-'):
+        return None
+    if arm == 'flux-int8-remote-first':
+        return Path(root).resolve()/'flux-remote-first'
     return Path(root).resolve()/('flux-interleaved' if arm.endswith('-interleaved') else 'flux-original')
 
 
 def libraries(root, arm):
     native = native_root(root, arm)
+    if native is None:
+        return {}
     return {name: dict(path=str((native/name).resolve()), sha256=sha(native/name))
             for name in ('libflux_cuda.so', 'libflux_cuda_ths_op.so')}
 
@@ -36,8 +59,27 @@ def codec_library(root):
 
 def inputs():
     names = ('open_compress_build.py', 'open_compress_codec.cu', 'open_compress_codec.py',
-             'gemm_only_generator.cc', 'op1_a_swizzle.py', 'op1_a_swizzle.hpp', 'op1_a_swizzle_probe.cuh')
+             'gemm_only_generator.cc', 'op1_a_swizzle.py', 'op1_a_swizzle.hpp', 'op1_a_swizzle_probe.cuh',
+             'open_compress_remote_first.py', 'open_compress_remote_first.hpp',
+             'open_compress_remote_first_probe.cuh')
     return {name: sha(HERE/name) for name in names}
+
+
+def has_remote_first(root):
+    record = read(Path(root)/MANIFEST)
+    require(record['protocol'] in (PROTOCOL, LEGACY_PROTOCOL), 'Unknown build protocol')
+    return record['protocol'] == PROTOCOL
+
+
+def verify_inputs(record):
+    current = inputs()
+    if record['protocol'] == LEGACY_PROTOCOL:
+        require(record['inputs'] == LEGACY_INPUTS, 'Unknown legacy open compression recipe; rebuild explicitly')
+        require(all(current[name] == expected for name, expected in LEGACY_INPUTS.items()
+                    if name not in ('open_compress_build.py', 'open_compress_codec.py')),
+                'Legacy CUDA/generator/swizzle inputs no longer match current implementation')
+    else:
+        require(record['inputs'] == current, 'Open compression build inputs changed')
 
 
 def dependency_identity():
@@ -82,33 +124,74 @@ def _snapshot(destination):
     (destination/'3rdparty/cutlass').symlink_to(REPO/'3rdparty/cutlass', target_is_directory=True)
 
 
-def prepare(root):
+def _copy_registered(source, destination, hashes):
+    """Copy only verified original inputs, never build outputs or generated code."""
+    source, destination = Path(source), Path(destination)
+    verify_files(source, hashes)
+    for name in hashes:
+        path = destination/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source/name, path)
+    (destination/'3rdparty').mkdir(exist_ok=True)
+    (destination/'3rdparty/cutlass').symlink_to(REPO/'3rdparty/cutlass', target_is_directory=True)
+
+
+def prepare(root, reference=None):
     root = Path(root).resolve()
     require(not root.exists(), 'Use a fresh open compression build directory')
     source_inputs = inputs()
     dependencies = dependency_identity()
+    parent = None
+    if reference is not None:
+        reference = Path(reference).resolve()
+        parent = verify(reference, True)
+        require(parent['protocol'] == LEGACY_PROTOCOL,
+                'Overlay is only needed for a verified three-arm build; reuse a complete v2 build directly')
     root.mkdir(parents=True)
-    variants = {}
+    variants, files, registrations = {}, {}, {}
     for name in VARIANTS:
         destination = root/name
-        _snapshot(destination)
-        updates = source_overrides(destination)
-        if name == 'flux-interleaved':
-            updates.update(op1_a_swizzle.overrides(destination))
+        if parent is not None and name in LEGACY_VARIANTS:
+            destination.symlink_to(reference/name, target_is_directory=True)
+            variants[name] = parent['variants'][name]
+            registrations[name] = parent['registrations'][name]
+            continue
+        if parent is not None:
+            original = parent['variants']['flux-original']['source_sha256']
+            _copy_registered(reference/'flux-original', destination, original)
+            updates = remote_first.overrides(destination)
+        else:
+            _snapshot(destination)
+            updates = source_overrides(destination)
+            if name == 'flux-interleaved':
+                updates.update(op1_a_swizzle.overrides(destination))
+            elif name == 'flux-remote-first':
+                updates.update(remote_first.overrides(destination))
         for path, content in updates.items():
-            (destination/path).write_text(content)
+            target = destination/path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
         variants[name] = dict(source_sha256={str(path.relative_to(destination)): sha(path)
             for path in sorted(destination.rglob('*')) if path.is_file() and not path.is_symlink()},
             modified_files=sorted(updates))
-    (root/'codec').mkdir()
-    shutil.copy2(HERE/'open_compress_codec.cu', root/'codec/open_compress_codec.cu')
+    extra = {}
+    if parent is not None:
+        for name in ('codec', 'megatron'):
+            (root/name).symlink_to(reference/name, target_is_directory=True)
+        prefixes = tuple(name+'/' for name in (*LEGACY_VARIANTS, 'codec', 'megatron'))
+        files = {name: value for name, value in parent['files'].items() if name.startswith(prefixes)}
+        extra.update(reference=dict(root=str(reference), manifest_sha256=sha(reference/MANIFEST)),
+                     megatron=parent['megatron'], nccl_files=parent['nccl_files'])
+    else:
+        (root/'codec').mkdir()
+        shutil.copy2(HERE/'open_compress_codec.cu', root/'codec/open_compress_codec.cu')
     write(root/MANIFEST, dict(protocol=PROTOCOL, status='prepared', actual_arch='sm120', gpu_validated=False,
-        arms=list(ARMS), variants=variants, inputs=source_inputs, files={}, registrations={},
+        arms=list(FLUX_ARMS), variants=variants, inputs=source_inputs, files=files, registrations=registrations,
         source_commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip(),
         submodules=dependencies,
         codec_source_sha256=sha(root/'codec/open_compress_codec.cu'),
         taco_build_required=False, taco_runtime_required=False, peer_memory_required=False,
-        gemm_schedule='Sm89/RTX5090 GemmV2 StreamkSK BF16-RCR 128x128x32 stage3; SM120 cubin'))
+        gemm_schedule='Sm89/RTX5090 GemmV2 StreamkSK BF16-RCR 128x128x32 stage3; SM120 cubin', **extra))
     verify(root)
     return root
 
@@ -116,29 +199,52 @@ def prepare(root):
 def verify(root, built=False):
     root = Path(root).resolve()
     record = read(root/MANIFEST)
-    require(record['protocol'] == PROTOCOL and record['actual_arch'] == 'sm120'
-            and record['arms'] == list(ARMS) and set(record['variants']) == set(VARIANTS),
+    legacy = record['protocol'] == LEGACY_PROTOCOL
+    variants = LEGACY_VARIANTS if legacy else VARIANTS
+    require(record['protocol'] in (PROTOCOL, LEGACY_PROTOCOL) and record['actual_arch'] == 'sm120'
+            and record['arms'] == list(LEGACY_ARMS if legacy else FLUX_ARMS)
+            and set(record['variants']) == set(variants),
             'Wrong open compression build identity')
-    require(record['inputs'] == inputs(), 'Open compression build inputs changed')
+    verify_inputs(record)
     require(record['submodules'] == dependency_identity(), 'Dependency commit/worktree changed')
+    if record.get('reference') is not None:
+        require(not legacy, 'Legacy build cannot refer to an overlay')
+        reference = Path(record['reference']['root'])
+        require(reference.is_absolute() and reference != root
+                and sha(reference/MANIFEST) == record['reference']['manifest_sha256'], 'Parent build identity changed')
+        require(read(reference/MANIFEST)['protocol'] == LEGACY_PROTOCOL, 'Overlay parent cannot be another overlay')
+        parent = verify(reference, True)
+        require(parent['protocol'] == LEGACY_PROTOCOL, 'Overlay parent must be the frozen three-arm build')
+        for name in (*LEGACY_VARIANTS, 'codec', 'megatron'):
+            require((root/name).is_symlink() and (root/name).resolve() == (reference/name).resolve(),
+                    'Read-only inherited build link changed: '+name)
+        require(all(record['variants'][name] == parent['variants'][name]
+                    and record['registrations'][name] == parent['registrations'][name] for name in LEGACY_VARIANTS),
+                'Inherited Flux build metadata changed')
+        inherited = {name: value for name, value in parent['files'].items() if name.startswith(
+            tuple(name+'/' for name in (*LEGACY_VARIANTS, 'codec', 'megatron')))}
+        require(all(record['files'].get(name) == value for name, value in inherited.items())
+                and record['megatron'] == parent['megatron'] and record['nccl_files'] == parent['nccl_files'],
+                'Inherited codec/Megatron/binary identity changed')
     require(record['taco_build_required'] is False and record['taco_runtime_required'] is False,
             'Open compression must not depend on TACO')
     require(sha(root/'codec/open_compress_codec.cu') == record['codec_source_sha256']
             == record['inputs']['open_compress_codec.cu'], 'Codec source changed')
-    for name in VARIANTS:
+    for name in variants:
         link = root/name/'3rdparty/cutlass'
         require(link.is_symlink() and link.resolve() == (REPO/'3rdparty/cutlass').resolve(),
                 'CUTLASS dependency symlink changed')
         verify_files(root/name, record['variants'][name]['source_sha256'])
     verify_files(root, record['files'])
     if built:
-        require(record['status'] == 'built' and set(record['registrations']) == set(VARIANTS),
-                'Compile both GemmOnly variants before use')
-        for name in VARIANTS:
+        require(record['status'] == 'built' and set(record['registrations']) == set(variants),
+                'Compile every required GemmOnly variant before use')
+        for name in variants:
             item = record['registrations'][name]
             text = (root/item['path']).read_text()
             require(sha(root/item['path']) == item['sha256'], 'Changed actual GemmOnly registration')
-            original = op1_a_swizzle.original_registration(text) if name == 'flux-interleaved' else text
+            original = (op1_a_swizzle.original_registration(text) if name == 'flux-interleaved' else
+                        remote_first.original_registration(text) if name == 'flux-remote-first' else text)
             require(hashlib.sha256(original.encode()).hexdigest() == item['generated_sha256']
                     and '_streamksk_' in original.lower() and '_streamkdp_' not in original.lower(),
                     'Original StreamK registration changed')
@@ -150,7 +256,9 @@ def verify(root, built=False):
             require(sha(name) == expected, 'NCCL dependency changed')
         from native_exports import verify_native_exports
         verify_native_exports(root/'flux-interleaved/libflux_cuda.so', op1_a_swizzle.EXPORTS)
-        for arm in ARMS:
+        if not legacy:
+            verify_native_exports(root/'flux-remote-first/libflux_cuda.so', remote_first.EXPORTS)
+        for arm in LEGACY_ARMS if legacy else FLUX_ARMS:
             libraries(root, arm)
         codec_library(root)
     return record
@@ -201,9 +309,15 @@ def compile_build(root, megatron, cuda_home, jobs=2):
     root, megatron, cuda_home = map(lambda path: Path(path).resolve(), (root, megatron, cuda_home))
     record = verify(root)
     require(record['status'] == 'prepared' and type(jobs) is int and jobs > 0, 'Compile a fresh prepared build')
-    megatron_check(megatron)
     environment = environment_identity(cuda_home)
     require(record['submodules'] == dependency_identity(), 'Build dependency changed')
+    require(record['protocol'] == PROTOCOL, 'Do not compile or mutate a legacy build; create a new overlay')
+    reference = Path(record['reference']['root']) if record.get('reference') else None
+    if reference is None:
+        megatron_check(megatron)
+    else:
+        parent = verify(reference, True)
+        require(environment == parent['environment'], 'Overlay must use the same Python/CUDA ABI as its parent')
     record.update(status='building', environment=environment, commands=[])
     write(root/MANIFEST, record)
     env = dict(os.environ, CUDA_VISIBLE_DEVICES='', CUDA_HOME=str(cuda_home), CUDACXX=str(cuda_home/'bin/nvcc'),
@@ -224,16 +338,19 @@ def compile_build(root, megatron, cuda_home, jobs=2):
             subprocess.run(command, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT, check=True)
 
     try:
-        record['megatron'] = archive_megatron(megatron, root/'megatron')
-        run(['make', '-C', root/'megatron/megatron/core/datasets'])
-        nccl = root/'nccl-source'
-        shutil.copytree(REPO/'3rdparty/nccl', nccl, ignore=shutil.ignore_patterns('.git', 'build'))
-        run(['make', f'-j{jobs}', 'src.build', 'NVCC_GENCODE=-gencode=arch=compute_120,code=sm_120'], nccl)
-        nccl = nccl/'build'
+        if reference is None:
+            record['megatron'] = archive_megatron(megatron, root/'megatron')
+            run(['make', '-C', root/'megatron/megatron/core/datasets'])
+            nccl = root/'nccl-source'
+            shutil.copytree(REPO/'3rdparty/nccl', nccl, ignore=shutil.ignore_patterns('.git', 'build'))
+            run(['make', f'-j{jobs}', 'src.build', 'NVCC_GENCODE=-gencode=arch=compute_120,code=sm_120'], nccl)
+            nccl = nccl/'build'
+        else:
+            nccl = reference/'nccl-source/build'
         require((nccl/'lib/libnccl_static.a').is_file(), 'NCCL static build missing')
         env['NCCL_ROOT'] = str(nccl)
         record['nccl_files'] = {str(nccl/name): sha(nccl/name) for name in ('include/nccl.h', 'lib/libnccl_static.a')}
-        for name in VARIANTS:
+        for name in (('flux-remote-first',) if reference else VARIANTS):
             source = root/name
             run(['cmake', '-S', source, '-B', source/'build', '-DCUDAARCHS=120', '-DGPU_SM_CORES=170',
                  '-DENABLE_NVSHMEM=OFF', '-DWITH_PROTOBUF=OFF', '-DBUILD_TEST=OFF', '-DCMAKE_BUILD_TYPE=Release',
@@ -247,6 +364,8 @@ def compile_build(root, megatron, cuda_home, jobs=2):
             require('_streamksk_' in original.lower() and '_streamkdp_' not in original.lower(), 'Preserve original Flux StreamkSK')
             if name == 'flux-interleaved':
                 path.write_text(op1_a_swizzle.registration_source(original))
+            elif name == 'flux-remote-first':
+                path.write_text(remote_first.registration_source(original))
             record['registrations'][name] = dict(path=str(path.relative_to(root)), sha256=sha(path),
                 generated_sha256=hashlib.sha256(original.encode()).hexdigest())
             run(['cmake', '--build', source/'build', '--parallel', jobs])
@@ -257,11 +376,12 @@ def compile_build(root, megatron, cuda_home, jobs=2):
             for path in list((source/'python').rglob('*')) + [source/'libflux_cuda.so', source/'libflux_cuda_ths_op.so', path]:
                 if path.is_file() and '__pycache__' not in path.parts:
                     record['files'][str(path.relative_to(root))] = sha(path)
-        run([cuda_home/'bin/nvcc', '-std=c++17', '-O3', '-shared', '-Xcompiler=-fPIC',
-             '-gencode=arch=compute_120,code=sm_120', root/'codec/open_compress_codec.cu',
-             '-o', root/'codec/libopen_compress.so'])
-        record['files']['codec/libopen_compress.so'] = sha(root/'codec/libopen_compress.so')
-        record['files'].update({str(path.relative_to(root)): sha(path) for path in (root/'megatron').rglob('*') if path.is_file()})
+        if reference is None:
+            run([cuda_home/'bin/nvcc', '-std=c++17', '-O3', '-shared', '-Xcompiler=-fPIC',
+                 '-gencode=arch=compute_120,code=sm_120', root/'codec/open_compress_codec.cu',
+                 '-o', root/'codec/libopen_compress.so'])
+            record['files']['codec/libopen_compress.so'] = sha(root/'codec/libopen_compress.so')
+            record['files'].update({str(path.relative_to(root)): sha(path) for path in (root/'megatron').rglob('*') if path.is_file()})
         require(len(list((root/'megatron/megatron/core/datasets').glob('helpers*.so'))) == 1, 'Missing Megatron dataset helper')
         record['status'] = 'built'
         write(root/MANIFEST, record)

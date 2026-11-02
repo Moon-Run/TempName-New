@@ -1,4 +1,4 @@
-"""Three full Megatron workers sharing frozen training/backward/optimizer ASTs."""
+"""Six full Megatron workers sharing frozen training/backward/optimizer ASTs."""
 import hashlib
 from pathlib import Path
 import shutil
@@ -6,8 +6,10 @@ import shutil
 from rtx5090_loader import HERE, H100, REPO, load
 from common import read, write, require, sha, replace_once
 
-PROTOCOL = 'rtx5090-open-compress-int8-three-arm-v1'
-ARMS = ('flux-bf16', 'flux-int8', 'flux-int8-interleaved')
+PROTOCOL = 'rtx5090-open-compress-int8-six-arm-v2'
+ARMS = ('flux-bf16', 'flux-int8', 'flux-int8-interleaved', 'megatron-bf16', 'megatron-int8', 'flux-int8-remote-first')
+MEGATRON_ARMS = ('megatron-bf16', 'megatron-int8')
+BF16_ARMS = ('flux-bf16', 'megatron-bf16')
 SHAPES = {'attn': [2048, 4096, 4096], 'mlp': [2048, 4096, 16384]}
 base = load('sources')
 p = load('protocol')
@@ -15,22 +17,29 @@ p = load('protocol')
 
 def implementation(arm):
     require(arm in ARMS, 'Unknown open compression arm')
-    return dict(protocol=PROTOCOL, producer='flux-gemmonly-sm89-v2-sm120', gemm_schedule='StreamkSK',
-        quantization='none' if arm == 'flux-bf16' else 'all_remote_block_int8_128_fp32_scale',
-        interleaved=arm.endswith('-interleaved'), arrival=False, selective=False, calibration_used=False,
-        cta_order='rank-rotated-destination-interleaved' if arm.endswith('-interleaved') else 'original-Flux-GemmOnly',
-        may_change_streamk_reduction_assignment=arm.endswith('-interleaved'),
-        collective='NCCL-BF16-ReduceScatter' if arm == 'flux-bf16' else 'NCCL-byte-AllToAll',
-        receiver='NCCL' if arm == 'flux-bf16' else 'block-int8-decode-source-ordered-bf16-fold',
-        owns_output=True, owns_configuration=True, taco_runtime=False, original_peer_overlap_preserved=False)
+    native, bf16 = arm in MEGATRON_ARMS, arm in BF16_ARMS
+    order = ('rank-rotated-destination-interleaved' if arm == 'flux-int8-interleaved' else
+             'remote-first-local-last' if arm == 'flux-int8-remote-first' else
+             'original-Megatron' if native else 'original-Flux-GemmOnly')
+    return dict(protocol=PROTOCOL, producer='native-megatron-linear' if native else 'flux-gemmonly-sm89-v2-sm120',
+        gemm_schedule='original-Megatron' if native else 'StreamkSK',
+        quantization='none' if bf16 else 'all_remote_block_int8_128_fp32_scale',
+        interleaved=arm == 'flux-int8-interleaved', remote_first=arm == 'flux-int8-remote-first',
+        arrival=False, selective=False, calibration_used=False, cta_order=order,
+        may_change_streamk_reduction_assignment=arm in ('flux-int8-interleaved', 'flux-int8-remote-first'),
+        collective='NCCL-BF16-ReduceScatter' if bf16 else 'NCCL-byte-AllToAll',
+        receiver='NCCL' if bf16 else 'block-int8-decode-source-ordered-bf16-fold',
+        owns_output=True, owns_configuration=True, taco_runtime=False, original_peer_overlap_preserved=False,
+        native_row_forward=native, native_linear_backward=native, native_rs_backward=native)
 
 
 def definition(arm):
-    return dict(policy=arm, family='flux_tensor', scope='attn_mlp', roles=list(SHAPES),
-        implementation='rtx5090-open-compress-'+arm, workspace='tensor', output_clone=False,
-        base='original', order='interleaved' if arm.endswith('-interleaved') else 'original',
-        arrival=False, interleaved=arm.endswith('-interleaved'),
-        quantization='none' if arm == 'flux-bf16' else 'all_remote', experiment=implementation(arm))
+    return dict(policy=arm, family='megatron' if arm in MEGATRON_ARMS else 'flux_tensor',
+        scope='attn_mlp', roles=list(SHAPES), implementation='rtx5090-open-compress-'+arm,
+        workspace='tensor', output_clone=False, base='original',
+        order='interleaved' if arm == 'flux-int8-interleaved' else 'remote-first' if arm == 'flux-int8-remote-first' else 'original',
+        arrival=False, interleaved=arm == 'flux-int8-interleaved',
+        quantization='none' if arm in BF16_ARMS else 'all_remote', experiment=implementation(arm))
 
 
 def selection_metadata():
@@ -39,7 +48,7 @@ def selection_metadata():
 
 
 def routing_source():
-    prefix = f'PROTOCOL = {PROTOCOL!r}\nPOLICIES = {ARMS!r}\nSHAPES = {SHAPES!r}\n'
+    prefix = f'PROTOCOL = {PROTOCOL!r}\nPOLICIES = {ARMS!r}\nMEGATRON_ARMS = {MEGATRON_ARMS!r}\nSHAPES = {SHAPES!r}\n'
     definitions = {arm: definition(arm) for arm in ARMS}
     return prefix + f'DEFINITIONS = {definitions!r}\n' + '''
 def require(ok, message):
@@ -51,13 +60,15 @@ def definition(policy):
 
 def is_native(policy):
     definition(policy)
-    return False
+    return policy in MEGATRON_ARMS
 
 def is_flux_tensor(policy):
     definition(policy)
-    return True
+    return policy not in MEGATRON_ARMS
 
-is_tensor = is_flux_tensor
+def is_tensor(policy):
+    definition(policy)
+    return True
 
 def is_fused_v2(policy):
     definition(policy)
@@ -69,7 +80,7 @@ def is_original(policy):
 
 def needs_mapping(policy):
     definition(policy)
-    return policy.endswith('-interleaved')
+    return policy in ('flux-int8-interleaved', 'flux-int8-remote-first')
 
 def module_role(name):
     for role, suffix in (('attn', '.self_attention.linear_proj'), ('mlp', '.mlp.linear_fc2')):
@@ -83,7 +94,8 @@ def enabled(policy, name):
 
 def route(policy, name):
     enabled(policy, name)
-    return 'flux_tensor'
+    return ('megatron_native' if policy == 'megatron-bf16' else
+            'megatron_int8' if policy == 'megatron-int8' else 'flux_tensor')
 
 def codec_placement(policy):
     definition(policy)
@@ -113,23 +125,23 @@ def selection_entry(*args):
 
 
 def reference_source(arm='flux-int8'):
-    if arm == 'flux-bf16':
+    if arm in BF16_ARMS:
         return '# No compression oracle in the BF16 arm.\n'
     return '"""Oracle implementation is independent Torch arithmetic in the hashed codec module."""\nfrom megatron_taco import reference_roundtrip\n'
 
 
 def codec_source(arm):
     require(arm in ARMS, 'Unknown compression arm')
-    if arm == 'flux-bf16':
+    if arm in BF16_ARMS:
         return (HERE/'flux_baseline_bf16.py').read_text()
     return (HERE/'open_compress_codec.py').read_text()
 
 
 def codec_identity(arm):
-    return dict(implementation='none-nccl-bf16' if arm == 'flux-bf16' else 'open-block-int8-128-fp32-scale-v1',
+    return dict(implementation='none-nccl-bf16' if arm in BF16_ARMS else 'open-block-int8-128-fp32-scale-v1',
         source_sha256=hashlib.sha256(codec_source(arm).encode()).hexdigest(),
         reference_sha256=hashlib.sha256(reference_source(arm).encode()).hexdigest(),
-        cuda_source_sha256=None if arm == 'flux-bf16' else sha(HERE/'open_compress_codec.cu'),
+        cuda_source_sha256=None if arm in BF16_ARMS else sha(HERE/'open_compress_codec.cu'),
         taco_runtime=False)
 
 
@@ -140,6 +152,8 @@ def taco_source(arm):
 import json
 import torch
 import torch.distributed as dist
+
+BF16_ARMS = ('flux-bf16', 'megatron-bf16')
 
 class TacoForward:
     def __init__(self, group, m, n, k_local, policy, role):
@@ -160,7 +174,7 @@ def check_taco_output(partial, actual, group, mask=None):
     rank, world = dist.get_rank(group), dist.get_world_size(group)
     bf16 = torch.empty_like(actual)
     dist.reduce_scatter_tensor(bf16, partial.contiguous(), group=group)
-    if arm == 'flux-bf16':
+    if arm in BF16_ARMS:
         coded = bf16
     else:
         from megatron_taco import reference_roundtrip
@@ -179,7 +193,7 @@ def check_taco_output(partial, actual, group, mask=None):
         protocol_relative_l2=(actual.float()-coded.float()).norm().item()/denominator,
         budget_vs_bf16=.05, budget_vs_codec=.01,
         reference='torch_bf16_matmul_nccl_rs_and_independent_block_int8_source_fold',
-        quantization='none' if arm == 'flux-bf16' else 'all_remote_block_int8')
+        quantization='none' if arm in BF16_ARMS else 'all_remote_block_int8')
     error['passed'] = bool(torch.isfinite(actual).all()) and error['relative_l2'] <= .05 and error['protocol_relative_l2'] <= .01
     assert error['passed'], error
     return error
@@ -188,6 +202,8 @@ def check_taco_output(partial, actual, group, mask=None):
 
 def adapter_source(arm):
     require(arm in ARMS, 'Unknown compression arm')
+    if arm in MEGATRON_ARMS:
+        return 'from open_compress_megatron import Adapter\n'
     return base.adapter_source('flux-basic')
 
 
@@ -203,7 +219,8 @@ def worker_source(arm):
         "                             if PLAN['arm'] != 'flux-basic' else {})",
         "report['rtx5090_transport'] = {}\n"
         "report['compression_states'] = {name: op.codec.tensor_codec.state() for name, op in adapter.scope_ops.items()}\n"
-        "report['open_compress_implementation'] = PLAN['open_compress_implementation']")
+        "report['open_compress_implementation'] = PLAN['open_compress_implementation']\n"
+        "report['native_execution'] = {name: op.state() for name, op in adapter.scope_ops.items()} if is_native(POLICY) else {}")
     base.validate_worker(text)
     return text
 
@@ -215,7 +232,7 @@ def configuration(arm, selection, communication, codec=None):
         open_compress_implementation=implementation(arm), double_buffered=False,
         role_plan_sha256={arm: {'attn': None, 'mlp': None}},
         scope='RTX5090 TP8 full GPT6.7B step; open block INT8; no arrival or selective quantization',
-        codec_identity=codec_identity(arm), codec_library=None if arm == 'flux-bf16' else codec)
+        codec_identity=codec_identity(arm), codec_library=None if arm in BF16_ARMS else codec)
     cfg['cases'][0]['name'] = 'rtx5090-open-compress'
     return cfg
 
@@ -242,13 +259,19 @@ def prepare_workers(build, out, plan):
             shutil.copy2(source, scripts/name)
         (scripts/'common.py').write_text('def require(ok, message):\n    if not ok: raise ValueError(message)\n')
         write(scripts/'selection-plan.json', selection)
-        codec = None if arm == 'flux-bf16' else builder.codec_library(build)
+        codec = None if arm in BF16_ARMS else builder.codec_library(build)
         cfg = configuration(arm, selection, plan['communication'], codec)
+        if arm in MEGATRON_ARMS:
+            shutil.copy2(HERE/'open_compress_megatron.py', scripts/'open_compress_megatron.py')
+            cfg['native_source_sha256'] = {name: sha(build/'megatron/megatron/core/tensor_parallel'/name)
+                                           for name in ('layers.py', 'mappings.py')}
         cfg['codec_identity']['reference_sha256'] = hashlib.sha256(reference.encode()).hexdigest()
         write(scripts/'config.json', cfg)
         write(scripts.parent/'plan.json', plan)
         (scripts/'build').mkdir()
-        (scripts/'build'/arm).symlink_to(builder.native_root(build, arm), target_is_directory=True)
+        native = builder.native_root(build, arm)
+        if native is not None:
+            (scripts/'build'/arm).symlink_to(native, target_is_directory=True)
         workers[arm] = dict(root=str(scripts), config=cfg, definition=definition(arm),
             libraries=builder.libraries(build, arm), selection=selection,
             files={path.name: sha(path) for path in scripts.iterdir() if path.is_file()},

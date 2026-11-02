@@ -1,4 +1,4 @@
-"""Independent three-arm protocol; a one-block run is explicitly exploratory."""
+"""Six-arm protocol; a one-block run is explicitly exploratory."""
 import itertools
 import math
 import random
@@ -6,14 +6,26 @@ from statistics import mean, median
 from rtx5090_loader import load
 
 base = load('protocol')
-PROTOCOL = 'rtx5090-open-compress-int8-three-arm-v1'
-ARMS = ('flux-bf16', 'flux-int8', 'flux-int8-interleaved')
-LABELS = dict(zip(ARMS, ('Flux（BF16）', 'Flux＋block INT8', 'Flux＋block INT8＋交替排序')))
+PROTOCOL = 'rtx5090-open-compress-int8-six-arm-v2'
+ARMS = ('flux-bf16', 'flux-int8', 'flux-int8-interleaved',
+        'megatron-bf16', 'megatron-int8', 'flux-int8-remote-first')
+BF16_ARMS = ('flux-bf16', 'megatron-bf16')
+MEGATRON_ARMS = ('megatron-bf16', 'megatron-int8')
+FLUX_ARMS = tuple(a for a in ARMS if a not in MEGATRON_ARMS)
+SORTED_ARMS = ('flux-int8-interleaved', 'flux-int8-remote-first')
+LABELS = dict(zip(ARMS, ('Flux（BF16）', 'Flux＋block INT8', 'Flux＋block INT8＋交替排序',
+                       'Megatron 原生（BF16）', 'Megatron＋block INT8', 'Flux＋block INT8＋远端优先')))
+BLOCKS_PER_CYCLE = 6
 POLICY = {arm: arm for arm in ARMS}
 MODEL, TIMING, TOKENS_PER_STEP = base.MODEL, base.TIMING, base.TOKENS_PER_STEP
 TRANSPORT, TRANSPORT_ENV = base.TRANSPORT, base.TRANSPORT_ENV
 read, write, require, sha, digest = base.read, base.write, base.require, base.sha, base.digest
 PACKET_BYTES = 256 * 4096 // 128 * 132
+
+
+def quantized(arm):
+    require(arm in ARMS, 'Unknown arm')
+    return arm not in BF16_ARMS
 
 
 def schedule(trials=1, blocks=6):
@@ -23,14 +35,17 @@ def schedule(trials=1, blocks=6):
     for trial in range(1, trials + 1):
         rng = random.Random(20261102 + trial)
         for cycle in range((blocks + 5) // 6):
-            orders = list(itertools.permutations(ARMS))
+            # Even-sized Williams design: each arm occupies every position
+            # once and every directed adjacent pair occurs once per cycle.
+            seed_order = (0, 1, 5, 2, 4, 3)
+            orders = [tuple(ARMS[(i+k) % len(ARMS)] for i in seed_order) for k in range(6)]
             rng.shuffle(orders)
             for offset, order in enumerate(orders):
                 block = cycle * 6 + offset
                 if block >= blocks:
                     break
                 for slot, arm in enumerate(order):
-                    result.append(dict(trial=trial, block=block, index=block*3+slot, arm=arm,
+                    result.append(dict(trial=trial, block=block, index=block*len(ARMS)+slot, arm=arm,
                         mode='timing', directory=f'compare{trial}/block{block:02d}-{arm}'))
     return result
 
@@ -65,7 +80,14 @@ def report(samples, trials=1, blocks=6):
             **{'max_'+k: max(s[k] for s in own if s['arm'] == a) for k in
                ('peak_allocated_gib', 'peak_reserved_gib', 'peak_allocated_plus_native_gib')}) for a in ARMS}
         pairs = {}
-        for a, b in ((ARMS[1], ARMS[0]), (ARMS[2], ARMS[1]), (ARMS[2], ARMS[0])):
+        primary = [('flux-int8','flux-bf16'), ('flux-int8-interleaved','flux-int8'),
+                   ('flux-int8-remote-first','flux-int8'), ('flux-int8-remote-first','flux-int8-interleaved'),
+                   ('megatron-int8','megatron-bf16'), ('flux-bf16','megatron-bf16'),
+                   ('flux-int8','megatron-int8')]
+        covered = {frozenset(pair) for pair in primary}
+        comparisons_order = primary + [(a,b) for a,b in itertools.combinations(ARMS,2)
+                                       if frozenset((a,b)) not in covered]
+        for a, b in comparisons_order:
             item = (base.paired(values[a], values[b]) if blocks >= 6 else
                 dict(percent=100*(1-math.exp(mean(math.log(x/y) for x,y in zip(values[a],values[b])))),
                      ci95=None, paired_blocks=blocks))
@@ -78,7 +100,9 @@ def report(samples, trials=1, blocks=6):
         balanced_order=blocks % 6 == 0, exploratory=blocks < 6, all_windows_retained=True,
         arrival=False, selective=False, original_peer_overlap_preserved=False,
         limitation='Fixed synthetic GPT6.7B workload. BF16 uses NCCL ReduceScatter; INT8 uses byte AllToAll '
-          'and source-ordered BF16 reduction. INT8/BF16 is a whole-path comparison. Interleaving changes '
+          'and source-ordered BF16 reduction. Native Megatron retains its RowParallelLinear forward and '
+          'linear/collective backward; only the INT8 forward ReduceScatter boundary is substituted. '
+          'INT8/BF16 is a whole-path comparison. Interleaving and remote-first change '
           'GEMM CTA mapping and can reassign StreamK reductions; no bitwise trajectory equivalence is claimed. '
           'No tile-arrival overlap, arrival policy, selective quantization or convergence claim. '
           'Payload bytes are not measured NCCL link traffic. CI only with >=6 blocks; comparisons unadjusted.')
@@ -86,7 +110,7 @@ def report(samples, trials=1, blocks=6):
 
 def markdown(result):
     require(result['completed'] and result['protocol'] == PROTOCOL, 'Incomplete report')
-    lines = ['# RTX 5090 开源通信压缩三组对比', '', f"协议 `{PROTOCOL}`；"
+    lines = ['# RTX 5090 开源通信压缩六组对比', '', f"协议 `{PROTOCOL}`；"
              f"{result['trials']} trials × {result['blocks']} blocks；{result['formal_optimizer_steps']} 正式 optimizer steps。",
              '', '到达优先、选择性量化均关闭；全部计时窗口保留。']
     if result['exploratory']:

@@ -23,7 +23,7 @@ except ImportError:  # Protocol/reference unit tests require only stdlib.
     torch = dist = None
 
 PROTOCOL = 'open-block-int8-soa128-v1'
-ARMS = ('flux-int8', 'flux-int8-interleaved')
+ARMS = ('flux-int8', 'flux-int8-interleaved', 'megatron-int8', 'flux-int8-remote-first')
 BLOCK = 128
 ELEMENTS = 256 * 4096
 GROUPS = ELEMENTS // BLOCK
