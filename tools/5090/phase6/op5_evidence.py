@@ -14,7 +14,11 @@ require = p.require
 CHANNEL_ENV = previous.CHANNEL_ENV
 CE_ENV = {'NCCL_SHM_USE_CUDA_MEMCPY': '1', 'NCCL_SHM_MEMCPY_MODE': '2',
           'NCCL_SHM_LOCALITY': '2'}
-OVERRIDES = dict(CHANNEL_ENV, **CE_ENV)
+# NCCL 2.27.3 selects SendRecv LL independently of collective protocols.
+# Keep these 1,114,112-byte peer packets off the Simple/SHM-CE path that hung.
+P2P_ENV = {'NCCL_P2P_LL_THRESHOLD': '2097152'}
+INTERVENTION_ENV = dict(CE_ENV, **P2P_ENV)
+OVERRIDES = dict(CHANNEL_ENV, **INTERVENTION_ENV)
 # Ring all-gather receives seven 2-MiB contributions on each rank.
 GATHER_RECEIVED_BYTES = 7 * 1048576 * 2
 # Temporal containment can attribute copies to adjacent calls. Retain a bounded
@@ -25,10 +29,10 @@ MAX_GATHER_HTOD_BYTES = GATHER_RECEIVED_BYTES * 5 // 4
 
 def compare_communication(reference, candidate):
     normalized = dict(candidate, environment=dict(candidate['environment']))
-    for key, value in CE_ENV.items():
-        require(key not in reference['environment'], 'OP5 reference has a hidden SHM override: '+key)
+    for key, value in INTERVENTION_ENV.items():
+        require(key not in reference['environment'], 'OP5 reference has a hidden transport override: '+key)
         require(normalized['environment'].pop(key, None) == value, 'OP5 requires '+key+'='+value)
-    require(reference == normalized, 'Communication changed beyond OP5 receive-side CE settings')
+    require(reference == normalized, 'Communication changed beyond OP5 receive-CE/P2P-LL settings')
     require(all(reference['environment'].get(key) == value for key, value in CHANNEL_ENV.items()),
             'OP5 requires the OP4 16-channel reference')
     forbidden = set(op4.EXTERNAL_OVERRIDES) - set(CHANNEL_ENV)
@@ -69,7 +73,7 @@ def reference_record(root):
         child_plan = p.read(child/'plan.json')
         env = child_plan['communication']['environment']
         require(all(env.get(k) == v for k, v in CHANNEL_ENV.items())
-                and not any(k in env for k in CE_ENV), 'Historical OP4 transport changed')
+                and not any(k in env for k in INTERVENTION_ENV), 'Historical OP4 transport changed')
         record = op4.reference_record(child)
         timing_job = p.schedule(1, 1)[0]
         rows = [p.read(child/'results'/timing_job['directory']/f'rank{rank}.json') for rank in range(8)]
@@ -141,21 +145,79 @@ def copy_evidence(events, rank, expected_calls):
         memcpy_time_is_not_additive=True)
 
 
+def sendrecv_evidence(events, rank, expected_calls, *, isolated=True):
+    """Observe absence of CE copies during SendRecv; not a direct LL trace ID.
+
+    NCCL 2.27.3 dispatches LL and Simple inside the same SendRecv entry. With
+    SHM LL buffers and the pinned threshold, its planner selects LL for these
+    packets. Require no CE in isolated probes/operators. Full-model HtoD may
+    belong to other collectives: report temporal intersections without turning
+    that ambiguous attribution into a new correctness gate.
+    """
+    require(type(rank) is int and 0 <= rank < 8 and type(expected_calls) is int
+            and expected_calls > 0 and type(isolated) is bool, 'Invalid OP5 SendRecv profile identity')
+    kernels = [e for e in events if e.get('cat') == 'kernel'
+               and 'nccl' in e.get('name', '').lower() and 'SendRecv' in e['name']]
+    require(len(kernels) == expected_calls, 'Missing OP5 SendRecv calls')
+    copies = sorted((e for e in events if e.get('cat') == 'gpu_memcpy'
+                     and ('HtoD' in e.get('name', '') or 'Host -> Device' in e.get('name', ''))
+                     and e.get('args', {}).get('device') == rank), key=lambda e: e['ts'])
+    # Prefix maximum end makes both crossing and contained copies detectable.
+    starts, end_prefix = [], []
+    for copy in copies:
+        start, duration = copy['ts'], copy['dur']
+        require(math.isfinite(start) and math.isfinite(duration) and duration > 0,
+                'Invalid HtoD timing in SendRecv profile')
+        starts.append(start)
+        end_prefix.append(max(start+duration, end_prefix[-1] if end_prefix else -math.inf))
+    intersections, per_call = set(), []
+    for event in kernels:
+        start, duration = event['ts'], event['dur']
+        require(event.get('args', {}).get('device') == rank and math.isfinite(start)
+                and math.isfinite(duration) and duration > 0, 'Invalid OP5 SendRecv kernel')
+        index = bisect_left(starts, start+duration)-1
+        overlapping = []
+        while index >= 0 and end_prefix[index] > start:
+            if copies[index]['ts']+copies[index]['dur'] > start:
+                overlapping.append(index)
+            index -= 1
+        intersections.update(overlapping)
+        per_call.append(dict(ts=start, duration_us=duration, overlapping_htod_copies=len(overlapping),
+            overlapping_htod_bytes=sum(copies[i]['args'].get('bytes', 0) for i in overlapping)))
+    require(not isolated or not intersections,
+            'OP5 SendRecv overlaps HtoD; P2P compatibility path not demonstrated')
+    return dict(rank=rank, sendrecv_calls=expected_calls, overlapping_htod_copies=len(intersections),
+        isolated_profile=isolated, no_htod_overlap_required=isolated, per_call=per_call,
+        actual_protocol_inferred_from_kernel_name=False,
+        ll_selection_basis='NCCL 2.27.3 SHM LL buffers and fixed P2P threshold; source-based inference',
+        limitation='SendRecv entry name and absence of HtoD alone do not identify its protocol; '
+                   'full-model temporal overlap does not establish copy ownership')
+
+
 def audit_candidate(child_root, reference_root):
     reference_root, child = Path(reference_root), Path(child_root)
     history = reference_record(reference_root)
     reference = reference_root/history['numerical_reference_directory']
     result = previous.audit_candidate(child, reference, communication_check=compare_communication,
-        reference_channels=16, intervention=CE_ENV)
+        reference_channels=16, intervention=INTERVENTION_ENV)
     result.update(historical_full_step_ms=history['historical_mean_ms'],
         historical_op4_windows=history['timing_windows'],
         historical_op4_report_sha256=history['report_sha256'],
-        numerical_reference_directory=history['numerical_reference_directory'], ce_profiles=[])
+        numerical_reference_directory=history['numerical_reference_directory'], ce_profiles=[],
+        sendrecv_profiles=[], operator_sendrecv_profiles=[])
+    from op3_operator import SETTINGS
+    for role in ('attn', 'mlp'):
+        for rank in range(8):
+            with gzip.open(child/f'operator/{role}-rank{rank}-profile.json.gz', 'rt') as stream:
+                checked = sendrecv_evidence(json.load(stream)['traceEvents'], rank, SETTINGS['profile_calls'])
+            result['operator_sendrecv_profiles'].append(dict(role=role, **checked))
     if not result['operator_only']:
         for rank in range(8):
             name = f'results/profile-{p.COMBINED}/rank{rank}-profile.json.gz'
             with gzip.open(child/name, 'rt') as stream:
-                result['ce_profiles'].append(copy_evidence(json.load(stream)['traceEvents'], rank, 524))
+                events = json.load(stream)['traceEvents']
+            result['ce_profiles'].append(copy_evidence(events, rank, 524))
+            result['sendrecv_profiles'].append(sendrecv_evidence(events, rank, 256, isolated=False))
         result['full_model_allgather_ce_validated'] = True
     else:
         result['full_model_allgather_ce_validated'] = False

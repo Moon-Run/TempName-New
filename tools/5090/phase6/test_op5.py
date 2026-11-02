@@ -84,6 +84,7 @@ class LaunchAndReporting(unittest.TestCase):
     def test_hidden_channel_or_shm_configuration_cannot_leak(self):
         env = op5.child_environment('candidate', {})
         self.assertTrue(all(env[k] == v for k, v in evidence.OVERRIDES.items()))
+        self.assertEqual(env['NCCL_P2P_LL_THRESHOLD'], '2097152')
         self.assertNotIn('NCCL_PROTO', env)
         self.assertNotIn('NCCL_DEBUG_SUBSYS', env)
         for key in op5.EXTERNAL_OVERRIDES:
@@ -111,7 +112,7 @@ class NumericalEvidence(unittest.TestCase):
     def pair(self, mode):
         reference, candidate = rows(mode, True), rows(mode, True)
         for row in candidate:
-            row['communication']['environment'].update(evidence.CE_ENV)
+            row['communication']['environment'].update(evidence.INTERVENTION_ENV)
         return reference, candidate
 
     def test_transport_is_only_permitted_identity_change(self):
@@ -119,11 +120,21 @@ class NumericalEvidence(unittest.TestCase):
         saved = copy.deepcopy((a, b))
         evidence.previous.compare_rows(a, b, 'smoke', communication_check=evidence.compare_communication)
         self.assertEqual((a, b), saved)
-        for field, value in (('NCCL_MIN_NCHANNELS', '32'), ('NCCL_SHM_MEMCPY_MODE', '3'), ('NCCL_ALGO', 'Ring')):
+        for field, value in (('NCCL_MIN_NCHANNELS', '32'), ('NCCL_SHM_MEMCPY_MODE', '3'),
+                             ('NCCL_ALGO', 'Ring'), ('NCCL_P2P_LL_THRESHOLD', '16384')):
             bad = copy.deepcopy(b)
             bad[0]['communication']['environment'][field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
                 evidence.previous.compare_rows(a, bad, 'smoke', communication_check=evidence.compare_communication)
+
+    def test_failed_v1_transport_cannot_be_admitted_as_v2(self):
+        a, b = self.pair('smoke')
+        for row in b:
+            row['communication']['environment'].pop('NCCL_P2P_LL_THRESHOLD')
+        with self.assertRaisesRegex(ValueError, 'NCCL_P2P_LL_THRESHOLD'):
+            evidence.previous.compare_rows(a, b, 'smoke', communication_check=evidence.compare_communication)
+        self.assertIn('p2p-ll-single-v2', op5.PROTOCOL)
+        self.assertIn('p2p-ll-single-v2', op5.arguments([]).out.name)
 
     def test_original_loss_and_parameter_gates_still_apply(self):
         for mode in ('smoke', 'profile', 'timing'):
@@ -150,6 +161,37 @@ class NumericalEvidence(unittest.TestCase):
 
 
 class ActualPathAdmission(unittest.TestCase):
+    def test_sendrecv_rejects_contained_and_cross_boundary_ce_activity(self):
+        events = [dict(cat='kernel', name='ncclDevKernel_SendRecv', ts=100., dur=50., args={'device': 0})]
+        result = evidence.sendrecv_evidence(events, 0, 1)
+        self.assertFalse(result['actual_protocol_inferred_from_kernel_name'])
+        self.assertIn('inference', result['ll_selection_basis'])
+        self.assertIn('alone do not identify', result['limitation'])
+        for ts, dur, reject in ((110., 1., True), (90., 20., True), (140., 20., True),
+                                (90., 10., False), (150., 10., False)):
+            copied = events+[dict(cat='gpu_memcpy', name='Memcpy HtoD', ts=ts, dur=dur,
+                                 args={'device': 0, 'bytes': 4096})]
+            with self.subTest(ts=ts):
+                if reject:
+                    with self.assertRaisesRegex(ValueError, 'overlaps HtoD'):
+                        evidence.sendrecv_evidence(copied, 0, 1)
+                else:
+                    evidence.sendrecv_evidence(copied, 0, 1)
+        with self.assertRaisesRegex(ValueError, 'Missing OP5 SendRecv'):
+            evidence.sendrecv_evidence(events, 0, 2)
+        with self.assertRaisesRegex(ValueError, 'Invalid OP5 SendRecv'):
+            evidence.sendrecv_evidence(events, 1, 1)
+
+    def test_full_model_htod_overlap_is_diagnostic_without_copy_owner(self):
+        events = [dict(cat='kernel', name='ncclDevKernel_SendRecv', ts=100., dur=50., args={'device': 0}),
+                  dict(cat='gpu_memcpy', name='Memcpy HtoD', ts=90., dur=20.,
+                       args={'device': 0, 'bytes': 65536})]
+        result = evidence.sendrecv_evidence(events, 0, 1, isolated=False)
+        self.assertFalse(result['no_htod_overlap_required'])
+        self.assertEqual(result['overlapping_htod_copies'], 1)
+        self.assertEqual(result['per_call'][0]['overlapping_htod_bytes'], 65536)
+        self.assertIn('does not establish copy ownership', result['limitation'])
+
     def test_every_gather_requires_bounded_contained_htod_activity(self):
         result = evidence.copy_evidence(ce_trace(), 0, 10)
         self.assertEqual(result['ce_covered_calls'], 10)

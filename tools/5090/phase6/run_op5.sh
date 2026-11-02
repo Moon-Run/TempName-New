@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# OP5 candidate only: receive-CE transport probe, operator checks, then complete training.
+# OP5 v2: packet All-to-All/P2P-LL and AllGather/CE probes, then complete training.
 op5_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 if [[ -f "$op5_repo/outputs/5090/env-setup/env.sh" ]]; then
     source "$op5_repo/outputs/5090/env-setup/env.sh"

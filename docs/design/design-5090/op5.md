@@ -1,6 +1,8 @@
-# OP5：保留 OP4 的 16 通道，改用 SHM 接收端 copy engine
+# OP5 v2：AllGather 接收端 CE＋投影 All-to-All 的 P2P LL 兼容路径
 
-更新：2026-11-02。**OP5 的探针已在目标 8×RTX 5090 上运行，但批次未进入算子或整步测试，不能声称已获得 50ms 提升。** 本轮沿用 OP4 的完整计算组合和 16 通道，把下一步优化放在共享内存传输的接收端搬运。目标是将完整 optimizer step 从指定批次的 **832.248790ms 降至不高于 782.248790ms**，即至少减少 50ms。只测一个固定候选，不自动扫描参数或挑选最快窗口。探针结果和放宽后的审计范围见第 7 节。
+更新：2026-11-02。**`144159` 批次的 AllGather 探针通过，随后在 native 探针的首次大包 All-to-All 超时，尚未进入算子计时或整步测试。** 当前 v2 保留 OP4 的完整计算组合、16 通道及 AllGather 接收端 CE，新增 `NCCL_P2P_LL_THRESHOLD=2097152`，让投影 All-to-All 使用 P2P LL 兼容路径，并在训练前补测真实大小的 All-to-All。修复后的 GPU 运行仍需复测，故障证据及修复边界见第 8 节。
+
+目标仍是将完整 optimizer step 从指定 OP4 批次的 **832.248790ms 降至不高于 782.248790ms**，即至少减少 50ms。只测一个固定候选，不自动扫描参数或挑选最快窗口；目前没有 OP5 整步实测值，不能声称已获得该收益。此前 AllGather 字节统计范围的调整保留，见第 7 节。
 
 ## 1. 从指定 OP4 批次出发
 
@@ -38,22 +40,25 @@ python3 tools/5090/phase6/analyze_op5_baseline.py \
   --out /tmp/op5-baseline-analysis.json
 ```
 
-## 2. 唯一候选：接收端 CE staging
+## 2. 当前固定候选：接收端 CE＋P2P LL 兼容路径
 
-候选继承 **A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 warp 编码器＋OP4 16 通道**，额外固定下列三个 SHM 参数：
+候选继承 **A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 warp 编码器＋OP4 16 通道**，额外固定三个 SHM 参数，并加入针对投影 All-to-All 的 P2P LL 阈值：
 
-| 配置 | OP4 历史记录 | OP5 |
+| 配置 | OP4 历史记录 | OP5 v2 |
 | --- | --- | --- |
 | `NCCL_MIN_NCHANNELS` / `NCCL_MAX_NCHANNELS` | `16` / `16` | `16` / `16` |
 | `NCCL_SHM_USE_CUDA_MEMCPY` | 未设置 | **`1`** |
 | `NCCL_SHM_MEMCPY_MODE` | 未设置 | **`2`**，接收端 |
 | `NCCL_SHM_LOCALITY` | 未设置 | **`2`**，显式固定默认接收端 locality |
+| `NCCL_P2P_LL_THRESHOLD` | 未设置 | **`2097152`**，覆盖每 peer 1,114,112 字节的投影交换 |
 | `NCCL_P2P_DISABLE` / `NCCL_SHM_DISABLE` / `NCCL_NVLS_ENABLE` | `1` / `0` / `0` | `1` / `0` / `0` |
 | 正式训练 `NCCL_DEBUG` | `WARN` | `WARN` |
 
 [NCCL 2.27.3 的 SHM 源码](https://github.com/NVIDIA/nccl/blob/v2.27.3-1/src/transport/shm.cc#L58-L66)定义了这些参数；[接收端 progress 实现](https://github.com/NVIDIA/nccl/blob/v2.27.3-1/src/transport/shm.cc#L378-L410)在 Simple 路径上提交 `cudaMemcpyAsync(..., cudaMemcpyHostToDevice, ...)`，完成后发布就绪状态。上述参数属于本次固定版本的实验控制，探针要求实际 NCCL 为 **2.27.3**，不把它们当作跨版本通用配置。
 
-候选的数据依赖为：
+投影的 P2P LL 选择独立于 AllGather。NCCL 2.27.3 的 [P2P planner](https://github.com/NVIDIA/nccl/blob/v2.27.3-1/src/enqueue.cc#L734-L800)按可用 LL buffer 和消息阈值选择协议，[SendRecv kernel](https://github.com/NVIDIA/nccl/blob/v2.27.3-1/src/device/sendrecv.h#L145-L155)再执行对应分支。v2 用上述阈值避开本次挂起的大包 SendRecv Simple/CE 路径；未设置全局 `NCCL_PROTO`。这是一项有源码依据的兼容修复，实际大包传输是否恢复由新增探针及原 native 检查验证。
+
+采用 Simple/CE 的 AllGather 数据依赖为：
 
 ```mermaid
 flowchart LR
@@ -68,7 +73,11 @@ flowchart LR
 
 选择接收端模式 `2` 是为了只改变接收搬运；发送端仍保留 direct 路径。`SHM_LOCALITY=2` 显式锁定原默认值，不叠加 sender-locality 或 CPU affinity 调整。CE staging 也会增加 proxy 调度、memcpy/event 提交、本地 FIFO 和同步开销；16 通道分出的较小块可能使这些开销抵消带宽收益。这里没有预先把任何开销算成已经省下的时间。
 
-设置作用于所有采用相关 SHM/Simple 路径的通信，可能同时影响 ReduceScatter、AllReduce、SendRecv。不能将最终整步变化全部归给 AllGather。也不从 kernel 名字里的 `_RING_LL` 推断协议；这个入口在当前 NCCL 中可以承载不同分派，实际 HtoD 活动才是本轮路径证据。
+CE 设置仍作用于采用相关 SHM/Simple 路径的通信，可能同时影响 ReduceScatter 和 AllReduce；投影 SendRecv 则新增 P2P LL 兼容设置。因此最终整步变化同时包含这些配置的影响，不能全部归给 AllGather。LL 路径本身也可能增加传输耗时，50ms 目标需重新验证。
+
+不从 AllGather 入口名的 `_RING_LL` 或通用 SendRecv kernel 名字断言实际协议。AllGather 保留实际 HtoD 活动审计；All-to-All 独立 profile 检查 SendRecv 调用及其区间内没有 HtoD 拷贝。后者是未观察到接收 CE 拷贝的证据，不能单独证明 LL 协议。
+
+独立 packet 探针和投影算子 profile 的零 HtoD 检查作为门禁；完整模型同时含其他合法 CE 通信，因此对完整模型 SendRecv 只记录 HtoD 时间相交次数与字节数，不把没有 owner 关联的时间重叠归因为投影传输错误。原有完整模型 SendRecv 次数、消息、owner 和 stream 依赖检查仍执行。
 
 模型、TP8/DP1、32 层、hidden 4096、sequence 2048、micro batch 1、global batch 4、8192 tokens/step、FP8 packet 内容、原 source 归约顺序、BF16 舍入、消费者融合、MA8 缓存、梯度统计、Adam 和 stream 依赖均沿用 OP4。不缩短正式窗口、不关闭正确性检查、不启用 CUDA Graph、不引入新的近似量化。
 
@@ -105,9 +114,9 @@ bash tools/5090/phase6/run_op5.sh \
   --trials 1 --blocks 1 --execute
 ```
 
-**一条命令自动完成：同尺寸 AllGather 探针 → 原有算子检查/计时 → 全模型 smoke/profile → 10 步预热＋50 步正式训练 → OP5 审计和报告。** 默认后台运行；加 `--foreground` 可前台观察。不带 `--execute` 只预览，不访问 GPU、不创建结果目录、不编译。
+**一条命令自动完成：硬件/NCCL 预检 → 真实大小 All-to-All 探针 → 同尺寸 AllGather 探针 → 原 native 与算子检查/计时 → 全模型 smoke/profile → 10 步预热＋50 步正式训练 → OP5 审计和报告。** 默认后台运行；加 `--foreground` 可前台观察。不带 `--execute` 只预览，不访问 GPU、不创建结果目录、不编译。
 
-默认参考即用户指定的 OP4 父批次：
+这条命令自动创建新的 v2 批次；重新测试时不传此前失败批次的 `--out`。默认参考仍为用户指定的 OP4 父批次：
 
 ```text
 ../Load-5090/logs/5090/phase6/op4-nccl-channels-single-v1-1x-50steps-20261102-105103-438654/
@@ -115,9 +124,9 @@ bash tools/5090/phase6/run_op5.sh \
 
 若它存放在其他位置，加 `--reference-batch /path/to/completed-op4-parent-batch`，应传父目录，不能传其中 `block00-candidate`。入口校验该批次所有正式窗口和文件哈希，从原始 rank elapsed 重算均值；数值轨迹及 trace 对照固定使用第一个历史子窗口。没有重新运行历史 GPU 工作，也不声称重新验证了归档中缺失的历史二进制。
 
-第一次完整测试建议保持上面的 `--trials 1 --blocks 1`；需要观察重复性时可使用 `--blocks 2`，它表示两个候选正式窗口，共 100 步。`--operator-only --foreground --execute` 会运行同尺寸通信探针和投影算子后结束，不运行完整模型，也不产生整步达标结论。
+本次修复后的首次测试建议保持上面的 `--trials 1 --blocks 1`；需要观察重复性时可使用 `--blocks 2`，它表示两个候选正式窗口，共 100 步。`--operator-only --foreground --execute` 会运行同尺寸通信探针和投影算子后结束，不运行完整模型，也不产生整步达标结论。
 
-需要同步下列新增文件，以及已更新的 `op4_evidence.py`；其余依赖使用当前完整仓库，不能只复制 shell：
+需要同步下列文件的当前版本，以及已有的 `op4_evidence.py`；其余依赖使用当前完整仓库，不能只复制 shell：
 
 ```text
 tools/5090/phase6/run_op5.sh
@@ -129,7 +138,7 @@ tools/5090/phase6/op4_evidence.py
 
 OP4 审计 helper 只新增可选的通信检查器、参考通道数和干预说明参数；不传参数时沿用原行为。OP3 worker、codec、GEMM 构建和训练入口未修改，可以复用命令中已有的 OP3 build。MA9/MA11 兼容库继续按原流程准备。
 
-启动环境、`/etc/nccl.conf`、`~/.nccl.conf` 和 `NCCL_CONF_FILE` 中若有本轮通道、SHM CE、算法、协议或 tuner 覆盖，入口会明确报错，避免隐藏变量污染实验；脚本不会编辑配置文件。只在八卡空闲时运行，不与其他 GPU 实验并行。
+启动环境、`/etc/nccl.conf`、`~/.nccl.conf` 和 `NCCL_CONF_FILE` 中若有本轮通道、SHM CE、P2P LL 阈值、算法、全局协议或 tuner 覆盖，入口会明确报错，避免隐藏变量污染实验；脚本不会编辑配置文件。只在八卡空闲时运行，不与其他 GPU 实验并行。
 
 ## 5. 新增验证与证据位置
 
@@ -139,11 +148,11 @@ OP4 审计 helper 只新增可选的通信检查器、参考通道数和干预�
 
 [op5_probe.py](../../../tools/5090/phase6/op5_probe.py)先执行原有硬件/Apex/NCCL 预检，再启动独立的八 rank 进程：
 
-1. 使用与训练相同的 GPU、NCCL 2.27.3、通信配置和 `CUDA_DEVICE_MAX_CONNECTIONS=1`。每 rank 输入 `1,048,576` 个 BF16（2MiB），输出 `8,388,608` 个 BF16（16MiB）。
-2. 三轮不同位模式输入，检查全体 rank 的完整输出位串；在非默认 stream 上复用缓冲、调用异步 Work 并等待，其中一轮延迟 rank7，覆盖数据就绪与复用依赖。
-3. 20 次预热＋100 次正式 AllGather，记录 CUDA event 和同步墙钟平均延迟，报告八 rank 最大值；另做 10 次独立 profile。它是通信微基准，不是 optimizer step，不能直接将其改善乘以 512 作为正式收益。
-4. 仅探针使用 `NCCL_DEBUG=INFO`、`NCCL_DEBUG_SUBSYS=INIT,SHM`。要求实际连接日志为 `SHM/direct/CE`，八 rank 均覆盖 16 通道；其他 transport 或不完整日志不能通过。正式训练仍使用原来的 WARN。
-5. 每次 profile AllGather 必须实际启动 16 CTA，并包含同 device、完整落在该 kernel 时间区间内的 HtoD 拷贝。七份远端贡献的理论量为 **14 MiB/次**；考虑按时间归属时的统计偏差，现允许区间为 **10.5–17.5 MiB/次**（含边界）。实际逐次字节数和跨边界排除的拷贝数量均留档。时间归属无法证明每个拷贝的实际归属或完整 payload 覆盖，独立的逐位正确性检查和 transport 日志检查仍然保留。
+1. 使用与训练相同的 GPU、NCCL 2.27.3、通信配置和 `CUDA_DEVICE_MAX_CONNECTIONS=1`。先测投影真实 wire 形状：每个远端 peer `8192×136=1,114,112` 字节，每 rank 合计 `7,798,784` 字节，类型 `uint8`，self split 为 0。
+2. All-to-All 使用随 source、destination 和轮次变化的非均匀字节模式，三轮检查完整输出位串；在非默认 stream 上复用缓冲、调用异步 Work 并等待，其中一轮延迟 rank7。验证覆盖全部 56 条有向远端链路。之后完成独立预热、延迟计时及 10 次 profile，检查 SendRecv 调用完整且其区间内没有 HtoD 拷贝；任何失败都会阻止后续训练。
+3. 再测 AllGather：每 rank 输入 `1,048,576` 个 BF16（2MiB），输出 `8,388,608` 个 BF16（16MiB）。继续执行三轮位串校验和缓冲复用检查，20 次预热＋100 次正式调用，并另做 10 次独立 profile。通信延迟报告采用 CUDA event 和同步墙钟的八 rank 最大平均值；它们均不是 optimizer step，不能直接换算为正式训练收益。
+4. 仅探针使用 `NCCL_DEBUG=INFO`、`NCCL_DEBUG_SUBSYS=INIT,SHM`。要求实际连接日志为 `SHM/direct/CE`，八 rank 均覆盖 16 通道；它说明 communicator 配置的 SHM 连接，不能据此断言其中每一种通信都实际经过 CE。正式训练仍使用原来的 WARN。
+5. 每次 profile AllGather 必须实际启动 16 CTA，并包含同 device、完整落在该 kernel 时间区间内的 HtoD 拷贝。七份远端贡献的理论量为 **14 MiB/次**；保留已采用的 **10.5–17.5 MiB/次**统计区间（含边界）。实际逐次字节数和跨边界排除的拷贝数量均留档。时间归属无法证明每个拷贝的实际归属或完整 payload 覆盖，独立逐位正确性检查和 transport 日志检查继续保留。
 
 探针通过后才启动完整候选。它与训练使用独立 communicator，因此完整候选结束后的审计还会对八 rank 的 **524 次模型 AllGather 逐次检查同样的 HtoD 时间归属统计范围**。若当前 profiler 无法提供这些证据，批次失败并要求检查原 trace，不降级成“设置变量即成功”。HtoD 时长包含在等待它的 NCCL kernel 区间中，不能再加一次。
 
@@ -151,7 +160,7 @@ OP4 审计 helper 只新增可选的通信检查器、参考通道数和干预�
 
 继续执行 native packet/舍入/输出所有权、投影算子输出与四类梯度及三步更新逐位检查、模型 smoke、八 rank 全模型 profile、完整正式训练与原始文件哈希核验。
 
-与 OP4 历史记录相比，只允许三个 CE 配置差异；保留硬件、软件、初始参数、输入、RNG、CPU affinity 和模型身份检查。loss、gradient norm、全部最终参数指纹、smoke 参数更新轨迹及投影输出仍要求一致。沿用 OP4 的既有规则：历史 smoke 梯度哈希差异记录但不阻断，哈希不能说明误差大小；没有把这一项改成新的放宽条件。
+与 OP4 历史记录相比，只允许三个 CE 配置及 `NCCL_P2P_LL_THRESHOLD=2097152` 的指定差异；保留硬件、软件、初始参数、输入、RNG、CPU affinity 和模型身份检查。loss、gradient norm、全部最终参数指纹、smoke 参数更新轨迹及投影输出仍要求一致。沿用 OP4 的既有规则：历史 smoke 梯度哈希差异记录但不阻断，哈希不能说明误差大小；没有把这一项改成新的放宽条件。
 
 AllGather 调用数、BF16 消息尺寸、TP group、真实 launch、16-CTA grid 继续严格审查；其余 NCCL 入口、payload、进程组和调用数与 OP4 核对。完整候选必须同时通过原 OP3 replay 和 OP5 的 CE 审计。
 
@@ -160,15 +169,15 @@ AllGather 调用数、BF16 消息尺寸、TP group、真实 launch、16-CTA grid
 新批次位于：
 
 ```text
-../Load-5090/logs/5090/phase6/op5-shm-recv-ce-single-v1-<trials>x-50steps-<时间>/
+../Load-5090/logs/5090/phase6/op5-shm-recv-ce-p2p-ll-single-v2-<trials>x-50steps-<时间>/
 ```
 
 | 位置 | 内容 |
 | --- | --- |
 | `report.md` / `report.json` | 正式步时、历史差值、50ms 目标线与达线观察 |
 | `batch-state.json` / `handoff/supervisor.log` | 总体状态、失败原因与当前阶段 |
-| `transport-probe/report.json` | 同尺寸 AllGather 延迟、实际 SHM/CE 连接和拷贝覆盖 |
-| `transport-probe/process.log` / `rank*-profile.json.gz` | 探针原始 INFO 日志、八 rank trace；trace 也在 `transport-probe/` 下 |
+| `transport-probe/report.json` | 真实大小 All-to-All 与 AllGather 的正确性、延迟、SHM 连接及 profile 审计 |
+| `transport-probe/process.log` / `rank*-profile.json.gz` / `rank*-alltoall-profile.json.gz` | 探针原始 INFO 日志、八 rank 的两类 trace；均在 `transport-probe/` 下 |
 | `candidate-evidence.json` | 历史数值回归、全部模型 AllGather CE 覆盖、原始文件哈希 |
 | `compare1/block00-candidate/` | 原 OP3 子批：构建校验、算子、smoke、profile、50 步正式窗口 |
 
@@ -189,7 +198,7 @@ bash tools/5090/phase6/run_op5.sh \
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-  -s tools/5090/phase6 -p 'test_op5.py' -v
+  -s tools/5090/phase6 -p 'test_op5*.py' -v
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s tools/5090/phase6 -p 'test_op4*.py' -v
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
@@ -204,3 +213,26 @@ git diff --check
 ## 7. 探针失败与审计范围调整（2026-11-02）
 
 [失败批次](../../../../Load-5090/logs/5090/phase6/op5-shm-recv-ce-single-v1-1x-50steps-20261102-122453-878129/batch-state.json) 通过硬件预检及 8 rank 通信探针逐位正确性检查，在 trace 审计时因为某次统计到 15,794,176 字节而未满足原先恰好 14,680,064 字节的门禁。检查全部 80 次探针 AllGather 后，按完整时间包含统计的字节范围为 11,599,872–17,760,256 字节；另有 3 次拷贝跨越相应 AllGather 的结束边界，已排除并记录。按用户要求，当前门禁调整为 11,010,048–18,350,080 字节，统计仍按同设备和时间归属，不声称证明完整传输字节。使用新规则对该批次探针原始记录只读重审通过，含 `SHM/direct/CE` 连接日志及 8 rank 的逐位检查；原批次状态不变，算子、完整模型及正式计时尚未运行。
+
+
+## 8. 大包 All-to-All 超时与 v2 兼容修复（2026-11-02）
+
+用户指定的 [144159 批次状态](../../../../Load-5090/logs/5090/phase6/op5-shm-recv-ce-single-v1-1x-50steps-20261102-144159-279295/batch-state.json)为 `failed`。其 [AllGather 探针报告](../../../../Load-5090/logs/5090/phase6/op5-shm-recv-ce-single-v1-1x-50steps-20261102-144159-279295/transport-probe/report.json)已通过，记录 GPU 延迟 **3372.067μs**、同步墙钟延迟 **3373.441μs**，并保留八 rank 逐位校验及 `SHM/direct/CE` 连接证据。这只是通信微基准结果，不能当作完整训练性能。
+
+随后子批在 `native-reference-wire-and-mapping-probes` 阶段失败。[native 原始日志](../../../../Load-5090/logs/5090/phase6/op5-shm-recv-ce-single-v1-1x-50steps-20261102-144159-279295/compare1/block00-candidate/native-probe/op3-combined/process.log)第 11 行起显示八个 rank 均在第一次大包交换上超时：
+
+```text
+SeqNum=1, OpType=ALLTOALL_BASE
+NumelIn=7798784, NumelOut=7798784
+Timeout(ms)=300000
+```
+
+这里每 rank 向七个远端 peer 各发送 `1,114,112` 字节的量化 packet，self split 为 0；NCCL watchdog 超时后终止进程。日志没有显示此前的 HtoD 字节区间门禁失败，也没有 OOM 证据。原有小消息 NCCL 预检和大消息 AllGather 通过，未覆盖这笔实际投影 wire 大小的 All-to-All，这是此次补充前置探针的原因。
+
+**修复采用有限范围的兼容路径：** 新增 `NCCL_P2P_LL_THRESHOLD=2097152`，保留 16 通道与 AllGather 的 SHM 接收端 CE。NCCL 2.27.3 的 P2P planner 在具备 LL buffer 时按该阈值选择 LL，消息大小覆盖每 peer 的投影 packet；[SHM proxy](https://github.com/NVIDIA/nccl/blob/v2.27.3-1/src/transport/shm.cc#L378-L410)只对 Simple 使用 CE，因而这一设置避开已挂起的 P2P Simple/CE 组合。具体内部为何未能推进，现有日志不足以确定；不能据此把某个 CUDA 队列、驱动或 NCCL 内部缺陷写成已经证实的根因。
+
+v2 将真实大小、self split 为 0 的 All-to-All 放到同尺寸 AllGather 之前，完成多轮位串检查、延迟及独立 profile 后，才继续原 native/算子/模型检查。完整 native packet、消费者舍入、输出所有权和数值门禁均继续执行。全局 `NCCL_PROTO`、`CUDA_DEVICE_MAX_CONNECTIONS=1`、codec、模型和 OP3 build 保持原配置，原有 300 秒 native collective 超时也不延长。之前按用户要求采用的 AllGather ±25% 统计区间保持不变。
+
+重新同步当前脚本后，使用第 4 节命令启动新批次；默认目录和协议变为 `op5-shm-recv-ce-p2p-ll-single-v2`，探针协议也升级为 v2。旧 `144159` 批次及其失败状态保留，不重写为成功、不用 `--report` 代替复测。**当前修复尚无目标机 GPU 通过记录；All-to-All 是否恢复、LL 兼容路径的额外开销及 50ms 目标，都以新批次完整结果为准。**
+
+本次修复的 **26 项 OP5 CPU 测试与 41 项 OP4 回归，共 67 项全部通过**；shell 语法、完整/算子模式预览、文档本地链接和 `git diff --check` 通过。测试覆盖实际 packet 调用流程中的异步等待、全部 rank 路由、旧数据/部分拷贝拒绝、56 个有向连接、trace 消息尺寸和 splits、记录哈希绑定，以及完整模型时间重叠仅作诊断的边界。CPU 测试不能替代目标 GPU 的兼容性验证。

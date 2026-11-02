@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OP5 candidate only: retain OP4 channels and stage SHM receives with CUDA copy engines."""
+"""OP5 v2: OP4 channels, SHM receive CE and P2P LL compatibility for packet exchanges."""
 import argparse
 from datetime import datetime
 import fcntl
@@ -18,14 +18,14 @@ sys.dont_write_bytecode = True
 from rtx5090_loader import HERE, REPO
 import op3
 import op4
-from op5_evidence import CE_ENV, OVERRIDES as CANDIDATE_ENV, reference_record
+from op5_evidence import INTERVENTION_ENV, OVERRIDES as CANDIDATE_ENV, reference_record
 import op5_probe
 import op3_protocol as p
 
-PROTOCOL = 'rtx5090-phase6-op5-shm-recv-ce-single-v1'
+PROTOCOL = 'rtx5090-phase6-op5-shm-recv-ce-p2p-ll-single-v2'
 ARMS = ('candidate',)
 OVERRIDES = {'candidate': CANDIDATE_ENV}
-EXTERNAL_OVERRIDES = op4.EXTERNAL_OVERRIDES + tuple(CE_ENV)
+EXTERNAL_OVERRIDES = op4.EXTERNAL_OVERRIDES + tuple(INTERVENTION_ENV)
 
 TARGET_MS = 50.0
 DEFAULT_REFERENCE = REPO.parent/'Load-5090/logs/5090/phase6/op4-nccl-channels-single-v1-1x-50steps-20261102-105103-438654'
@@ -68,7 +68,7 @@ def arguments(argv=None):
     require(not args.execute or args.op3_build or args.abc_build, '--execute requires --op3-build or --abc-build')
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'op5-shm-recv-ce-single-v1-{args.trials}x-50steps-{stamp}'
+        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'op5-shm-recv-ce-p2p-ll-single-v2-{args.trials}x-50steps-{stamp}'
     for name, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, name, value.expanduser().absolute() if name == 'python' else value.expanduser().resolve())
@@ -133,7 +133,7 @@ def report(samples, trials, blocks, operator_batches=None, historical_reference_
         historical_reference_ms=historical_reference_ms, historical_comparison_is_causal=False,
         target_validated=False, correctness_passed=True, execution_path_validated=True,
         historical_full_model_smoke_gradient_hash_equality_required=False,
-        limitation='Only the OP5 receive-CE candidate is measured against the historical OP4 windows. No concurrent control, paired gain, '
+        limitation='Only the OP5 receive-CE/P2P-LL candidate is measured against the historical OP4 windows. No concurrent control, paired gain, '
             'bootstrap confidence interval or validated 50 ms improvement is available. '
             'The read-only reference is historical and any difference is observational, '
             'not a causal performance gain. Full-model smoke gradient hashes may differ from '
@@ -145,8 +145,8 @@ def report(samples, trials, blocks, operator_batches=None, historical_reference_
 
 def markdown(result):
     require(result['protocol'] == PROTOCOL and result['completed'], 'Incomplete OP5 report')
-    lines = ['# RTX 5090 OP5：16 通道＋SHM 接收端 copy engine', '',
-        '仅测试 OP5 候选：保留 OP4 的 16 通道，设置 `NCCL_SHM_USE_CUDA_MEMCPY=1`、`NCCL_SHM_MEMCPY_MODE=2`、`NCCL_SHM_LOCALITY=2`。', '']
+    lines = ['# RTX 5090 OP5 v2：16 通道＋接收端 CE＋P2P LL 兼容路径', '',
+        '仅测试 OP5 候选：保留 OP4 的 16 通道，设置 `NCCL_SHM_USE_CUDA_MEMCPY=1`、`NCCL_SHM_MEMCPY_MODE=2`、`NCCL_SHM_LOCALITY=2`、`NCCL_P2P_LL_THRESHOLD=2097152`。', '']
     if result['operator_only']:
         lines += ['仅算子检查和计时已完成，未执行完整模型训练。', '',
             '| trial / block | 角色 | GPU 平均 μs | 墙钟平均 μs |',
@@ -168,7 +168,7 @@ def markdown(result):
         lines += ['', f"历史参考为 {result['historical_reference_ms']:.9f} ms；表中差值仅供观察，不是同期净收益。",
                   f"相对 OP4 历史均值的 50ms 目标线为 {result['historical_target_ms']:.3f} ms；历史达线观察：{result['historical_target_observed']}。",
                   '全模型 smoke 梯度与历史参考的哈希允许不同，差异见 `candidate-evidence.json`；哈希无法表明数值差异大小。']
-    lines += ['', '`transport-probe/report.json` 保留同尺寸 AllGather 的传输日志、逐位检查、延迟与 CE profile；仅探针使用 INFO 日志，正式训练仍为 WARN。',
+    lines += ['', '`transport-probe/report.json` 保留真实 packet 大小的 All-to-All 和同尺寸 AllGather 的传输日志、逐位检查、延迟与 profile；仅探针使用 INFO 日志，正式训练仍为 WARN。',
               '各子批保留完整算子报告、原始窗口、显存和 trace；执行路径审计见 `candidate-evidence.json`。',
               '没有同期对照，`target_validated=false`；completed 不代表验证了 50ms 提升。', '', result['limitation'], '']
     return '\n'.join(lines)
@@ -225,7 +225,8 @@ def replay(root, recompute_profiles=True):
                     historical_reference_ms=plan['reference']['historical_mean_ms'])
     result.update(run_id=plan['run_id'], plan_sha256=sha(root/'plan.json'), child_reports=records,
                   candidate_evidence_sha256=sha(root/'candidate-evidence.json'), build=initial_build, reference=plan['reference'],
-                  transport_probe_sha256=plan['transport_probe_sha256'], receive_ce_probe_validated=True)
+                  transport_probe_sha256=plan['transport_probe_sha256'], receive_ce_probe_validated=True,
+                  packet_alltoall_probe_validated=True)
     return result
 
 
@@ -328,7 +329,7 @@ def main(argv=None):
             timing_windows=0 if args.operator_only else args.trials*args.blocks,
             formal_optimizer_steps=0 if args.operator_only else 50*args.trials*args.blocks,
             schedule=schedule(args.trials, args.blocks),
-            workflow=('Target-sized AllGather CE probe -> candidate hardware/native -> operator correctness/timing/profile'
+            workflow=('Full-sized packet All-to-All + AllGather CE probe -> candidate hardware/native -> operator correctness/timing/profile'
                       + ('' if args.operator_only else ' -> model smoke/profile -> full-step timing')
                       + ' -> candidate evidence audit'),
             op3_build=str(args.op3_build) if args.op3_build else None,
