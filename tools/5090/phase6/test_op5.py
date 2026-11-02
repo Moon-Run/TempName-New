@@ -78,8 +78,60 @@ class LaunchAndReporting(unittest.TestCase):
                 self.assertEqual(value['reference_gpu_jobs'], 0)
                 self.assertEqual(value['formal_optimizer_steps'], 0 if operator else 50)
                 self.assertFalse(out.exists())
-        with self.assertRaises(ValueError):
-            op5.arguments(['--execute'])
+
+    def test_place_build_and_supervisor_arguments(self):
+        for place in (60, 61):
+            args = op5.arguments(['--place', str(place), '--trials', '2', '--blocks', '3',
+                                  '--build', '/example/op3', '--jobs', '7', '--execute'])
+            self.assertEqual(args.out.parent, op5.REPO.parent/'Load-5090'/f'SL30{place}')
+            self.assertEqual((args.trials, args.blocks, args.jobs), (2, 3, 7))
+            supervisor = op5.supervisor_command(args)
+            self.assertEqual(supervisor[supervisor.index('--build')+1], '/example/op3')
+            self.assertEqual(supervisor[supervisor.index('--place')+1], str(place))
+        custom = op5.arguments(['--place', '60', '--out', '/tmp/op5-custom'])
+        self.assertEqual(custom.out, Path('/tmp/op5-custom'))
+        with patch.object(op5, 'default_build_jobs', return_value=37):
+            self.assertEqual(op5.arguments(['--execute']).jobs, 37)
+
+    def test_generic_build_detects_op3_and_abc_and_rejects_other_builds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = op5.arguments(['--build', str(root)])
+            with self.assertRaisesRegex(ValueError, 'not compatible'):
+                op5.resolve_reused_build(args)
+            (root/'op3-build.json').write_text('{}')
+            op5.resolve_reused_build(args)
+            self.assertEqual(args.op3_build, root)
+            (root/'op3-build.json').unlink()
+            (root/'op1-abc-build.json').write_text('{}')
+            args = op5.arguments(['--build', str(root)])
+            op5.resolve_reused_build(args)
+            self.assertEqual(args.abc_build, root)
+            (root/'op3-build.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'exactly one'):
+                op5.resolve_reused_build(args)
+
+    def test_fresh_dependency_build_receives_job_count_and_is_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = op5.arguments(['--out', str(root), '--jobs', '13'])
+            events = []
+            class Builder:
+                def __init__(self, name): self.name = name
+                def prepare(self, *items): events.append((self.name, 'prepare', items))
+                def compile_build(self, *items): events.append((self.name, 'compile', items))
+            with patch.object(op5, 'load', return_value=Builder('baseline')), \
+                 patch('op1_abc_build.prepare', side_effect=Builder('abc').prepare), \
+                 patch('op1_abc_build.compile_build', side_effect=Builder('abc').compile_build), \
+                 redirect_stdout(io.StringIO()):
+                op5.prepare_initial_build(args, root, {})
+                op5.prepare_initial_build(args, root, {})
+            self.assertEqual([(name, action) for name, action, _ in events],
+                             [('baseline', 'prepare'), ('baseline', 'compile'),
+                              ('abc', 'prepare'), ('abc', 'compile')])
+            self.assertEqual(events[1][2][-1], 13)
+            self.assertEqual(events[3][2][-1], 13)
+            self.assertEqual(args.abc_build, root/'dependencies/abc')
 
     def test_hidden_channel_or_shm_configuration_cannot_leak(self):
         env = op5.child_environment('candidate', {})
@@ -277,8 +329,9 @@ class ActualPathAdmission(unittest.TestCase):
 
 
 class Supervision(unittest.TestCase):
-    def run_fixture(self, root, fail=None, blocks=1):
-        args = op5.arguments(['--out', str(root), '--execute', '--op3-build', str(root/'build'), '--blocks', str(blocks)])
+    def run_fixture(self, root, fail=None, blocks=1, from_abc=False):
+        build_args = ['--abc-build', str(root/'abc')] if from_abc else ['--op3-build', str(root/'build')]
+        args = op5.arguments(['--out', str(root), '--execute', *build_args, '--blocks', str(blocks)])
         (root/'handoff').mkdir()
         p.write(root/'batch-state.json', dict(status='launching'))
         calls = []
@@ -292,7 +345,10 @@ class Supervision(unittest.TestCase):
             if probe_call:
                 p.write(out/'report.json', {'completed': True})
             else:
-                p.write(out/'plan.json', dict(build={'root': str(root/'build')}, communication={}))
+                actual = root/'compare1/block00-candidate/build' if from_abc else root/'build'
+                if from_abc:
+                    actual.mkdir(parents=True, exist_ok=True)
+                p.write(out/'plan.json', dict(build={'root': str(actual)}, communication={}))
                 p.write(out/'environment-preflight.json', {})
         result = op5.report(samples(blocks=blocks), 1, blocks, historical_reference_ms=HISTORY_MS)
         error = None
@@ -325,6 +381,18 @@ class Supervision(unittest.TestCase):
                 self.assertTrue(all(env.get(k) == v for k, v in evidence.OVERRIDES.items()))
             self.assertEqual(p.read(root/'batch-state.json')['status'], 'completed')
             self.assertFalse(p.read(root/'report.json')['target_validated'])
+
+    def test_compiled_op3_is_reused_in_later_windows_and_linked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls, error = self.run_fixture(root, blocks=2, from_abc=True)
+            self.assertIsNone(error)
+            first, second = calls[1][0], calls[2][0]
+            self.assertEqual(first[first.index('--abc-build')+1], str(root/'abc'))
+            actual = root/'compare1/block00-candidate/build'
+            self.assertEqual(second[second.index('--op3-build')+1], str(actual))
+            self.assertTrue((root/'build').is_symlink())
+            self.assertEqual((root/'build').resolve(), actual)
 
     def test_failures_never_emit_success_or_continue_past_probe(self):
         for stage in ('probe', 'child', 'audit'):

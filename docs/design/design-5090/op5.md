@@ -110,9 +110,13 @@ CE 设置仍作用于采用相关 SHM/Simple 路径的通信，可能同时影�
 
 ```bash
 bash tools/5090/phase6/run_op5.sh \
-  --op3-build /workspace/Load-5090/logs/5090/phase6/op3-two-arm-v1-2x-50steps-20261102-022324-519378/build \
-  --trials 1 --blocks 1 --execute
+  --place 60 --trials 1 --blocks 2 --execute \
+  --build /workspace/Load-5090/SL3060/<OP3或ABC批次>/build
 ```
+
+`--place 60` 和 `--place 61` 分别将新批次写入 `Load-5090/SL3060`、`Load-5090/SL3061`；不传时仍写入 `Load-5090/logs/5090/phase6`，显式 `--out` 优先。`--trials` 可为 1 或 2，`--blocks` 为每个 trial 的正整数窗口数，每窗口 50 个正式训练步骤。
+
+`--build` 识别 OP3 或 OP1 ABC 构建清单：OP3 直接复用，ABC 则用于编译新的 OP3；原有 `--op3-build`、`--abc-build` 参数仍可使用。open-compress 的 build 不属于这条构建链，不能传给 OP5。若不传构建参数，脚本会在新批次下依次构建 baseline、ABC 和 OP3。首次候选窗口运行成功后，批次根目录的 `build` 是指向实际 OP3 构建的符号链接，可供后续运行复用；完整构建及其依赖必须保留。需要编译时默认并行数为 `nproc`，可用 `--jobs N` 覆盖。
 
 **一条命令自动完成：硬件/NCCL 预检 → 真实大小 All-to-All 探针 → 同尺寸 AllGather 探针 → 原 native 与算子检查/计时 → 全模型 smoke/profile → 10 步预热＋50 步正式训练 → OP5 审计和报告。** 默认后台运行；加 `--foreground` 可前台观察。不带 `--execute` 只预览，不访问 GPU、不创建结果目录、不编译。
 

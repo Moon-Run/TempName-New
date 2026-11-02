@@ -15,7 +15,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 sys.dont_write_bytecode = True
-from rtx5090_loader import HERE, REPO
+from rtx5090_loader import HERE, REPO, load
 from rtx5090_defaults import default_build_jobs
 import op3
 import op4
@@ -43,6 +43,8 @@ training_identity = op4.training_identity
 def arguments(argv=None):
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--place', type=int, choices=(60, 61),
+                        help='Put new batches under Load-5090/SL3060 or SL3061; --out overrides this')
     parser.add_argument('--reference-batch', type=Path, default=DEFAULT_REFERENCE,
                         help='Read-only completed OP4 parent batch; all historical windows retained')
     parser.add_argument('--python', type=Path, default=Path(sys.executable))
@@ -50,8 +52,9 @@ def arguments(argv=None):
     parser.add_argument('--cuda-home', type=Path, default=Path('/usr/local/cuda'))
     parser.add_argument('--build-cuda-home', type=Path, default=Path('/usr/local/cuda'))
     build = parser.add_mutually_exclusive_group()
-    build.add_argument('--op3-build', type=Path)
-    build.add_argument('--abc-build', type=Path)
+    build.add_argument('--build', type=Path, help='Reuse an OP3 or ABC build (identified by its manifest)')
+    build.add_argument('--op3-build', type=Path, help='Reuse a verified OP3 build')
+    build.add_argument('--abc-build', type=Path, help='Reuse a verified ABC build and compile OP3')
     parser.add_argument('--trials', type=int, choices=(1, 2), default=1)
     parser.add_argument('--blocks', type=int, default=1, help='Candidate windows per trial; each has 50 formal training steps')
     parser.add_argument('--jobs', type=int, default=default_build_jobs(), help='Build workers; default: nproc')
@@ -66,14 +69,50 @@ def arguments(argv=None):
     require(args.jobs > 0 and args.worker_timeout > 300, 'Positive jobs and worker timeout > 300 required')
     require(not args.report or (args.out and not args.execute and not args.operator_only), '--report requires --out without --execute/--operator-only')
     require(not args.inside or (args.execute and args.out and not args.report), 'Invalid supervisor invocation')
-    require(not args.execute or args.op3_build or args.abc_build, '--execute requires --op3-build or --abc-build')
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'op5-shm-recv-ce-p2p-ll-single-v2-{args.trials}x-50steps-{stamp}'
+        output_root = REPO.parent/'Load-5090'
+        output_root /= f'SL30{args.place}' if args.place is not None else 'logs/5090/phase6'
+        args.out = output_root/f'op5-shm-recv-ce-p2p-ll-single-v2-{args.trials}x-50steps-{stamp}'
     for name, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, name, value.expanduser().absolute() if name == 'python' else value.expanduser().resolve())
     return args
+
+
+def resolve_reused_build(args):
+    """Resolve the generic build flag without confusing different experiment families."""
+    if args.build is None:
+        return
+    op3_manifest = (args.build/'op3-build.json').is_file()
+    abc_manifest = (args.build/'op1-abc-build.json').is_file()
+    require(op3_manifest != abc_manifest,
+            '--build must contain exactly one OP3 or OP1 ABC build manifest; '
+            'open-compress builds are not compatible with OP5: '+str(args.build))
+    if op3_manifest:
+        args.op3_build = args.build
+    else:
+        args.abc_build = args.build
+
+
+def prepare_initial_build(args, root, state):
+    """Build the baseline and ABC dependencies when no reusable build was given."""
+    if args.op3_build or args.abc_build:
+        return
+    import op1_abc_build as abc_builder
+    baseline_builder = load('build')
+    baseline, abc = root/'dependencies/baseline', root/'dependencies/abc'
+    for stage, action in (
+        ('prepare-baseline-build', lambda: baseline_builder.prepare(baseline)),
+        ('compile-baseline-build', lambda: baseline_builder.compile_build(baseline, args.megatron, args.build_cuda_home, args.jobs)),
+        ('prepare-abc-build', lambda: abc_builder.prepare(abc, baseline)),
+        ('compile-abc-build', lambda: abc_builder.compile_build(abc, args.build_cuda_home, args.jobs)),
+    ):
+        state.update(status='running', stage=stage)
+        write(root/'batch-state.json', state)
+        print('STAGE', stage, flush=True)
+        action()
+    args.abc_build = abc
 
 
 def check_overrides(environment=None):
@@ -242,6 +281,7 @@ def supervise(args):
         lock = lock_path.open('a')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         op3.base.verify_controllers(root)
+        resolve_reused_build(args)
         reference = reference_record(args.reference_batch)
         plan = dict(protocol=PROTOCOL, run_id=uuid.uuid4().hex, trials=args.trials, blocks=args.blocks,
             model=p.MODEL, target_ms=TARGET_MS, nccl_overrides=OVERRIDES,
@@ -258,6 +298,7 @@ def supervise(args):
         require(op5_probe.evidence(root/'transport-probe') == read(root/'transport-probe/report.json'), 'Transport probe failed')
         plan['transport_probe_sha256'] = sha(root/'transport-probe/report.json')
         write(root/'plan.json', plan)
+        prepare_initial_build(args, root, state)
         build, evidence = args.op3_build, {}
         for job in plan['schedule']:
             op3.base.verify_controllers(root)
@@ -277,6 +318,8 @@ def supervise(args):
             actual_build = Path(read(child/'plan.json')['build']['root'])
             require(build is None or actual_build == build, 'OP3 child changed its requested build')
             build = actual_build
+            if build != root/'build' and not (root/'build').exists():
+                (root/'build').symlink_to(os.path.relpath(build, root), target_is_directory=True)
             evidence[job['directory']] = audit_candidate(child, args.reference_batch)
             require(evidence[job['directory']].get('passed') is True, 'Candidate audit did not pass')
             write(root/'candidate-evidence.json', evidence)
@@ -304,9 +347,11 @@ def supervisor_command(args):
     command = [str(args.python), str(Path(__file__).resolve()), '--execute', '--inside', '--out', str(args.out)]
     for name in ('python', 'megatron', 'cuda_home', 'build_cuda_home', 'trials', 'blocks', 'jobs', 'worker_timeout', 'reference_batch'):
         command += ['--'+name.replace('_', '-'), str(getattr(args, name))]
-    for name in ('op3_build', 'abc_build'):
+    for name in ('build', 'op3_build', 'abc_build'):
         if getattr(args, name) is not None:
             command += ['--'+name.replace('_', '-'), str(getattr(args, name))]
+    if args.place is not None:
+        command += ['--place', str(args.place)]
     if args.operator_only:
         command.append('--operator-only')
     return command
@@ -325,7 +370,7 @@ def main(argv=None):
         print(json.dumps(dict(protocol=PROTOCOL, out=str(args.out), arms=list(ARMS),
             measured_configuration=p.COMBINED, nccl_overrides=OVERRIDES, target_ms=TARGET_MS,
             reference_batch=str(args.reference_batch), reference_gpu_jobs=0,
-            trials=args.trials, blocks=args.blocks, warmup_steps=10, timed_steps=50,
+            place=args.place, jobs=args.jobs, trials=args.trials, blocks=args.blocks, warmup_steps=10, timed_steps=50,
             operator_only=args.operator_only,
             timing_windows=0 if args.operator_only else args.trials*args.blocks,
             formal_optimizer_steps=0 if args.operator_only else 50*args.trials*args.blocks,
@@ -333,6 +378,7 @@ def main(argv=None):
             workflow=('Full-sized packet All-to-All + AllGather CE probe -> candidate hardware/native -> operator correctness/timing/profile'
                       + ('' if args.operator_only else ' -> model smoke/profile -> full-step timing')
                       + ' -> candidate evidence audit'),
+            build=str(args.build) if args.build else None,
             op3_build=str(args.op3_build) if args.op3_build else None,
             abc_build=str(args.abc_build) if args.abc_build else None), indent=2))
         return
