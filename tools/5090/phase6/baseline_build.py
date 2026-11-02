@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 import rtx5090_loader  # Installs the H100 source directory before imports below.
+from rtx5090_defaults import resolve_build_jobs, recipe_matches
 import local_sources
 import nccl_transport
 import ablation6_build
@@ -150,7 +151,7 @@ def _expected_port_hashes(source, item, gemm_only=False, kind=None):
 def verify(root, built=False):
     root = Path(root).resolve()
     record = read(root/'baseline-build.json')
-    require(record['protocol'] == PROTOCOL and record['recipe_sha256'] == sha(__file__) and
+    require(record['protocol'] == PROTOCOL and recipe_matches(__file__, record['recipe_sha256'], sha(__file__)) and
             record['generator_sha256'] == sha(HERE/'gemm_only_generator.cc'), 'RTX5090 build recipe changed')
     require(tuple(record['arms']) == ARMS and record['aliases'] == ALIASES and
             record['actual_arch'] == 'sm120' and record['experimental'] is True and
@@ -230,7 +231,8 @@ def environment_identity(cuda_home):
                 cxx11_abi=bool(torch._C._GLIBCXX_USE_CXX11_ABI), nvcc_sha256=sha(nvcc))
 
 
-def compile_build(root, megatron, cuda_home, jobs=2):
+def compile_build(root, megatron, cuda_home, jobs=None):
+    jobs = resolve_build_jobs(jobs)
     from export_tp8_dp2 import archive_snapshot
     from ablation_prepare import megatron_check
     root, megatron, cuda_home = map(lambda p: Path(p).resolve(), (root, megatron, cuda_home))

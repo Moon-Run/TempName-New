@@ -4,6 +4,7 @@ import os
 import subprocess
 
 from rtx5090_loader import load
+from rtx5090_defaults import resolve_build_jobs, build_inputs_match
 import op1_abc_build as parent
 import op3_native as native
 from native_exports import verify_native_exports
@@ -65,7 +66,7 @@ def verify(root, built=False):
     require(record['protocol'] == PROTOCOL and record['actual_arch'] == 'sm120'
             and record['arms'] == list(ARMS) and record['gpu_validated'] is False,
             'Wrong OP3 codec architecture/protocol/arms')
-    require(record['inputs'] == inputs(), 'OP3 source recipe changed')
+    require(build_inputs_match(__file__, record['inputs'], inputs()), 'OP3 source recipe changed')
     abc = abc_root(root)
     require(abc.is_absolute() and record['abc_manifest_sha256'] == sha(abc/parent.MANIFEST),
             'OP3 parent ABC manifest changed')
@@ -86,7 +87,8 @@ def verify(root, built=False):
     return record
 
 
-def compile_build(root, cuda_home, jobs=2):
+def compile_build(root, cuda_home, jobs=None):
+    jobs = resolve_build_jobs(jobs)
     root, cuda_home = Path(root).resolve(), Path(cuda_home).resolve()
     record = verify(root)
     require(record['status'] == 'prepared' and type(jobs) is int and jobs > 0, 'Compile a fresh OP3 build')

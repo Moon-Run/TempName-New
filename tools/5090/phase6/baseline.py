@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 sys.dont_write_bytecode = True
 from rtx5090_loader import HERE, REPO, H100, load
+from rtx5090_defaults import default_build_jobs
 
 p = load('protocol')
 read, write, require, sha = p.read, p.write, p.require, p.sha
@@ -31,7 +32,7 @@ def arguments(argv=None):
     parser.add_argument('--baseline-build', type=Path, help='Reuse a verified build of this RTX5090 protocol')
     parser.add_argument('--trials', type=int, choices=(1, 2), default=1)
     parser.add_argument('--blocks', type=int, default=18, help='Positive multiple of 18, per trial')
-    parser.add_argument('--jobs', type=int, default=2)
+    parser.add_argument('--jobs', type=int, default=default_build_jobs(), help='Build workers; default: nproc')
     parser.add_argument('--worker-timeout', type=int, default=3600)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true')

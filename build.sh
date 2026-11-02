@@ -112,7 +112,7 @@ if [[ -n $ARCH ]]; then
 fi
 
 if [[ -z $JOBS ]]; then
-    JOBS=$(nproc --ignore 2)
+    JOBS=$(nproc)
 fi
 
 ##### build protobuf #####

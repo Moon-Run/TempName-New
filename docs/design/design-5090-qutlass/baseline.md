@@ -2,7 +2,7 @@
 
 更新：2026-11-02。目标机器为**单机 8×RTX 5090，TP8、DP1**。统一入口为 [run_open_compress.sh](../../../tools/5090/phase6/run_open_compress.sh)，协议为 `rtx5090-open-compress-int8-six-arm-v2`。本页沿用 [design-5090 baseline](../design-5090/baseline.md) 的模型、完整训练步和证据组织方式，建立独立实验；目录名保留 `design-5090-qutlass`，不表示运行时使用了 QUTLASS。
 
-**当前状态：原三组 v1 已由用户在目标机完成运行，结果尚未拉取，本地未复核；本次新增组及六组同期 v2 实验待目标机执行。** 本地源码审查、CPU 测试或 CUDA 编译只能证明相应检查通过，不能证明 RTX 5090 上的执行路径、八卡通信、数值误差、完整训练步耗时或显存已通过。旧 TACO、旧四组 Flux、H100 以及 QUTLASS 上游图表中的性能均不填入本页新六组结果。
+**当前状态：六组 v2 的 SL3061 批次已回传，六组算子检查和前三组 Flux 模型 smoke 通过，随后在 Megatron BF16 模型适配器初始化失败；配置修复已完成，完整六组训练及正式计时仍需重跑。** 本地源码审查、CPU 测试或 CUDA 编译只能证明相应检查通过，不能证明 RTX 5090 上的执行路径、八卡通信、数值误差、完整训练步耗时或显存已通过。旧 TACO、旧四组 Flux、H100 以及 QUTLASS 上游图表中的性能均不填入本页新六组结果。
 
 ## 1. 对比目标与算法选择
 
@@ -141,15 +141,15 @@ source env/activate_5090.sh
 
 ```bash
 # 仅预览；不构建、不查询 GPU、不启动训练。
-bash tools/5090/phase6/run_open_compress.sh --trials 1 --blocks 1
+bash tools/5090/phase6/run_open_compress.sh --place 61 --trials 1 --blocks 1
 
 # 用户要求的最小六组完整批次；默认前台执行。
 bash tools/5090/phase6/run_open_compress.sh \
-  --trials 1 --blocks 1 --execute
+  --place 61 --trials 1 --blocks 1 --execute
 
 # 默认 6 个完整 block：六组 Williams 平衡顺序，每组在每个位置各出现一次。
 bash tools/5090/phase6/run_open_compress.sh \
-  --trials 1 --blocks 6 --execute
+  --place 61 --trials 1 --blocks 6 --execute
 
 # 只检查硬件、环境与真实八 rank NCCL。
 bash tools/5090/phase6/run_open_compress.sh --preflight-only --execute
@@ -160,25 +160,55 @@ bash tools/5090/phase6/run_open_compress.sh --operator-only --execute
 # 复用已完成的 v1 三组构建；只在新批次增量构建远端优先库。
 bash tools/5090/phase6/run_open_compress.sh \
   --build /workspace/Load-5090/logs/5090/phase6/<已有批次>/build \
-  --trials 1 --blocks 6 --execute
+  --place 61 --trials 1 --blocks 6 --execute
 ```
 
 `--trials` 表示重复实验次数，`--blocks` 是每个 trial 的完整六组 block 数，不是 CUDA thread block 数。`--blocks 1` 用于验收和单个实验点，只有每组一个正式窗口，不能支撑置信区间或稳定收益结论。至少 6 个完整块才报告配对 bootstrap 区间；增加 blocks 的具体顺序以保存的计划为准。
 
-每次执行使用新的输出目录；可用 `--out /绝对路径/新批次目录` 指定位置。默认位于 `../Load-5090/logs/5090/phase6/open-compress-int8-six-arm-v2-<trials>x-<blocks>blocks-<时间>/`。脚本打印批次路径，控制台阶段输出与批次内日志用于定位失败；前台运行时，需保持终端/容器存活，长任务可放在 `tmux` 内运行。也可由用户用 `nohup` 包裹完整入口并重定向输出，本入口不另建后台 supervisor。
+`--jobs` 默认取当前环境的 `nproc`，等价于显式传入 `--jobs "$(nproc)"`；仍可用 `--jobs N` 覆盖。所有当前 5090 编译入口/构建函数及根 `build.sh` 使用此默认值，H100 历史实验源码保持冻结。解析后的并行数写入 launch/plan，预览也显示 `jobs`。
+
+每次执行使用新的批次目录，`--place` 选择批次的直接父目录：
+
+| 参数 | 容器中的输出目录 |
+| --- | --- |
+| `--place 60` | `/workspace/Load-5090/SL3060/<批次>/` |
+| `--place 61` | `/workspace/Load-5090/SL3061/<批次>/` |
+| 不传 `--place` | 保留原 `/workspace/Load-5090/logs/5090/phase6/<批次>/` |
+
+路径以 `TempName-New` 的同级 `Load-5090` 为根，适用于其他工作区挂载路径；显式 `--out /绝对路径/新批次目录` 优先于 `--place`。本参数只选择保存位置，不切换远程主机，实际主机仍由硬件预检记录。脚本打印批次路径，控制台阶段输出与批次内日志用于定位失败；前台运行时，需保持终端/容器存活，长任务可放在 `tmux` 内运行。也可由用户用 `nohup` 包裹完整入口并重定向输出，本入口不另建后台 supervisor。
 
 查看结果与只读复核：
 
 ```bash
-cat /workspace/Load-5090/logs/5090/phase6/<批次>/batch-state.json
-cat /workspace/Load-5090/logs/5090/phase6/<批次>/operator-summary.json
-cat /workspace/Load-5090/logs/5090/phase6/<批次>/report.md
+cat /workspace/Load-5090/SL3061/<批次>/batch-state.json
+cat /workspace/Load-5090/SL3061/<批次>/operator-summary.json
+cat /workspace/Load-5090/SL3061/<批次>/report.md
 
 bash tools/5090/phase6/run_open_compress.sh \
-  --report --out /workspace/Load-5090/logs/5090/phase6/<批次>
+  --report --out /workspace/Load-5090/SL3061/<批次>
 ```
 
 只完成 preflight 或 operator 检查不代表完整训练通过；失败批次保留现场，不能继续混入已完成报告。`--report` 用于读取并复核已有完整批次，不重跑训练，也不向失败批次补写性能结论。
+
+### 2026-11-02 失败批次修复与重跑
+
+批次 [`open-compress-int8-six-arm-v2-1x-1blocks-20261102-171639-582516`](../../../../Load-5090/logs/5090/phase6/open-compress-int8-six-arm-v2-1x-1blocks-20261102-171639-582516/batch-state.json) 实际运行主机为 **SL3061**，launch 记录 `jobs=128`。八 rank 的 [Megatron BF16 日志](../../../../Load-5090/logs/5090/phase6/open-compress-int8-six-arm-v2-1x-1blocks-20261102-171639-582516/results/smoke-megatron-bf16/process.log) 均在 `Adapter(raw, POLICY, SPEC['shapes'], SPEC['ring_reduction'])` 处报 `Unsupported native adapter policy`。
+
+原因是生成配置继承了 Flux GemmRS 专属的 `ring_reduction=True`，而 Megatron 原生适配器拒绝该标志。独立算子探针直接构造 `MegatronProjection`，没有经过该适配器，所以算子通过不代表模型初始化通过。现仅为 `megatron-bf16`、`megatron-int8` 设置 `ring_reduction=False`，Flux 四组保持原值；保留运行时门禁、原训练函数、原生前后向和数值预算。回归测试使用真实生成配置初始化两个原生组的 64 个模块，覆盖先前测试漏掉的实际参数传递。
+
+已离线重新核验六组 **48 份算子记录、48 份原始 GPU trace**和三组 Flux **24 份完整模型 smoke 记录**；其路径摘要与原记录一致，96 个算子 rank/trace 文件哈希匹配，见[回传复核记录](failure-20261102-171639-review.json)。八卡硬件/NCCL 预检通过。该批次尚无完整训练 profile 或正式计时窗口，因此不能报告完整步收益。回传未包含 `build/` 和 `.so`，本地未验证目标二进制。
+
+修复后 65 项开源压缩专项测试、7 项编译默认值/旧配方兼容测试通过；入口预览、shell 语法和 diff 检查通过，见[本次验证记录](local-validation-fix-20261102.json)。5090 全量回归执行 422 项、跳过 1 项，唯一错误来自测试发现阶段已加载的旧 subprocess mock；该测试已明确传入编译并行数，在后续专项回归通过。未在本地重跑 GPU，修复后的完整训练仍需以下目标机命令验证。
+
+本次没有修改 CUDA codec 或 GEMM 源码。已登记失败批次对应的旧 v2 构建配方精确身份，允许目标机通过 `--build` 只读复用全部已编译库；仍核对源文件、二进制、依赖、注册和 Python/CUDA ABI，不改写原 manifest。同步更新后的完整 `tools/5090/phase6/`（含 `rtx5090_defaults.py`）和根 `build.sh`，在同一目标环境执行：
+
+```bash
+bash tools/5090/phase6/run_open_compress.sh \
+  --place 61 --trials 1 --blocks 4 --execute \
+  --build /workspace/Load-5090/logs/5090/phase6/open-compress-int8-six-arm-v2-1x-1blocks-20261102-171639-582516/build
+```
+
+新结果写入 `/workspace/Load-5090/SL3061/<新批次>/`；切换到 SL3060 保存位置时改为 `--place 60`。新批次重新执行所有门禁和六组同期窗口，原失败数据保留。四块为 24 个正式窗口、1200 个正式 optimizer step，尚不足六块，因此不生成置信区间。
 
 ## 5. 正确性、实际路径与测试方法
 
@@ -202,7 +232,7 @@ bash tools/5090/phase6/run_open_compress.sh \
 
 完整模型 smoke 检查全部 64 个目标模块覆盖、前向有限值、投影输出、loss、梯度范数与参数更新；记录真实 codec/集合通信调用和输出生命周期。对压缩组的投影比较采用独立 BF16 参考和独立 codec 参考，预算分别为相对 L2 **5%** 和 **1%**；这些是本协议短期数值门禁，不是训练收敛保证。原始 BF16 组单独对未量化矩阵乘法＋NCCL 参考进行验证。
 
-六组每次窗口从相同初始化开始。量化与原 NCCL ReduceScatter 的归约舍入存在差别，因此不同组的 loss/梯度/参数轨迹不要求逐位相同；报告保留差值及指纹。两个 INT8 组按相同量化定义验证，排序后的数学内容必须不变，轨迹差异需要如实呈现，不能为了通过而把明显误差解释为排序收益。
+六组每次窗口从相同初始化开始。量化与原 NCCL ReduceScatter 的归约舍入存在差别，因此不同组的 loss/梯度/参数轨迹不要求逐位相同；报告保留差值及指纹。各 INT8 组按相同量化定义验证，排序后的数学内容必须不变，轨迹差异需要如实呈现，不能为了通过而把明显误差解释为排序收益。
 
 完整模型 profile 独立于正式计时，必须确认六组真实执行路径和目标模块次数，再进入性能阶段。不能仅用独立算子 profile 推断训练模型走了相同路径。
 
@@ -252,7 +282,7 @@ bash tools/5090/phase6/run_open_compress.sh \
 | INT8 逻辑载荷 | 按固定 packet 尺寸计算为远端载荷减少 48.4375%；不是实测链路收益。 |
 | 新代码本地检查 | **v2 的 59 项 CPU 测试通过**，包含六组 worker 初始化、Megatron 原生函数及反向保留、远端 tile 映射、profile 拒绝错误路径、旧构建只读复用和六组统计。远端优先 header 的最小 CUDA kernel 用 CUDA 12.8 编译为 SM120 成功；入口预览、shell 语法及 diff 检查通过。命令、输出及源码摘要见 [v2 本地验证记录](local-validation-v2.json)。此处未安装 PyTorch、无可运行 GPU，完整 Flux 构建及 GPU 验证待目标机。v1 的 35 项检查记录保留在 [v1 本地验证记录](local-validation.json)，仅对应原版本。 |
 | 原三组 v1 目标运行 | 用户确认运行完成，结果尚未拉取；没有在本地复核结果或新增实测数值。 |
-| 新六组 codec、八卡 operator 与真实路径 | **待目标 RTX 5090 执行。** |
+| 新六组 codec、八卡 operator 与真实路径 | 上述 SL3061 批次的六组算子门禁与 profile 已通过并离线复核；完整六组训练路径仍待修复后执行。 |
 | 新六组完整步耗时、吞吐与显存 | **待目标 RTX 5090 执行；没有可报告的 ms/step、GiB 或加速比。** |
 | 压缩能降低完整步耗时 | 待验证假设；编码解码、staging 和集合通信选择可能使其变慢。 |
 | 交替排序有额外收益 | 待验证假设；当前整 GEMM 后发包，不具有原 tile 级到达重叠前提。 |
@@ -264,7 +294,7 @@ bash tools/5090/phase6/run_open_compress.sh \
 ```bash
 python3 -B -m unittest discover -s tools/5090/phase6 -p 'test_open_compress*.py' -v
 bash -n tools/5090/phase6/run_open_compress.sh
-bash tools/5090/phase6/run_open_compress.sh --trials 1 --blocks 1
+bash tools/5090/phase6/run_open_compress.sh --place 61 --trials 1 --blocks 1
 ```
 
 ## 7. 后续组合方向

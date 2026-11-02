@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 sys.dont_write_bytecode = True
 from rtx5090_loader import HERE, REPO, load
+from rtx5090_defaults import default_build_jobs
 import flux_baseline_protocol as p
 
 spec = importlib.util.spec_from_file_location('rtx5090_flux_four_base_controller', HERE/'baseline.py')
@@ -36,7 +37,7 @@ def arguments(argv=None):
     reuse.add_argument('--flux-build', type=Path, help='Reuse an already compiled Flux four-arm build and its frozen baseline reference')
     parser.add_argument('--trials', type=int, choices=(1, 2), default=1)
     parser.add_argument('--blocks', type=int, default=8, help='Positive multiple of 8 complete blocks per trial')
-    parser.add_argument('--jobs', type=int, default=2)
+    parser.add_argument('--jobs', type=int, default=default_build_jobs(), help='Build workers; default: nproc')
     parser.add_argument('--worker-timeout', type=int, default=3600)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true')

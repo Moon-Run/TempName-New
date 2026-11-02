@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 sys.dont_write_bytecode = True
 from rtx5090_loader import HERE, REPO, load
+from rtx5090_defaults import default_build_jobs
 import op1_abc_protocol as p
 
 spec = importlib.util.spec_from_file_location('rtx5090_op1_abc_base_controller', HERE/'baseline.py')
@@ -38,7 +39,7 @@ def arguments(argv=None):
     parser.add_argument('--trials', type=int, choices=(1, 2), default=1)
     parser.add_argument('--blocks', type=int, default=p.DEFAULT_BLOCKS,
                         help='Default 2-block short run; 3 also supported; use a positive multiple of 8 for balanced ordering')
-    parser.add_argument('--jobs', type=int, default=2)
+    parser.add_argument('--jobs', type=int, default=default_build_jobs(), help='Build workers; default: nproc')
     parser.add_argument('--worker-timeout', type=int, default=3600)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true')

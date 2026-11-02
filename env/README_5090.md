@@ -69,6 +69,10 @@ outputs/5090/env-setup/env.sh
 
 ## 接着验证传输或开始实验
 
+当前 5090 实验入口和根 `build.sh` 的编译并行数默认使用 `nproc`，无需再写 `--jobs "$(nproc)"`；显式 `--jobs N` 可覆盖。该设置用于编译，不改变训练时每 rank 的 CPU 线程设置或 NCCL 配置。历史 H100 实验源码保持冻结。
+
+开源 INT8 六组入口支持按目标机分类保存：`run_open_compress.sh --place 60` 写入同级 `Load-5090/SL3060/<批次>/`，`--place 61` 写入 `Load-5090/SL3061/<批次>/`；省略参数保留旧 `logs/5090/phase6` 路径，显式 `--out` 优先。完整命令及失败修复说明见 [开源通信压缩 baseline](../docs/design/design-5090-qutlass/baseline.md)。
+
 测试 shell 会自动读取成功生成的配置，自定义 Megatron 路径也会自动传入。优先级为显式命令行参数、`RTX5090_*` 环境变量、配置文件、原默认值，因此不必每次重新手填解释器路径。
 
 ```bash

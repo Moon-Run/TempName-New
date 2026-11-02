@@ -191,7 +191,11 @@ class NativeBoundary(unittest.TestCase):
                         module.input_size,module.input_size_per_partition=16384,2048
                         module.weight=Tensor((4096,2048))
                 model=SimpleNamespace(named_modules=lambda:iter(rows),config=SimpleNamespace(num_layers=32))
-                adapter=f.runtime.Adapter(model,arm,list(sources.SHAPES.values()))
+                cfg=sources.configuration(arm,sources.selection_metadata(),{'environment':{}},None)
+                # Match the real generated worker call. The previous test
+                # omitted cfg['ring_reduction'] and missed the inherited
+                # Flux-only flag that rejected the full-model native smoke.
+                adapter=f.runtime.Adapter(model,arm,list(sources.SHAPES.values()),cfg['ring_reduction'])
                 for name,module in rows:
                     module.forward(Tensor((2048,1,module.input_size_per_partition)))
                 self.assertEqual(len(adapter.scope_ops),64)
@@ -204,6 +208,21 @@ class NativeBoundary(unittest.TestCase):
                 self.assertEqual(adapter.timed_calls,dict.fromkeys(adapter.modules,1))
                 self.assertEqual(adapter.codec_calls(),dict.fromkeys(adapter.modules,2))
                 self.assertEqual(adapter.post_audit_routes,adapter.actual_routes)
+
+    def test_real_worker_configs_disable_flux_ring_option_only_for_native_arms(self):
+        for arm in sources.ARMS:
+            cfg=sources.configuration(arm,sources.selection_metadata(),{'environment':{}},None)
+            self.assertIs(cfg['ring_reduction'],arm not in sources.MEGATRON_ARMS)
+        self.assertIn("Adapter(raw, POLICY, SPEC['shapes'], SPEC['ring_reduction'])",
+                      sources.worker_source('megatron-bf16'))
+
+    def test_native_adapter_still_rejects_flux_ring_option_and_changed_backward(self):
+        with runtime_fixture() as f:
+            for arm in sources.MEGATRON_ARMS:
+                with self.subTest(arm=arm),self.assertRaisesRegex(ValueError,'Flux GemmRS, not NCCL'):
+                    f.runtime.Adapter(None,arm,list(sources.SHAPES.values()),ring_reduction=True)
+                with self.assertRaisesRegex(ValueError,'retain its original backward'):
+                    f.runtime.Adapter(None,arm,list(sources.SHAPES.values()),control_backward=True)
 
 
 if __name__ == '__main__':

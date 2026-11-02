@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 from rtx5090_loader import HERE, REPO, load
+from rtx5090_defaults import resolve_build_jobs, build_inputs_match
 import op1_a_native
 import op1_a_swizzle
 from ma2_ablation_build import copy_registered
@@ -105,7 +106,7 @@ def verify(root, built=False):
     require(record['protocol'] == PROTOCOL and record['actual_arch'] == 'sm120'
             and tuple(record['arms']) == ARMS and record['gpu_validated'] is False,
             'Wrong OP1 build protocol/architecture/arms')
-    require(record['inputs'] == _inputs(), 'OP1 recipe/native/swizzle inputs changed')
+    require(build_inputs_match(__file__, record['inputs'], _inputs()), 'OP1 recipe/native/swizzle inputs changed')
     require(record['gemm_schedule'] == {'a': 'original-A', 'flux-basic': 'original-StreamkSK',
                                          'flux-basic-interleaved': 'StreamkSK-with-CTA-interleave'},
             'OP1 original/modified StreamK schedule changed')
@@ -159,7 +160,8 @@ def verify(root, built=False):
     return record
 
 
-def compile_build(root, cuda_home, jobs=2):
+def compile_build(root, cuda_home, jobs=None):
+    jobs = resolve_build_jobs(jobs)
     root, cuda_home = Path(root).resolve(), Path(cuda_home).resolve()
     record = verify(root)
     require(record['status'] == 'prepared' and type(jobs) is int and jobs > 0,

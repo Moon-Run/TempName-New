@@ -200,8 +200,12 @@ class MegatronProjection:
 class Adapter:
     """Instrument native modules while retaining their original linear code."""
     def __init__(self, model, policy, shapes, ring_reduction=False, control_backward=False):
-        if policy not in ARMS or ring_reduction or control_backward:
+        if policy not in ARMS:
             raise ValueError('Unsupported native adapter policy')
+        if ring_reduction:
+            raise ValueError('Native Megatron requires ring_reduction=False; this flag configures Flux GemmRS, not NCCL')
+        if control_backward:
+            raise ValueError('Native Megatron must retain its original backward')
         self.policy, self.allowed = policy, {tuple(shape) for shape in shapes}
         self.audit = True
         self.profile = os.environ.get('E2E_MODE') == 'profile'

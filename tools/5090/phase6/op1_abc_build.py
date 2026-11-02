@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 
 from rtx5090_loader import HERE, load
+from rtx5090_defaults import resolve_build_jobs, build_inputs_match
 import op1_a_build as sorted_build
 import flux_baseline_build as improved_build
 import op1_abc_native as native
@@ -87,7 +88,7 @@ def verify(root, built=False):
     require(record['protocol'] == PROTOCOL and record['actual_arch'] == 'sm120'
             and record['arms'] == list(ARMS) and record['gpu_validated'] is False,
             'Wrong ABC build protocol/architecture/arms')
-    require(record['inputs'] == inputs(), 'ABC codec/build inputs changed')
+    require(build_inputs_match(__file__, record['inputs'], inputs()), 'ABC codec/build inputs changed')
     parent = Path(record['baseline_root'])
     require(parent.is_absolute() and record['baseline_manifest_sha256'] == sha(parent/'baseline-build.json'),
             'ABC parent baseline manifest changed')
@@ -118,7 +119,8 @@ def verify(root, built=False):
     return record
 
 
-def compile_build(root, cuda_home, jobs=2):
+def compile_build(root, cuda_home, jobs=None):
+    jobs = resolve_build_jobs(jobs)
     root, cuda_home = Path(root).resolve(), Path(cuda_home).resolve()
     record = verify(root)
     require(record['status'] == 'prepared' and type(jobs) is int and jobs > 0,

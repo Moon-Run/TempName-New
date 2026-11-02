@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 sys.dont_write_bytecode = True
 from rtx5090_loader import HERE, REPO
+from rtx5090_defaults import default_build_jobs
 import open_compress_protocol as p
 
 spec = importlib.util.spec_from_file_location('open_compress_base_controller', HERE/'baseline.py')
@@ -27,6 +28,8 @@ spec.loader.exec_module(base)
 def arguments(argv=None):
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--place', type=int, choices=(60, 61),
+                        help='Put new batches directly under Load-5090/SL3060 or SL3061; --out overrides this')
     parser.add_argument('--python', type=Path, default=Path(sys.executable))
     parser.add_argument('--megatron', type=Path, default=REPO.parent/'Megatron-LM')
     parser.add_argument('--cuda-home', type=Path, default=Path('/usr/local/cuda'))
@@ -34,7 +37,7 @@ def arguments(argv=None):
     parser.add_argument('--build', type=Path, help='Reuse an open-compress build; a v1 build gets a new remote-first overlay')
     parser.add_argument('--trials', type=int, default=1)
     parser.add_argument('--blocks', type=int, default=6, help='Positive complete blocks; 1 is exploratory, multiples of 6 balanced')
-    parser.add_argument('--jobs', type=int, default=2)
+    parser.add_argument('--jobs', type=int, default=default_build_jobs(), help='Compile parallelism (default: nproc)')
     parser.add_argument('--worker-timeout', type=int, default=3600)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true', help='Compatibility option; this entry always runs in foreground')
@@ -49,7 +52,9 @@ def arguments(argv=None):
               '--report requires --out without execution/stage flags')
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO.parent/'Load-5090/logs/5090/phase6'/f'open-compress-int8-six-arm-v2-{args.trials}x-{args.blocks}blocks-{stamp}'
+        output_root = REPO.parent/'Load-5090'
+        output_root /= f'SL30{args.place}' if args.place is not None else 'logs/5090/phase6'
+        args.out = output_root/f'open-compress-int8-six-arm-v2-{args.trials}x-{args.blocks}blocks-{stamp}'
     for key, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, key, value.expanduser().absolute() if key == 'python' else value.expanduser().resolve())
@@ -262,6 +267,7 @@ def execute(args):
             builder.compile_build(build,args.megatron,args.build_cuda_home,args.jobs)
         plan = dict(protocol=p.PROTOCOL,transport=p.TRANSPORT,run_id=uuid.uuid4().hex,arms=list(p.ARMS),model=p.MODEL,
             trials=args.trials,blocks=args.blocks,schedule=p.schedule(args.trials,args.blocks),
+            place=args.place, build_jobs=args.jobs,
             communication=hardware['communication'],environment=hardware['environment'],
             cuda_visible_devices=hardware['cuda_visible_devices'],preflight_sha256=p.sha(root/'environment-preflight.json'),
             build=dict(root=str(build),manifest_sha256=p.sha(build/builder.MANIFEST)))
@@ -356,6 +362,7 @@ def main(argv=None):
     elif not args.execute:
         print('PLAN ONLY: no files, GPU queries, builds or training. Add --execute to run.')
         print(json.dumps(dict(protocol=p.PROTOCOL,out=str(args.out),arms=p.ARMS,trials=args.trials,blocks=args.blocks,
+            place=args.place, jobs=args.jobs,
             balanced_order=args.blocks%6 == 0,exploratory=args.blocks<6,model=p.MODEL,
             warmup_steps=10,timed_steps=50,timing_windows=0 if args.preflight_only or args.operator_only else args.trials*args.blocks*len(p.ARMS),
             build=str(args.build) if args.build else None,arrival=False,selective=False,

@@ -233,6 +233,10 @@ def configuration(arm, selection, communication, codec=None):
         role_plan_sha256={arm: {'attn': None, 'mlp': None}},
         scope='RTX5090 TP8 full GPT6.7B step; open block INT8; no arrival or selective quantization',
         codec_identity=codec_identity(arm), codec_library=None if arm in BF16_ARMS else codec)
+    # The inherited flag is a Flux GemmRS option, not a choice of NCCL's
+    # transport/algorithm. Native Megatron retains its own original RS path.
+    if arm in MEGATRON_ARMS:
+        cfg['ring_reduction'] = False
     cfg['cases'][0]['name'] = 'rtx5090-open-compress'
     return cfg
 

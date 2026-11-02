@@ -64,6 +64,17 @@ def file_hashes(root):
 
 
 class RemoteFirst(unittest.TestCase):
+    def test_exact_prior_v2_inputs_remain_reusable_after_jobs_default_change(self):
+        record = dict(protocol=b.PROTOCOL,inputs=dict(b.PRIOR_V2_INPUTS))
+        b.verify_inputs(record)
+        for name in b.PRIOR_V2_INPUTS:
+            bad = copy.deepcopy(record)
+            bad['inputs'][name] = '0'*64
+            with self.subTest(name=name),self.assertRaises(ValueError): b.verify_inputs(bad)
+        for name in ('open_compress_codec.py','open_compress_codec.cu','open_compress_remote_first.hpp'):
+            with patch.object(b,'inputs',return_value=dict(b.inputs(),**{name:'0'*64})):
+                with self.subTest(current=name),self.assertRaises(ValueError): b.verify_inputs(record)
+
     def test_every_remote_tile_precedes_local_for_every_rank(self):
         for rank in range(8):
             values = remote.mapping(rank)
@@ -173,7 +184,7 @@ class LegacyOverlay(unittest.TestCase):
              patch.object(b.subprocess, 'run', side_effect=command), \
              patch.object(b, 'megatron_check', side_effect=AssertionError('external Megatron consulted')), \
              patch.object(b, 'archive_megatron', side_effect=AssertionError('parent Megatron rebuilt')):
-            record = b.compile_build(new, self.root/'missing-megatron', self.root/'cuda')
+            record = b.compile_build(new, self.root/'missing-megatron', self.root/'cuda', jobs=7)
         self.assertEqual(record['status'], 'built')
         self.assertEqual(len(commands), 4)
         self.assertTrue(all('flux-remote-first' in ' '.join(command) or 'setup.py' in command for command in commands))

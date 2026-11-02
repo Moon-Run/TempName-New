@@ -72,6 +72,35 @@ def samples(blocks):
 
 
 class Protocol(unittest.TestCase):
+    def test_place_selects_machine_root_and_preserves_explicit_out(self):
+        for place in (60,61):
+            args = controller.arguments(['--place',str(place),'--blocks','4'])
+            self.assertEqual(args.out.parent,controller.REPO.parent/'Load-5090'/f'SL30{place}')
+            self.assertEqual(args.place,place)
+        args = controller.arguments(['--blocks','4'])
+        self.assertEqual(args.out.parent,controller.REPO.parent/'Load-5090/logs/5090/phase6')
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)/'explicit'
+            args = controller.arguments(['--place','61','--out',str(output)])
+            self.assertEqual(args.out,output)
+            self.assertFalse(output.exists())
+
+    def test_default_jobs_uses_nproc_and_explicit_jobs_wins(self):
+        with patch.object(controller,'default_build_jobs',return_value=128):
+            self.assertEqual(controller.arguments([]).jobs,128)
+            self.assertEqual(controller.arguments(['--jobs','7']).jobs,7)
+
+    def test_preview_reports_place_jobs_and_rejects_other_places(self):
+        with patch.object(controller,'default_build_jobs',return_value=128), redirect_stdout(io.StringIO()) as output:
+            controller.main(['--place','61','--blocks','4'])
+        import json
+        plan = json.loads(output.getvalue().split('\n',1)[1])
+        self.assertEqual((plan['place'],plan['jobs'],plan['timing_windows']),(61,128,24))
+        self.assertEqual(Path(plan['out']).parent,controller.REPO.parent/'Load-5090/SL3061')
+        from contextlib import redirect_stderr
+        with redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            controller.arguments(['--place','62'])
+
     def test_balanced_cycles_and_single_block(self):
         for blocks in (1,6,12,13):
             jobs = p.schedule(2,blocks)

@@ -9,6 +9,7 @@ import sys
 import tarfile
 
 from rtx5090_loader import HERE, REPO
+from rtx5090_defaults import resolve_build_jobs
 import op1_a_swizzle
 import open_compress_remote_first as remote_first
 from common import MEGATRON_COMMIT, read, write, require, sha, verify_files, replace_once
@@ -33,6 +34,15 @@ LEGACY_INPUTS = {
     'op1_a_swizzle.hpp': '40c1e5c02bf89cfd9d7fa6719d0a0db2b105ad61bc2d62db793af6037bc720eb',
     'op1_a_swizzle_probe.cuh': '19df80378b736b08de49e0e60ad6b82bff428d3e98fb47d9cb30045047b9aef4',
 }
+# Exact six-arm recipe before the launcher/build-parallelism-only revision.
+# Admitting it never bypasses registered sources, binaries, dependencies or ABI.
+PRIOR_V2_INPUTS = dict(LEGACY_INPUTS, **{
+    'open_compress_build.py': '5e750772c54d76adcaf61563695ef01467c7026922d0640046079081b7a5efde',
+    'open_compress_codec.py': 'deaa5306a777b7066991ff18811d3a2150af31fc17d913c6a4f4008333a53dff',
+    'open_compress_remote_first.py': 'bc8b7e142e32e7bbd6826a63c432f0aec1d429e536d1d0dcf056e2f1b85c6d83',
+    'open_compress_remote_first.hpp': 'f96eb0f4ff6f0eca85a1b52612e46cc67fefa738e8a120dff54dc14ad3f24498',
+    'open_compress_remote_first_probe.cuh': '8acd7ac26839d22085b59af1bd279e6d31b19ad48345887d667b0eca1331edc8',
+})
 
 
 def native_root(root, arm):
@@ -61,7 +71,7 @@ def inputs():
     names = ('open_compress_build.py', 'open_compress_codec.cu', 'open_compress_codec.py',
              'gemm_only_generator.cc', 'op1_a_swizzle.py', 'op1_a_swizzle.hpp', 'op1_a_swizzle_probe.cuh',
              'open_compress_remote_first.py', 'open_compress_remote_first.hpp',
-             'open_compress_remote_first_probe.cuh')
+             'open_compress_remote_first_probe.cuh', 'rtx5090_defaults.py')
     return {name: sha(HERE/name) for name in names}
 
 
@@ -78,6 +88,10 @@ def verify_inputs(record):
         require(all(current[name] == expected for name, expected in LEGACY_INPUTS.items()
                     if name not in ('open_compress_build.py', 'open_compress_codec.py')),
                 'Legacy CUDA/generator/swizzle inputs no longer match current implementation')
+    elif record['protocol'] == PROTOCOL and record['inputs'] == PRIOR_V2_INPUTS:
+        require(all(current[name] == expected for name, expected in PRIOR_V2_INPUTS.items()
+                    if name != 'open_compress_build.py'),
+                'Prior v2 native/codec inputs changed; cannot reuse compiled build')
     else:
         require(record['inputs'] == current, 'Open compression build inputs changed')
 
@@ -305,7 +319,8 @@ def archive_megatron(repo, target):
     return dict(commit=MEGATRON_COMMIT, archive_sha256=hashlib.sha256(data).hexdigest(), paths=[])
 
 
-def compile_build(root, megatron, cuda_home, jobs=2):
+def compile_build(root, megatron, cuda_home, jobs=None):
+    jobs = resolve_build_jobs(jobs)
     root, megatron, cuda_home = map(lambda path: Path(path).resolve(), (root, megatron, cuda_home))
     record = verify(root)
     require(record['status'] == 'prepared' and type(jobs) is int and jobs > 0, 'Compile a fresh prepared build')
