@@ -1,6 +1,6 @@
 # OP3：R＋CR3 融合与编码器改进的对比及组合测试
 
-更新：2026-11-02。目标为单机 8×RTX 5090，TP8/DP1。**v1 两方案已完成 2 trial × 20 blocks 对比，结果保留在第 6 节；当前 v2 脚本改为只测“A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 编码器改进”，先做独立算子测试，再做完整训练，命令见第 4 节。** 新组合组尚无 GPU 实测结果。当前按要求默认只测 1 个 block，即 1 个完整训练窗口、50 个正式 step；算子每种形状也只测 1 个计时窗口。
+更新：2026-11-02。目标为单机 8×RTX 5090，TP8/DP1。**v1 两方案已完成 2 trial × 20 blocks 对比，结果见第 6 节；v2 组合组已完成独立算子和完整训练测试，结果见第 7 节。** 当前 v2 脚本只测“A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 编码器改进”，运行命令见第 4 节。回传批次为 1 个完整训练窗口、50 个正式 step；算子每种形状各测 1 个计时窗口。
 
 ## 1. 已完成的 v1 比较内容
 
@@ -44,7 +44,7 @@
 
 更直接的融合证据来自 [H100 MA4-F 的 F4/CR2 对照](../design-h100/New-Mechanism/ma-4.md#6-本轮-ma4-f-结果相对-cr2-有端到端增量)：保持相同 producer、选择策略和提交缓存，F4 为 501.433 ms、CR2 为 509.852 ms，融合新增量 **1.652%［1.297%, 2.034%］**，8/8 块更快；profile 每 rank 每步减少 512 个消费者 add kernel，并保留原 LayerNorm。它说明融合值得迁移测试，但属于 H100 历史证据。
 
-因此，本次 **纳入 R＋CR3 的消费者融合部分**。是否对当前 5090 A 路径有效，由新的 `op3-r` 结果判断；不迁入 C 的选择性量化和分块到达路径。
+因此，本次 **纳入 R＋CR3 的消费者融合部分**，不迁入 C 的选择性量化和分块到达路径。v1 比较了 `op3-r` 与编码器改进组，但没有同期原 A 控制，不能单独归因 `op3-r` 相对原 A 的收益。
 
 ## 3. v1 组件实现与算术约束（v2 组合复用）
 
@@ -145,7 +145,7 @@ bash tools/5090/phase6/run_op3.sh --out /path/to/completed-combined-batch --repo
 - 每模块持久的收发包保持独立，完成 NCCL 后才解码，输出每次独立分配。全模型最终同步后读取 64 个模块状态，timing 每模块恰好 240 次新编码、交换、R 解码和融合消费；BDA 计数须一致。算子计数另算，每角色共 136 次投影，其中 133 次融合、3 次裸投影参考，不能混入全模型计数。
 - 单组没有第二个全模型训练轨迹可比；替代检查是算子真实 autograd 与非融合参考逐位对照，加完整训练的数值预算、全部参数梯度/更新记录和消费者生命周期审计。报告明确记录 `full_training_cross_arm_comparison=false`，不声称完成两组训练等价验证。
 - 全模型 profile 要求 `op3_warp_encode_kernel` 与 `op3_r_decode_kernel<true>` 同时执行，后继保持原 LayerNorm、没有两个独立消费者 add；反向、MA8/MA9/MA11 各自审计。
-- 这是一次组合实验，历史 v1 两组结果不能作为同期控制，也不能将其局部收益直接相加。当前组合组的 GPU 正确性、算子延迟及正式步时仍待目标机新批次产生；本地没有可用 GPU。
+- 这是一次组合实验，历史 v1 两组结果不能作为同期控制，也不能将其局部收益直接相加。组合组目标机结果见第 7 节；本地没有重跑 GPU。
 
 本地回归入口：
 
@@ -155,7 +155,7 @@ bash -n tools/5090/phase6/run_op3.sh tools/5090/phase6/run_op3_compare.sh tools/
 git diff --check
 ```
 
-本次单窗口版本的 **49 项 OP3 专项测试、283 项完整 5090 CPU 回归均通过**。三个 shell 入口语法、单窗口预览、源码生成和文档链接检查通过；已用新分析器重新解析 v1 两组各自的 rank0 原始 profile，均通过实际 trace 格式与执行路径审计。该离线复核属于历史数据兼容性检查，新组合组仍待目标机 GPU 验证。
+本次单窗口版本的 **49 项 OP3 专项测试、283 项完整 5090 CPU 回归均通过**。三个 shell 入口语法、单窗口预览、源码生成和文档链接检查通过；已用新分析器重新解析 v1 两组各自的 rank0 原始 profile，均通过实际 trace 格式与执行路径审计。该离线复核属于历史数据兼容性检查；组合组目标机验证结果见第 7 节。
 
 ## 6. OP3 回传结果（2026-11-02）
 
@@ -180,3 +180,40 @@ git diff --check
 R＋融合和改进组的最大 Torch allocated 分别为 **19.423 / 19.412 GiB**；报告的 allocated＋native 与各自 allocated 相同，仍不含 CUDA context、NCCL 等内部显存，不代表整卡峰值。报告记录 `correctness_passed=true`、`execution_path_validated=true`、`native_staged_runtime_validated=true`；裸投影 packet/输出要求逐位一致，smoke 要求 loss、gradient norm 及全部参数梯度和更新轨迹一致。报告中后续数值观测的 loss 和 gradient norm 最大绝对差均为 0，但不能由此推断长期收敛或模型质量。两组 smoke 采样输出的位置不同，融合输出和裸投影的哈希不能直接比较。
 
 以上为对回传报告和批次状态的整理；此处没有在本地重跑 GPU 或完整 `--report` 重放。
+
+## 7. OP3 v2 组合组回传结果（2026-11-02）
+
+数据来自 [完整训练报告](../../../../Load-5090/logs/5090/phase6/op3-combined-v2-1x-50steps-20261102-100813-883313/report.md)、[报告数据](../../../../Load-5090/logs/5090/phase6/op3-combined-v2-1x-50steps-20261102-100813-883313/report.json)、[算子报告](../../../../Load-5090/logs/5090/phase6/op3-combined-v2-1x-50steps-20261102-100813-883313/operator/report.md)和[批次状态](../../../../Load-5090/logs/5090/phase6/op3-combined-v2-1x-50steps-20261102-100813-883313/batch-state.json)。批次状态为 `completed`：**1 trial × 1 block × 1 组**，共 1 个正式窗口、8 份正式 rank 记录、50 个正式 optimizer step，另有 10 步预热。
+
+| 组合组完整训练指标 | 实测值 |
+| --- | ---: |
+| 正式步时（ms/step） | **850.195** |
+| 吞吐（tokens/s） | **9635.44** |
+| 最大 Torch allocated（GiB） | 19.422869 |
+| 最大 allocated＋native（GiB） | 19.422869 |
+
+只有一个窗口，均值、中位数、最快和最慢均为 850.195 ms/step；它不能反映窗口间波动。显存合计不含 CUDA context、NCCL 等内部占用，不代表整卡峰值。本批没有同期性能对照，不能计算相对 v1 两组或原 A 的配对降幅与置信区间，也不能证明两项改动的收益可以叠加。
+
+### 独立投影算子
+
+每个角色预热 20 次，测量 1 个窗口的 100 次 forward；报告分别取八 rank 最大 CUDA event 和同步墙钟平均延迟。算子计时包括 GemmOnly、编码、NCCL 等待、R 解码和融合 bias/residual，不包括 LayerNorm、backward、optimizer、MA8/MA9/MA11 的训练工作或 CUDA Graph。
+
+| 角色 | GPU 平均延迟（μs） | 同步墙钟平均延迟（μs） |
+| --- | ---: | ---: |
+| Attention | 664.285 | 664.685 |
+| MLP | 726.075 | 726.338 |
+
+独立 profile 先取每 rank 的调用中位数，再取八 rank 中位数；与上表计时窗口分开采集。
+
+| 角色 | GEMM（μs） | 编码（μs） | NCCL kernel 合计（μs） | 解码含融合（μs） | CPU 提交（μs） | GPU 起止跨度（μs） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Attention | 59.816 | 39.040 | 785.738 | 13.808 | 854.721 | 899.763 |
+| MLP | 213.367 | 38.640 | 277.702 | 13.432 | 369.166 | 547.148 |
+
+profile 与正式计时的采样方式不同，kernel 时间用于诊断，不能相加推导整步耗时或收益。算子报告只对组合路径计时，没有同期算子性能对照。
+
+### 验证和判读
+
+完整报告记录 `correctness_passed=true`、`execution_path_validated=true`、`native_staged_runtime_validated=true` 和 `operator_gradients_validated=true`。算子正确性检查中，融合路径与非融合 autograd 参考的输出、input/weight/bias/residual 四类梯度和三步诊断更新逐位一致。完整训练的 profile 汇总记录八 rank 路径检查通过；单组没有跨组完整训练轨迹对照，报告中的 `full_training_cross_arm_comparison=false` 不支持声称完整训练跨组等价或长期模型质量等价。
+
+以上根据回传报告和状态整理；本地没有重跑 GPU 或执行完整 `--report` 重放。
