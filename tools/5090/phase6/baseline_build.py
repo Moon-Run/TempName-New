@@ -148,6 +148,17 @@ def _expected_port_hashes(source, item, gemm_only=False, kind=None):
                          for name, content in port_sources(source, gemm_only, kind).items()})
 
 
+def verify_codec_library(root, library):
+    """Check a codec at its current build location against its frozen digest."""
+    require(isinstance(library, dict) and set(library) == {'path', 'sha256'}, 'Invalid codec binary identity')
+    original = Path(library['path'])
+    require(original.is_absolute() and '..' not in original.parts
+            and original.parts[-2:] == ('codec-basic', basic_quant_build.LIBRARY),
+            'Invalid codec binary path')
+    current = Path(root)/'codec-basic'/basic_quant_build.LIBRARY
+    require(current.is_file() and sha(current) == library['sha256'], 'Codec binary changed: '+str(current))
+
+
 def verify(root, built=False):
     root = Path(root).resolve()
     record = read(root/'baseline-build.json')
@@ -197,8 +208,7 @@ def verify(root, built=False):
     if built:
         require(record['status'] == info['status'] == flux['status'] == codec['status'] == 'built', 'Build incomplete')
         verify_files(root, record['files'])
-        require(codec['library'] == dict(path=str(root/'codec-basic'/basic_quant_build.LIBRARY),
-                                        sha256=sha(root/'codec-basic'/basic_quant_build.LIBRARY)), 'Codec binary changed')
+        verify_codec_library(root, codec['library'])
         for arm in (*NATIVE_ARMS, 'flux-basic'):
             source = native_root(root, arm)
             require(len(list((source/'python').glob('flux_ths_pybind*.so'))) == 1, 'Missing native extension: '+arm)

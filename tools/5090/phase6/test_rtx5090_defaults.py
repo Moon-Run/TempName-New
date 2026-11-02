@@ -79,7 +79,8 @@ class HistoricalBuildAdmission(unittest.TestCase):
     def test_only_exact_default_change_recipe_pairs_are_admitted(self):
         for filename,(old,new) in defaults.DEFAULT_JOBS_RECIPE_COMPAT.items():
             with self.subTest(filename=filename):
-                self.assertEqual(hashlib.sha256((HERE/filename).read_bytes()).hexdigest(),new)
+                installed = defaults.RELOCATION_RECIPE_COMPAT.get(filename, ((), new))[1]
+                self.assertEqual(hashlib.sha256((HERE/filename).read_bytes()).hexdigest(),installed)
                 self.assertTrue(defaults.recipe_matches(HERE/filename,old,new))
                 self.assertTrue(defaults.recipe_matches(HERE/filename,new,new))
                 self.assertFalse(defaults.recipe_matches(HERE/filename,'0'*64,new))
@@ -89,6 +90,10 @@ class HistoricalBuildAdmission(unittest.TestCase):
                 self.assertTrue(defaults.build_inputs_match(HERE/filename,saved,current))
                 self.assertFalse(defaults.build_inputs_match(HERE/filename,dict(saved,native={}),current))
                 self.assertFalse(defaults.build_inputs_match(HERE/filename,dict(saved,extra=True),current))
+                if filename in defaults.RELOCATION_RECIPE_COMPAT:
+                    self.assertTrue(defaults.recipe_matches(HERE/filename,old,installed))
+                    self.assertTrue(defaults.recipe_matches(HERE/filename,new,installed))
+                    self.assertFalse(defaults.recipe_matches(HERE/filename,'0'*64,installed))
         self.assertFalse(defaults.recipe_matches('unknown.py','a'*64,'b'*64))
 
 

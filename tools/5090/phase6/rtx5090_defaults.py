@@ -43,10 +43,21 @@ DEFAULT_JOBS_RECIPE_COMPAT = {'baseline_build.py': ('04825ceee88a00c2f2bedb2e268
  'op3_build.py': ('dc7e7124bdb07e97ad65fb400263e033ce707a48611deaf746211c2c69416366',
                   '8b52844dc8f0240b1988c5111690515d7cb2b9d8ab9cc7f3a19db24a1931e567')}
 
+# Exact identities for the relocation-only change. Other provenance checks are
+# unchanged, and a later recipe edit must not inherit this exception.
+RELOCATION_RECIPE_COMPAT = {
+    'baseline_build.py': (DEFAULT_JOBS_RECIPE_COMPAT['baseline_build.py'],
+        '8db614035bf50b7521b5ce35536661d7c69ce88b33394415056c91c954ebc238'),
+    'flux_baseline_build.py': (DEFAULT_JOBS_RECIPE_COMPAT['flux_baseline_build.py'],
+        'b1e6dc96a80c9f0a1276c4f12ab97169f14bb60c41bb2729443f7ec9f7d2b40a'),
+}
+
 
 def recipe_matches(path, saved, current):
+    prior, relocated = RELOCATION_RECIPE_COMPAT.get(Path(path).name, ((), None))
     return (saved == current or
-            DEFAULT_JOBS_RECIPE_COMPAT.get(Path(path).name) == (saved, current))
+            DEFAULT_JOBS_RECIPE_COMPAT.get(Path(path).name) == (saved, current) or
+            (current == relocated and saved in prior))
 
 
 def build_inputs_match(path, saved, current):

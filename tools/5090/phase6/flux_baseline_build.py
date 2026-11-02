@@ -33,7 +33,49 @@ def _inputs():
 
 
 def base_root(root):
-    return Path(read(Path(root)/MANIFEST)['baseline_root'])
+    root = Path(root).resolve()
+    record = read(root/MANIFEST)
+    original = Path(record['baseline_root'])
+    require(original.is_absolute(), 'Invalid parent nine-arm build path')
+    # Campaign archives may be moved from logs/5090/phase6 into SL3060/SL3061.
+    # Search only the corresponding sibling batch and the recorded location.
+    sibling = root.parent.parent/original.parent.name/original.name
+    candidates = list(dict.fromkeys((sibling, original)))
+    for candidate in candidates:
+        manifest = candidate/'baseline-build.json'
+        if manifest.is_file():
+            require(sha(manifest) == record['baseline_manifest_sha256'],
+                    'Parent nine-arm build identity changed: '+str(manifest))
+            return candidate
+    raise ValueError('Missing parent nine-arm build; expected baseline-build.json at: '
+                     + ' or '.join(str(candidate/'baseline-build.json') for candidate in candidates))
+
+
+def verify_nccl_files(root, base, records):
+    """Resolve a relocated build-owned NCCL pair without weakening hashes."""
+    if not records:
+        return
+    require(isinstance(records, dict) and len(records) == 2, 'Invalid NCCL dependency records')
+    suffixes = ('include/nccl.h', 'lib/libnccl_static.a')
+    expected = {}
+    parents = set()
+    for name, digest in records.items():
+        path = Path(name)
+        require(path.is_absolute() and '..' not in path.parts, 'Invalid NCCL dependency path: '+name)
+        matches = [suffix for suffix in suffixes if path.parts[-len(Path(suffix).parts):] == Path(suffix).parts]
+        require(len(matches) == 1 and matches[0] not in expected, 'Unexpected NCCL dependency: '+name)
+        expected[matches[0]] = digest
+        parents.add(path.parent.parent)
+    require(set(expected) == set(suffixes) and len(parents) == 1
+            and next(iter(parents)).parts[-2:] == ('nccl-source', 'build'),
+            'NCCL dependencies must share one build-owned root')
+    candidates = [Path(base)/'nccl-source/build', Path(root)/'nccl-source/build']
+    for candidate in candidates:
+        if all((candidate/name).is_file() for name in suffixes):
+            if all(sha(candidate/name) == expected[name] for name in suffixes):
+                return
+    raise ValueError('Missing or changed NCCL build dependencies at: '
+                     + ' or '.join(map(str, candidates)))
 
 
 def native_root(root, arm):
@@ -106,9 +148,7 @@ def verify(root, built=False):
     require(build_inputs_match(__file__, record['inputs'], _inputs()), 'Flux baseline recipe/native/swizzle inputs changed')
     require(record['ordering'] == 'original-Flux-rank-offset' and record['all_remote'] is True,
             'Ordering/quantization contract changed')
-    base = Path(record['baseline_root'])
-    require(base.is_absolute() and record['baseline_manifest_sha256'] == sha(base/'baseline-build.json'),
-            'Parent nine-arm build identity changed')
+    base = base_root(root)
     old = baseline.verify(base, built)
     require(record['baseline_protocol'] == old['protocol'] and record['submodules'] == old['submodules'],
             'Parent baseline protocol/dependencies changed')
@@ -146,8 +186,7 @@ def verify(root, built=False):
             require((root/arm/'check_mapping').is_file() and arm+'/check_mapping' in record['files'],
                     'Missing original-order mapping executable')
             verify_native_exports(root/arm/'libflux_cuda.so', ('h100_v2_occupancy',) + local_sources.NATIVE_EXPORTS)
-        for name, expected in record.get('nccl_files', {}).items():
-            require(sha(name) == expected, 'NCCL build dependency changed: ' + name)
+        verify_nccl_files(root, base, record.get('nccl_files', {}))
     return record
 
 

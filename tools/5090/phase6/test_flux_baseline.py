@@ -298,6 +298,74 @@ class Build(unittest.TestCase):
                     self.assertIsNone(workers[arm]['config']['codec_library'])
 
 
+class RelocatedBuild(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='flux-relocation-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.flux = self.root/'SL3060/flux-batch/build'
+        self.base = self.root/'SL3060/baseline-batch/build'
+        self.old_base = self.root/'old/logs/5090/phase6/baseline-batch/build'
+        p.write(self.base/'baseline-build.json', {'fixture': 'correct-parent'})
+        self.parent_digest = builder.sha(self.base/'baseline-build.json')
+        p.write(self.flux/'flux-build.json', {'baseline_root': str(self.old_base),
+                                             'baseline_manifest_sha256': self.parent_digest})
+
+    def test_resolves_sibling_parent_and_rejects_changed_or_missing_manifest(self):
+        before = (self.flux/'flux-build.json').read_bytes()
+        self.assertEqual(builder.base_root(self.flux), self.base)
+        self.assertEqual((self.flux/'flux-build.json').read_bytes(), before)
+        p.write(self.base/'baseline-build.json', {'fixture': 'wrong-parent'})
+        with self.assertRaisesRegex(ValueError, 'Parent nine-arm build identity changed'):
+            builder.base_root(self.flux)
+        (self.base/'baseline-build.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing parent nine-arm build'):
+            builder.base_root(self.flux)
+
+    def test_uses_original_when_sibling_absent_but_never_skips_a_bad_sibling(self):
+        p.write(self.old_base/'baseline-build.json', {'fixture': 'correct-parent'})
+        self.assertEqual(builder.base_root(self.flux), self.base)
+        p.write(self.base/'baseline-build.json', {'fixture': 'wrong-parent'})
+        with self.assertRaisesRegex(ValueError, 'Parent nine-arm build identity changed'):
+            builder.base_root(self.flux)
+        (self.base/'baseline-build.json').unlink()
+        self.assertEqual(builder.base_root(self.flux), self.old_base)
+
+    def test_nccl_files_resolve_in_current_parent_or_current_flux(self):
+        names = ('include/nccl.h', 'lib/libnccl_static.a')
+        target = self.base/'nccl-source/build'
+        for name in names:
+            file = target/name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text('original '+name)
+        records = {str(self.old_base/'nccl-source/build'/name): builder.sha(target/name) for name in names}
+        builder.verify_nccl_files(self.flux, self.base, records)
+        (target/names[0]).write_text('corrupt')
+        with self.assertRaisesRegex(ValueError, 'Missing or changed NCCL'):
+            builder.verify_nccl_files(self.flux, self.base, records)
+        replacement = self.flux/'nccl-source/build'
+        for name in names:
+            file = replacement/name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text('original '+name)
+        builder.verify_nccl_files(self.flux, self.base, records)
+        bad = dict(records)
+        bad['/other/include/nccl.h'] = bad.pop(str(self.old_base/'nccl-source/build/include/nccl.h'))
+        with self.assertRaisesRegex(ValueError, 'share one build-owned root'):
+            builder.verify_nccl_files(self.flux, self.base, bad)
+
+    def test_relocated_codec_is_checked_at_current_root(self):
+        name = builder.baseline.basic_quant_build.LIBRARY
+        codec = self.base/'codec-basic'/name
+        codec.parent.mkdir(parents=True, exist_ok=True)
+        codec.write_bytes(b'codec fixture')
+        record = {'path': str(self.old_base/'codec-basic'/name), 'sha256': builder.sha(codec)}
+        builder.baseline.verify_codec_library(self.base, record)
+        codec.write_bytes(b'bad')
+        with self.assertRaisesRegex(ValueError, 'Codec binary changed'):
+            builder.baseline.verify_codec_library(self.base, record)
+
+
 class Launcher(unittest.TestCase):
     def test_complete_four_arm_controller_flow(self):
         import tp8_dp2_train
@@ -305,7 +373,10 @@ class Launcher(unittest.TestCase):
             root = Path(tmp)
             build, original = root/'build', root/'original'
             environment = fixture('flux-fused')[2]['environment']
-            p.write(build/'flux-build.json', dict(baseline_root=str(original), environment=environment))
+            original = original/'build'
+            p.write(original/'baseline-build.json', {'protocol': 'CPU-FIXTURE'})
+            p.write(build/'flux-build.json', dict(baseline_root=str(original), environment=environment,
+                                                baseline_manifest_sha256=builder.sha(original/'baseline-build.json')))
             codec = original/'codec-basic/libbasic_quant.so'
             codec.parent.mkdir(parents=True)
             codec.write_bytes(b'CPU-FIXTURE ONLY')

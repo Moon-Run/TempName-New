@@ -72,3 +72,9 @@ allocated＋native 先逐 rank 相加后取最大，包含独立 TACO workspace�
 环境：单机 `SL3060`，8×RTX 5090（SM120，170 SM）、TP8/DP1；PyTorch `2.8.0a0+5228986c39.nv25.06`、CUDA `12.9`、NCCL `2.27.3`、驱动 `595.84`；56 条跨卡有向 peer-access 链路不可用。无量化组采用 BF16 Reduce-Scatter，量化组的 GEMM、decoder、传输与舍入不同；组间差值为端到端组合比较。
 
 原始证据：[批次状态](../../batch-state.json)、[正式样本](../../samples.json)、[profile 汇总](../../profile-summary.json)、[native 探针](../../native-probe/report.json)、[硬件预检](../../environment-preflight.json)、[控制日志](../../handoff/supervisor.log)、[未汇总的 block04 基础量化窗口](block04-flux-basic/process.log)。
+
+## 构建目录迁移后的复用
+
+`--flux-build` 的清单会记录九组 baseline 父构建。若将两个批次从 `logs/5090/phase6/` 搬到同一个 `SL3060/` 或 `SL3061/` 目录，校验器会先从当前 Flux 批次的同级目录查找父构建，再尝试清单记录的原位置；父构建清单仍须与原 SHA256 完全一致。NCCL 头文件、静态库以及父构建的 codec 也从当前构建位置检查原哈希，历史清单不被改写。
+
+例如，将 `flux-quant-four-arm-v1-1x-50steps-20261101-201716-772182/build` 放入 `/workspace/Load-5090/SL3060/` 时，其父目录也应存在 `/workspace/Load-5090/SL3060/baseline-nine-arm-nccl-staged-v2-1x-50steps-20261101-013331-414102/build/`，并保留完整二进制、源码快照和依赖。若父构建或文件未随批次保留，需要先恢复原构建；路径重定位不会生成缺失的文件。其余源码身份、依赖、GPU 环境和 Python/CUDA ABI 校验继续执行。
