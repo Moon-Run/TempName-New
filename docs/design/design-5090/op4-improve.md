@@ -1,6 +1,10 @@
 # OP4：在 OP3 组合组上缩短 AllGather 通信路径
 
-更新：2026-11-02。**只测 OP4 候选，自动先测算子、再测整步；不重新运行组合组对照。** 候选保留 A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 编码器改进，再将 NCCL 通道数设置为 16，重点压缩大消息 AllGather 的串行时间。已有组合组记录用于只读数值核对和历史耗时参考。OP4 尚无 GPU 实测，≥60ms/step 是待验证目标。直接启动命令见第 4 节。
+更新：2026-11-02。**只测 OP4 候选，自动先测算子、再测整步；不重新运行组合组对照。** 候选保留 A＋MA89＋MA11＋R＋CR3 消费者融合＋OP3 编码器改进，再将 NCCL 通道数设置为 16，重点压缩大消息 AllGather 的串行时间。已有组合组记录用于只读数值核对和历史耗时参考。首个候选窗口已实测，但原门禁因梯度逐位核对失败而中止；现按要求允许该项差异，≥60ms/step 仍是待验证目标。直接启动命令见第 4 节。
+
+首个候选窗口的 [supervisor 日志](../../../../Load-5090/logs/5090/phase6/op4-nccl-channels-single-v1-1x-50steps-20261102-103241-089244/handoff/supervisor.log) 显示原历史数值核对失败。八个 rank 的 smoke 三步分别有 59、47、51 个梯度哈希不同，差异均为 `[4096]` 的 FP32 张量；三步参数更新哈希相同，smoke/profile/正式计时记录的 loss、gradient norm 和最终参数哈希相同。历史记录只保存哈希，不能确定梯度差异大小或原因。该批次计划为两个候选窗口，但在第一个窗口核对后失败；子批次报告的 832.244ms/step 不是已完成的 OP4 报告。现在历史 smoke 梯度哈希差异不再阻止验收，差异的 rank、step 和张量名仍记录在 `candidate-evidence.json`；其他数值和执行路径门禁保持不变。
+
+使用新规则对该首窗口的回传证据进行只读审计已通过，包括八 rank 的 profile 检查；这不改变原批次的失败状态，也不补齐原计划中的第二窗口。
 
 ## 1. 为什么下一步优化 AllGather
 
@@ -54,7 +58,7 @@ python3 tools/5090/phase6/analyze_op4_baseline.py \
 
 AllGather 复制原始 BF16 数据，不做浮点归约。OP3 的量化范围、FP8 packet、decoder 累加顺序、两次消费者 BF16 加法、softmax、激活缓存、梯度统计和 Adam 代码均保持原样。继续使用原来的同步/异步调用及 stream 依赖，保持 `CUDA_DEVICE_MAX_CONNECTIONS=1`、`NCCL_P2P_DISABLE=1`、`NCCL_SHM_DISABLE=0`、`NCCL_NVLS_ENABLE=0`；不启用 CUDA Graph。
 
-**通道设置作用于整个 NCCL communicator，不是只改 AllGather。** ReduceScatter、AllReduce 和 SendRecv 的 launch 几何或分块也可能变化，不能将所有端到端变化归给 AllGather。脚本保留这些变化的原始签名，要求调用数、消息量、进程组和入口种类与历史参考相同；不从入口名字声称实际协议不变。归约调度变化可能影响 BF16 舍入，故仍将候选完整训练的梯度和参数轨迹与既有组合组记录逐位核对；有差异则拒绝验收，不放宽数值条件。这里只读旧记录，不启动旧组训练。更多通道还可能增加 NCCL 内部/主机缓冲，Torch allocated 不覆盖这些资源，需关注 OOM 或 SHM 分配失败。
+**通道设置作用于整个 NCCL communicator，不是只改 AllGather。** ReduceScatter、AllReduce 和 SendRecv 的 launch 几何或分块也可能变化，不能将所有端到端变化归给 AllGather。脚本保留这些变化的原始签名，要求调用数、消息量、进程组和入口种类与历史参考相同；不从入口名字声称实际协议不变。历史 smoke 梯度哈希差异仅记录，不作为验收失败；loss、gradient norm、参数更新和最终参数哈希等检查仍要求一致。这里只读旧记录，不启动旧组训练。更多通道还可能增加 NCCL 内部/主机缓冲，Torch allocated 不覆盖这些资源，需关注 OOM 或 SHM 分配失败。
 
 原始 OP3 源码、构建和入口保持原样。新的 [op4.py](../../../tools/5090/phase6/op4.py) 在独立子进程初始化 NCCL 前设定候选环境，调用原有 `op3.py`，从而复用其完整门禁。候选复用已验证 OP3 codec/GemmOnly build；MA9/MA11 兼容库照常准备和校验。若传 `--abc-build`，只在第一个候选子批次新建 OP3 codec，此后复用该 build。
 
@@ -160,7 +164,7 @@ bash tools/5090/phase6/run_op4.sh \
 [op4_evidence.py](../../../tools/5090/phase6/op4_evidence.py) 在原 OP3 验证之外追加：
 
 1. 候选和既有参考的硬件、软件、初始权重、输入、RNG、CPU affinity、模型身份一致；通信环境仅允许 min/max channels 的指定差异。历史数据要求完整文件及 SHA256 相符；不将其解释为本地重新验证了旧二进制或完成新基线训练。
-2. 完整模式下，每个 smoke/profile/timing rank 的 loss、gradient norm、最终全部参数指纹与参考相同；smoke 进一步比较全部 trainable 参数的梯度/更新轨迹和所有目标投影输出指纹。算子模式继续执行候选实际 autograd 与非融合参考的逐位输出、四类梯度和三步更新检查。没有放宽容差。
+2. 完整模式下，每个 smoke/profile/timing rank 的 loss、gradient norm、最终全部参数指纹与参考相同；smoke 进一步比较全部 trainable 参数的更新轨迹和所有目标投影输出指纹。smoke 梯度哈希差异只记录，不做逐位验收，也不能从哈希评估数值误差。算子模式继续执行候选实际 autograd 与非融合参考的逐位输出、四类梯度和三步更新检查。
 3. 整步 profile 每 rank 恰有 524 个 AllGather kernel，全部满足实际 launch、TP group、BF16 消息形状，候选 grid 必须为 `[16,1,1]`，防止设置未生效。入口名不用于证明实际算法/协议；原 OP3 分析器继续审查前后向 owner 和 stream 依赖。
 4. 其余 NCCL 入口、payload 和次数与历史参考核对，包括 256 次投影 SendRecv；grid/block/shared-memory 允许变化并留档。算子 SendRecv 的几何只作记录，不强行要求 16 CTA。原 OP3 packet、R 解码、CR3 消费者、MA8/MA9/MA11 检查保留。最终报告绑定原始 rank 文件、trace、历史参考与源码快照的哈希。
 
@@ -174,4 +178,4 @@ bash tools/5090/phase6/run_op4.sh --trials 1 --blocks 1
 git diff --check
 ```
 
-最终单候选版本的 **40 项 OP4 专项测试、49 项 OP3 回归测试均通过**；完整/仅算子入口预览、shell 语法、文档链接和 `git diff --check` 通过。v1 和 v2 组合组的 24 份整步 trace，以及新组合组的 16 份算子 trace 均已完成只读分析。这些验证不代表 OP4 已在 GPU 上通过正确性或达到性能目标；目标机实测仍由上面的启动命令完成。
+原单候选版本的 **40 项 OP4 专项测试、49 项 OP3 回归测试均通过**；完整/仅算子入口预览、shell 语法、文档链接和 `git diff --check` 通过。v1 和 v2 组合组的 24 份整步 trace，以及新组合组的 16 份算子 trace 均已完成只读分析。这些验证不能代替 GPU 正确性门禁；首个实测窗口的梯度哈希差异仍需排查。

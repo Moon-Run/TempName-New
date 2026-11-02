@@ -213,18 +213,29 @@ class HistoricalRecordAdmission(unittest.TestCase):
             with self.subTest(field=key), self.assertRaisesRegex(ValueError, 'loss, gradients or parameter'):
                 evidence.compare_rows(control, candidate, 'timing')
 
-    def test_smoke_checks_full_gradient_update_and_projection_bytes(self):
-        for kind in ('gradient', 'update', 'parameter_universe', 'projection'):
+    def test_smoke_checks_full_update_and_projection_bytes(self):
+        for kind in ('update', 'parameter_universe', 'projection'):
             control, candidate = rows('smoke'), rows('smoke', True)
-            if kind in ('gradient', 'update'):
-                field = 'gradients' if kind == 'gradient' else 'parameters'
-                candidate[4]['parameter_trajectory'][0][field]['weight'] = '9'*64
+            if kind == 'update':
+                candidate[4]['parameter_trajectory'][0]['parameters']['weight'] = '9'*64
             elif kind == 'parameter_universe':
                 candidate[4]['trainable_parameters']['weight']['shape'] = [3]
             else:
                 candidate[4]['smoke_output_sha256']['projection'] = '9'*64
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 evidence.compare_rows(control, candidate, 'smoke')
+
+    def test_gradient_mismatch_is_recorded_without_rejecting_candidate(self):
+        control, candidate = rows('smoke'), rows('smoke', True)
+        candidate[4]['parameter_trajectory'][0]['gradients']['weight'] = '9'*64
+        result = evidence.compare_rows(control, candidate, 'smoke')
+        self.assertFalse(result['numerical_trajectory_identical'])
+        self.assertFalse(result['historical_gradient_hash_equality_required'])
+        self.assertEqual(result['historical_gradient_hash_differences'],
+                         [dict(rank=4, step=0, count=1, tensors=['weight'])])
+        candidate[4]['parameter_trajectory'][0]['parameters']['weight'] = '0'*64
+        with self.assertRaisesRegex(ValueError, r'rank 4 step 0 parameters: 1 tensors; first=weight'):
+            evidence.compare_rows(control, candidate, 'smoke')
 
     def test_affinity_and_optimization_stack_cannot_be_hidden_in_timing_gain(self):
         for key, value in (('cpu_affinity', [0]), ('cpu_affinity_policy', 'single-core'),

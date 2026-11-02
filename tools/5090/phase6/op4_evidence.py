@@ -101,7 +101,57 @@ def compare_rows(reference, candidate, mode):
     for a, b in zip(left, right):
         compare_communication(a.pop('communication'), b.pop('communication'))
     require(left == right, 'OP4 historical/candidate hardware/software/model/weights/RNG/input changed')
-    load('validation').equivalent(reference, candidate, smoke=mode == 'smoke')
+    gradient_differences = []
+    compared = candidate
+    if mode == 'smoke':
+        # Compare and record gradient hashes, but exclude them from the
+        # historical equality gate. Individual worker records are validated
+        # by the OP3 replay before this cross-run comparison.
+        compared = []
+        for a, b in zip(reference, candidate):
+            projected = dict(b)
+            left_steps, right_steps = a['parameter_trajectory'], b['parameter_trajectory']
+            require(len(left_steps) == len(right_steps), 'OP4 smoke trajectory length changed')
+            projected_steps = []
+            for index, (left_step, right_step) in enumerate(zip(left_steps, right_steps)):
+                left_grad, right_grad = left_step['gradients'], right_step['gradients']
+                names = sorted(name for name in left_grad.keys() | right_grad.keys()
+                               if left_grad.get(name) != right_grad.get(name))
+                if names:
+                    gradient_differences.append(dict(rank=a['rank'], step=index,
+                                                     count=len(names), tensors=names))
+                projected_steps.append(dict(right_step, gradients=left_grad))
+            projected['parameter_trajectory'] = projected_steps
+            compared.append(projected)
+    try:
+        load('validation').equivalent(reference, compared, smoke=mode == 'smoke')
+    except ValueError as exc:
+        # Hash differences do not reveal their numerical magnitude. Report the
+        # affected fields and tensors while preserving the exact equality gate.
+        differences = []
+        for a, b in zip(reference, candidate):
+            for key in ('losses', 'grad_norms', 'final_parameters_sha256', 'trainable_parameters'):
+                if (key != 'trainable_parameters' or mode == 'smoke') and a.get(key) != b.get(key):
+                    differences.append(f"rank {a['rank']} {key}")
+            if mode == 'smoke':
+                left_steps, right_steps = a.get('parameter_trajectory'), b.get('parameter_trajectory')
+                if not isinstance(left_steps, list) or not isinstance(right_steps, list) or len(left_steps) != len(right_steps):
+                    differences.append(f"rank {a['rank']} parameter_trajectory structure")
+                    continue
+                for index, (left_step, right_step) in enumerate(zip(left_steps, right_steps)):
+                    if left_step.get('step') != right_step.get('step'):
+                        differences.append(f"rank {a['rank']} trajectory step {index} identity")
+                    for part in ('parameters',):
+                        left_values, right_values = left_step.get(part), right_step.get(part)
+                        if not isinstance(left_values, dict) or not isinstance(right_values, dict):
+                            differences.append(f"rank {a['rank']} step {index} {part} structure")
+                            continue
+                        names = sorted(name for name in left_values.keys() | right_values.keys()
+                                       if left_values.get(name) != right_values.get(name))
+                        if names:
+                            differences.append(f"rank {a['rank']} step {index} {part}: {len(names)} tensors; first={names[0]}")
+        detail = '; '.join(differences) if differences else 'unclassified trajectory difference'
+        raise ValueError(f'{exc}; OP4 historical comparison ({mode}): {detail}') from exc
     for a, b in zip(reference, candidate):
         # Hashes cover all local parameters, rather than just sampled tensors.
         keys = ['initial_loss', 'warmup_last_loss', 'skips', 'cpu_affinity_policy', 'cpu_affinity',
@@ -111,7 +161,10 @@ def compare_rows(reference, candidate, mode):
             keys += ['smoke_output_sha256']
         require(all(a[key] == b[key] for key in keys),
                 'OP4 changed numerical checks, CPU affinity or the OP3 mechanism stack')
-    return dict(mode=mode, ranks=8, initial_identity_equal=True, numerical_trajectory_identical=True,
+    return dict(mode=mode, ranks=8, initial_identity_equal=True,
+                numerical_trajectory_identical=not gradient_differences,
+                historical_gradient_hash_equality_required=False,
+                historical_gradient_hash_differences=gradient_differences,
                 full_parameter_trajectory_checked=mode == 'smoke', projection_hashes_checked=mode == 'smoke')
 
 

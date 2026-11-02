@@ -200,10 +200,13 @@ def report(samples, trials, blocks, operator_batches=None, historical_reference_
         comparisons=comparisons, all_samples=samples, operator_batches=operator_batches or [],
         historical_reference_ms=historical_reference_ms, historical_comparison_is_causal=False,
         target_validated=False, correctness_passed=True, execution_path_validated=True,
+        historical_full_model_smoke_gradient_hash_equality_required=False,
         limitation='Only the OP4 candidate is measured. No concurrent control, paired gain, '
             'bootstrap confidence interval or validated 60 ms improvement is available. '
             'The read-only reference is historical and any difference is observational, '
-            'not a causal performance gain. Operator timing does not measure a complete training step.')
+            'not a causal performance gain. Full-model smoke gradient hashes may differ from '
+            'the historical reference; hash differences do not measure their numerical magnitude. '
+            'Operator timing does not measure a complete training step.')
 
 
 def markdown(result):
@@ -228,7 +231,8 @@ def markdown(result):
             lines.append(f"| {trial} | {v['mean_ms']:.3f} | {v['median_ms']:.3f} | "
                 f"{v['min_ms']:.3f} | {v['max_ms']:.3f} | {v['tokens_per_second']:.2f} | "
                 f"{record['historical_delta_ms']:.3f} |")
-        lines += ['', f"历史参考为 {result['historical_reference_ms']:.9f} ms；表中差值仅供观察，不是同期净收益。"]
+        lines += ['', f"历史参考为 {result['historical_reference_ms']:.9f} ms；表中差值仅供观察，不是同期净收益。",
+                  '全模型 smoke 梯度与历史参考的哈希允许不同，差异见 `candidate-evidence.json`；哈希无法表明数值差异大小。']
     lines += ['', '各子批保留完整算子报告、原始窗口、显存和 trace；执行路径审计见 `candidate-evidence.json`。',
               '没有同期对照，`target_validated=false`；completed 不代表验证了 60ms 提升。', '', result['limitation'], '']
     return '\n'.join(lines)
