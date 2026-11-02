@@ -1,6 +1,6 @@
 # OP5 v2：AllGather 接收端 CE＋投影 All-to-All 的 P2P LL 兼容路径
 
-更新：2026-11-02。**`144159` 批次的 AllGather 探针通过，随后在 native 探针的首次大包 All-to-All 超时，尚未进入算子计时或整步测试。** 当前 v2 保留 OP4 的完整计算组合、16 通道及 AllGather 接收端 CE，新增 `NCCL_P2P_LL_THRESHOLD=2097152`，让投影 All-to-All 使用 P2P LL 兼容路径，并在训练前补测真实大小的 All-to-All。修复后的 GPU 运行仍需复测，故障证据及修复边界见第 8 节。
+更新：2026-11-03。**SL3060 的 `001026` 批次已通过真实大小的 All-to-All 检查，但在随后的首次 AllGather 上超时，尚未进入训练。** 当前将探针的计时屏障移到独立 Gloo 控制组，并将底层失败详情传回 supervisor；这项兼容性修复尚待目标 GPU 复测，见第 9 节。v2 候选仍保留 OP4 的完整计算组合、16 通道、AllGather 接收端 CE 和 `NCCL_P2P_LL_THRESHOLD=2097152`；此前首次大包 All-to-All 超时的修复经过见第 8 节。
 
 目标仍是将完整 optimizer step 从指定 OP4 批次的 **832.248790ms 降至不高于 782.248790ms**，即至少减少 50ms。只测一个固定候选，不自动扫描参数或挑选最快窗口；目前没有 OP5 整步实测值，不能声称已获得该收益。此前 AllGather 字节统计范围的调整保留，见第 7 节。
 
@@ -243,3 +243,27 @@ v2 将真实大小、self split 为 0 的 All-to-All 放到同尺寸 AllGather �
 重新同步当前脚本后，使用第 4 节命令启动新批次；默认目录和协议变为 `op5-shm-recv-ce-p2p-ll-single-v2`，探针协议也升级为 v2。旧 `144159` 批次及其失败状态保留，不重写为成功、不用 `--report` 代替复测。**当前修复尚无目标机 GPU 通过记录；All-to-All 是否恢复、LL 兼容路径的额外开销及 50ms 目标，都以新批次完整结果为准。**
 
 本次修复的 **26 项 OP5 CPU 测试与 41 项 OP4 回归，共 67 项全部通过**；shell 语法、完整/算子模式预览、文档本地链接和 `git diff --check` 通过。测试覆盖实际 packet 调用流程中的异步等待、全部 rank 路由、旧数据/部分拷贝拒绝、56 个有向连接、trace 消息尺寸和 splits、记录哈希绑定，以及完整模型时间重叠仅作诊断的边界。CPU 测试不能替代目标 GPU 的兼容性验证。
+
+## 9. All-to-All 后首次 AllGather 超时（2026-11-03）
+
+[001026 批次](../../../../Load-5090/SL3060/op5-shm-recv-ce-p2p-ll-single-v2-1x-50steps-20261103-001026-767905/batch-state.json)的直接故障在 [transport-probe/process.log](../../../../Load-5090/SL3060/op5-shm-recv-ce-p2p-ll-single-v2-1x-50steps-20261103-001026-767905/transport-probe/process.log)：八个 rank 的首次 AllGather 均出现 `SeqNum=136, OpType=_ALLGATHER_BASE, Timeout(ms)=120000`，最后完成的序号是 135。此前各 rank 已完成 3 次 packet 逐位检查、20 次预热、100 次计时和 10 次 profile，共 133 次 All-to-All，记录均为 `bitwise_correct=true`。rank JSON 中随后保存的 BF16 校验失败可能发生在 watchdog 中止通信之后，不能据此判定为独立的数据损坏根因。
+
+原探针的两次计时屏障调用默认 NCCL 组。[PyTorch 的 barrier 实现](https://github.com/pytorch/pytorch/blob/v2.8.0/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp#L4725-L4784)会插入单元素 AllReduce，因此首次 AllGather 之前实际执行的是 133 次 packet 交换加 2 次额外 AllReduce。这与失败序号一致，但现有日志不足以证明具体的 NCCL 内部挂起机制。
+
+当前兼容性处理将 `measure()` 的屏障改为独立 Gloo 控制组，屏障仍位于计时区间外，GPU 同步继续保留。All-to-All 与 AllGather 仍按原顺序共用同一 NCCL 组，真实 packet 大小、异步等待、逐位检查、CE profile 门禁、120 秒 collective 超时及正式训练配置均保留。**这移除了探针附带的 AllReduce，是否消除本次 GPU 挂起仍需复测；探针通过也不能替代后续 native、算子和完整模型检查。**
+
+探针协议升级为 `rtx5090-op5-shm-ce-probe-v3`，`settings.coordination_backend=gloo` 纳入命令、rank 记录和报告核验；父批次仍为相同的 OP5 v2 候选。失败时，`handoff/supervisor.log` 和 `batch-state.json.error` 会直接包含底层 watchdog 信息、rank 阶段与原始日志路径。旧失败批次保留，不能用修改后的脚本继续其冻结的 `--inside` 命令。
+
+按该批次 `handoff/launch.json` 恢复的参数，在目标机仓库根目录启动**新批次**：
+
+```bash
+bash tools/5090/phase6/run_op5.sh \
+  --place 60 --trials 1 --blocks 1 --jobs 128 --worker-timeout 3600 \
+  --python /workspace/venvs/tempname-5090/bin/python \
+  --megatron /workspace/Megatron-LM \
+  --cuda-home /usr/local/cuda-12.9 --build-cuda-home /usr/local/cuda-12.9 \
+  --reference-batch /workspace/Load-5090/SL3060/op4-nccl-channels-single-v1-1x-50steps-20261102-105103-438654 \
+  --execute
+```
+
+本次 OP5 CPU 回归共 37 项，35 项通过，2 项因本地缺少对应历史归档而跳过。新增检查覆盖屏障组隔离及计时边界、旧探针证据拒绝、残缺 rank 文件下的错误摘要，以及子进程失败传回 supervisor。当前环境没有目标机 CUDA/GPU，尚无此次修改后的 GPU 通过记录。

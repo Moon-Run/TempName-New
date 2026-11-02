@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import op5_probe as probe
 
@@ -179,6 +179,64 @@ class PacketLoop(unittest.TestCase):
                 probe.packet_profile_evidence(events, 0)
 
 
+class TimingCoordination(unittest.TestCase):
+    def test_both_payloads_coordinate_outside_timing_without_nccl_barriers(self):
+        for kind in ('alltoall', 'allgather'):
+            with self.subTest(kind=kind):
+                torch, dist = MagicMock(), MagicMock()
+                control, stream = object(), object()
+                dist.get_backend.return_value = 'gloo'
+                start, end = MagicMock(), MagicMock()
+                torch.cuda.Event.side_effect = [start, end]
+                start.elapsed_time.return_value = 4.
+                calls, barriers, stages = [], [], []
+                def barrier(*, group):
+                    self.assertIs(group, control)
+                    barriers.append(len(calls))
+                dist.barrier.side_effect = barrier
+                with patch.object(probe.time, 'perf_counter', side_effect=[10., 10.01]):
+                    result, _ = probe.measure(torch, dist, stream, lambda: calls.append(1),
+                                              stages.append, kind, control_group=control)
+                self.assertEqual(barriers, [20, 120])
+                self.assertEqual(len(calls), 130)
+                self.assertEqual(stages, [kind+'-warmup', kind+'-timing', kind+'-profile'])
+                self.assertAlmostEqual(result['gpu_us'], 40.)
+                self.assertAlmostEqual(result['wall_us'], 100.)
+                start.record.assert_called_once_with(stream)
+                end.record.assert_called_once_with(stream)
+                end.synchronize.assert_called_once_with()
+                dist.all_reduce.assert_not_called()
+
+    def test_default_or_nccl_group_is_rejected_before_submitting_payloads(self):
+        for control in (None, object()):
+            torch, dist, operation = MagicMock(), MagicMock(), MagicMock()
+            dist.get_backend.return_value = 'nccl'
+            with self.assertRaisesRegex(ValueError, 'separate Gloo group'):
+                probe.measure(torch, dist, object(), operation, lambda stage: None,
+                              'alltoall', control_group=control)
+            operation.assert_not_called()
+            dist.barrier.assert_not_called()
+
+
+class FailureDetails(unittest.TestCase):
+    def test_missing_partial_and_aborted_worker_evidence_keeps_original_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIn(str(root/'process.log'), probe.failure_details(root))
+            (root/'process.log').write_text('NCCL INFO initialization\n'
+                '[rank4] Watchdog caught collective operation timeout: '
+                'WorkNCCL(SeqNum=136, OpType=_ALLGATHER_BASE, Timeout(ms)=120000)\n')
+            probe.p.write(root/'rank0.json', dict(stage='allgather-correctness-0',
+                error='ValueError: BF16 AllGather corrupted rank 1, iteration 0'))
+            (root/'rank1.json').write_text('{')
+            details = probe.failure_details(root)
+            self.assertIn('SeqNum=136', details)
+            self.assertIn('OpType=_ALLGATHER_BASE', details)
+            self.assertIn('rank0: stage=allgather-correctness-0', details)
+            self.assertIn('BF16 AllGather corrupted rank 1', details)
+            self.assertIn('rank1: cannot read progress', details)
+
+
 class Evidence(unittest.TestCase):
     def fixture(self, root):
         environment = dict(torch='fixture', cuda='12.9', nccl=[2, 27, 3], python='/cpu/python')
@@ -224,6 +282,21 @@ class Evidence(unittest.TestCase):
             (root/'rank7-alltoall-profile.json.gz').unlink()
             with self.assertRaises(FileNotFoundError):
                 probe.evidence(root)
+
+    def test_old_probe_or_nccl_coordination_cannot_replay_as_cpu_coordination(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(probe.op3.base, 'collective_evidence'):
+            root = Path(tmp)
+            self.fixture(root)
+            original = probe.p.read(root/'command.json')
+            for old_protocol in (True, False):
+                command = copy.deepcopy(original)
+                if old_protocol:
+                    command['protocol'] = 'rtx5090-op5-shm-ce-probe-v2'
+                else:
+                    command['settings']['coordination_backend'] = 'nccl'
+                probe.p.write(root/'command.json', command)
+                with self.assertRaisesRegex(ValueError, 'Probe launch settings changed'):
+                    probe.evidence(root)
 
 
 if __name__ == '__main__':

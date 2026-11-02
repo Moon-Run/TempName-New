@@ -374,6 +374,12 @@ class Supervision(unittest.TestCase):
         def run(command, env, log):
             calls.append((command, env))
             probe_call = Path(command[1]).name == 'op5_probe.py'
+            if fail == 'probe-process' and probe_call:
+                out = Path(command[command.index('--out')+1])
+                p.write(out/'rank0.json', dict(stage='allgather-correctness-0'))
+                (out/'process.log').write_text('Watchdog caught collective operation timeout: '
+                    'WorkNCCL(SeqNum=136, OpType=_ALLGATHER_BASE, Timeout(ms)=120000)\n')
+                raise subprocess.CalledProcessError(1, command)
             if fail == ('probe' if probe_call else 'child'):
                 raise ValueError('injected failure')
             out = Path(command[command.index('--out')+1])
@@ -403,7 +409,7 @@ class Supervision(unittest.TestCase):
             try:
                 with redirect_stdout(io.StringIO()):
                     op5.supervise(args)
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
                 error = exc
         return calls, error
 
@@ -439,6 +445,19 @@ class Supervision(unittest.TestCase):
                 self.assertEqual(p.read(root/'batch-state.json')['status'], 'failed')
                 self.assertFalse((root/'report.json').exists())
                 self.assertEqual(len(calls), 1 if stage == 'probe' else 2)
+
+    def test_probe_process_failure_surfaces_rank_stage_and_nccl_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls, error = self.run_fixture(root, fail='probe-process')
+            self.assertIsInstance(error, RuntimeError)
+            self.assertEqual(len(calls), 1)
+            state = p.read(root/'batch-state.json')
+            self.assertEqual(state['status'], 'failed')
+            self.assertIn('SeqNum=136', state['error'])
+            self.assertIn('stage=allgather-correctness-0', state['error'])
+            self.assertIn(str(root/'transport-probe/process.log'), str(error))
+            self.assertFalse((root/'report.json').exists())
 
 
 class Replay(unittest.TestCase):

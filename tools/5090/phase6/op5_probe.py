@@ -20,9 +20,10 @@ import op3
 import op3_protocol as p
 from op5_evidence import OVERRIDES, copy_evidence, sendrecv_evidence
 
-PROTOCOL = 'rtx5090-op5-shm-ce-probe-v2'
+PROTOCOL = 'rtx5090-op5-shm-ce-probe-v3'
 SETTINGS = dict(input_elements=1048576, dtype='bfloat16', world=8,
                 correctness_iterations=3, warmup=20, timed_calls=100, profile_calls=10,
+                coordination_backend='gloo',
                 alltoall=dict(peer_bytes=8192*136, wire_bytes=7*8192*136, dtype='uint8', self_split=0))
 DEBUG = dict(NCCL_DEBUG='INFO', NCCL_DEBUG_SUBSYS='INIT,SHM')
 require = p.require
@@ -111,6 +112,30 @@ def check_training_identity(root, hardware, communication):
             'Probe and training transport differ')
 
 
+def failure_details(root):
+    """Surface worker evidence even when torchrun exits before producing a report."""
+    root = Path(root)
+    log = root/'process.log'
+    details = [f'OP5 transport probe failed; see {log}']
+    if log.is_file():
+        with log.open(errors='replace') as stream:
+            for line in stream:
+                if 'Watchdog caught collective operation timeout' in line:
+                    details.append(line.strip()[:1000])
+                    break
+    for rank in range(SETTINGS['world']):
+        path = root/f'rank{rank}.json'
+        if not path.is_file():
+            continue
+        try:
+            row = p.read(path)
+            details.append(f"rank{rank}: stage={row.get('stage', 'unknown')}; "
+                           f"error={row.get('error', 'no Python exception recorded')}"[:1000])
+        except (OSError, ValueError, AttributeError) as exc:
+            details.append(f'rank{rank}: cannot read progress ({type(exc).__name__})')
+    return '\n'.join(details)
+
+
 def controller(args):
     from tp8_dp2_train import run_process
     import ablation4_runtime as comm
@@ -138,7 +163,10 @@ def controller(args):
         p.write(args.out/'command.json', dict(protocol=PROTOCOL, run_id=run_id, settings=SETTINGS,
             communication_environment=dict(communication['environment'], **DEBUG), command=list(map(str, command))))
         op3.base.gpu_idle()
-        run_process(command, REPO, env, args.out/'process.log', 600, op3.base.Peer())
+        try:
+            run_process(command, REPO, env, args.out/'process.log', 600, op3.base.Peer())
+        except Exception as exc:
+            raise RuntimeError(failure_details(args.out)) from exc
         result = evidence(args.out)
         p.write(args.out/'report.json', result)
         print(json.dumps({k: result[k] for k in ('completed', 'gpu_us', 'wall_us', 'bitwise_correct')}), flush=True)
@@ -219,12 +247,17 @@ def packet_check(torch, dist, rank, index, source, destination, progress, *, sle
         bitwise_correct=True, non_default_stream=True, reused_buffers=True, delayed_rank=7)
 
 
-def measure(torch, dist, stream, operation, progress, kind):
+def measure(torch, dist, stream, operation, progress, kind, *, control_group):
+    # A default NCCL barrier inserts a tiny AllReduce into the data communicator.
+    # Keep timing coordination on the CPU; only the intended payload operations
+    # should advance the SHM/CE communicator between packet and gather checks.
+    require(control_group is not None and dist.get_backend(control_group) == 'gloo',
+            'OP5 timing coordination requires a separate Gloo group')
     progress(kind+'-warmup')
     for _ in range(SETTINGS['warmup']):
         operation()
     torch.cuda.synchronize()
-    dist.barrier()
+    dist.barrier(group=control_group)
     torch.cuda.synchronize()
     progress(kind+'-timing')
     start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -236,7 +269,7 @@ def measure(torch, dist, stream, operation, progress, kind):
     end.synchronize()
     wall_us = (time.perf_counter()-wall)*1e6/SETTINGS['timed_calls']
     gpu_us = start.elapsed_time(end)*1000/SETTINGS['timed_calls']
-    dist.barrier()
+    dist.barrier(group=control_group)
     torch.cuda.synchronize()
     progress(kind+'-profile')
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
@@ -271,19 +304,23 @@ def worker(args):
         row['stage'] = stage
         p.write(args.out/f'rank{rank}.json', row)
         print(f'OP5 PROBE rank={rank} stage={stage}', flush=True)
+    control_group = None
     try:
         progress('initializing')
         torch.cuda.set_device(local)
         prop = torch.cuda.get_device_properties(local)
         require(str(prop.uuid) == hardware['devices'][rank]['uuid'], 'Probe GPU changed')
         dist.init_process_group('nccl', timeout=timedelta(seconds=120))
+        control_group = dist.new_group(backend=SETTINGS['coordination_backend'],
+                                       timeout=timedelta(seconds=120))
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             packet_index = torch.arange(SETTINGS['alltoall']['peer_bytes'], device='cuda', dtype=torch.int32)
             packet_tx = torch.empty(SETTINGS['alltoall']['wire_bytes'], device='cuda', dtype=torch.uint8)
             packet_rx = torch.empty_like(packet_tx)
             exchange, waits, packet = packet_check(torch, dist, rank, packet_index, packet_tx, packet_rx, progress)
-            measurement, profiler = measure(torch, dist, stream, exchange, progress, 'alltoall')
+            measurement, profiler = measure(torch, dist, stream, exchange, progress, 'alltoall',
+                                            control_group=control_group)
             save_trace(profiler, args.out/f'rank{rank}-alltoall-profile.json.gz')
             packet.update(measurement, async_work_waits=waits())
             check_packet_record(packet, rank)
@@ -308,7 +345,8 @@ def worker(args):
                 for peer in range(8):
                     require(torch.equal(destination[peer*n:(peer+1)*n].view(torch.int16), bits(peer, epoch)),
                             f'BF16 AllGather corrupted rank {peer}, iteration {epoch}')
-            measurement, profiler = measure(torch, dist, stream, gather, progress, 'allgather')
+            measurement, profiler = measure(torch, dist, stream, gather, progress, 'allgather',
+                                            control_group=control_group)
             save_trace(profiler, args.out/f'rank{rank}-profile.json.gz')
         row.update(measurement, completed=True, stage='completed', gpu_uuid=str(prop.uuid), host=socket.gethostname(),
             environment=dict(torch=torch.__version__, cuda=torch.version.cuda,
@@ -317,10 +355,13 @@ def worker(args):
             bitwise_correct=True, non_default_stream=True, iterations=SETTINGS['correctness_iterations'])
     except BaseException as exc:
         row['error'] = f'{type(exc).__name__}: {exc}'
+        print(f"OP5 PROBE rank={rank} stage={row['stage']} error={row['error']}", flush=True)
         raise
     finally:
         p.write(args.out/f'rank{rank}.json', row)
         if dist.is_initialized():
+            if control_group is not None:
+                dist.destroy_process_group(control_group)
             dist.destroy_process_group()
 
 

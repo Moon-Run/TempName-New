@@ -302,7 +302,10 @@ def supervise(args):
         for name in ('python', 'cuda_home', 'build_cuda_home'):
             command += ['--'+name.replace('_', '-'), str(getattr(args, name))]
         env = dict(child_environment('candidate'), RTX5090_OP5_PROBE_EXECUTE='1')
-        run_child(command, env, root/'handoff/transport-probe.log')
+        try:
+            run_child(command, env, root/'handoff/transport-probe.log')
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(op5_probe.failure_details(root/'transport-probe')) from exc
         require(op5_probe.evidence(root/'transport-probe') == read(root/'transport-probe/report.json'), 'Transport probe failed')
         plan['transport_probe_sha256'] = sha(root/'transport-probe/report.json')
         write(root/'plan.json', plan)
