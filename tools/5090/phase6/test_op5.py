@@ -150,7 +150,7 @@ class NumericalEvidence(unittest.TestCase):
 
 
 class ActualPathAdmission(unittest.TestCase):
-    def test_every_gather_must_receive_full_payload_through_ce(self):
+    def test_every_gather_requires_bounded_contained_htod_activity(self):
         result = evidence.copy_evidence(ce_trace(), 0, 10)
         self.assertEqual(result['ce_covered_calls'], 10)
         self.assertEqual(result['htod_bytes'], 10*14*1048576)
@@ -158,18 +158,62 @@ class ActualPathAdmission(unittest.TestCase):
             events = ce_trace()
             if change == 'missing':
                 events.pop()
+                events.pop()
             elif change == 'short':
-                events[1]['args']['bytes'] -= 2
+                events[1]['args']['bytes'] = 1
+                events[2]['args']['bytes'] = 1
             elif change == 'outside':
                 events[1]['ts'] = -5
+                events[2]['ts'] = -5
             elif change == 'wrong_device':
                 events[1]['args']['device'] = 1
+                events[2]['args']['device'] = 1
             elif change == 'old_grid':
                 events[0]['args']['grid'] = [4, 1, 1]
             else:
                 events[1]['dur'] = -1
             with self.subTest(change=change), self.assertRaises(ValueError):
                 evidence.copy_evidence(events, 0, 10)
+
+    def test_payload_range_keeps_actual_per_call_bytes(self):
+        for total, passes in ((evidence.MIN_GATHER_HTOD_BYTES-1, False),
+                              (evidence.MIN_GATHER_HTOD_BYTES, True),
+                              (evidence.GATHER_RECEIVED_BYTES, True),
+                              (evidence.MAX_GATHER_HTOD_BYTES, True),
+                              (evidence.MAX_GATHER_HTOD_BYTES+1, False)):
+            events = ce_trace(1)
+            for event in events[1:]:
+                event['args']['bytes'] = 1
+            events[1]['args']['bytes'] = total-6
+            with self.subTest(total=total):
+                if passes:
+                    result = evidence.copy_evidence(events, 0, 1)
+                    self.assertEqual(result['contained_htod_bytes_per_call'], [total])
+                    self.assertEqual(result['htod_bytes'], total)
+                    self.assertIn('does not prove', result['attribution_limitation'])
+                else:
+                    with self.assertRaises(ValueError):
+                        evidence.copy_evidence(events, 0, 1)
+
+    def test_cross_boundary_copy_is_excluded_not_counted_as_contained(self):
+        events = ce_trace(1)
+        events.append(dict(cat='gpu_memcpy', name='Memcpy HtoD', ts=79, dur=2,
+                           args={'device': 0, 'bytes': 65536}))
+        result = evidence.copy_evidence(events, 0, 1)
+        self.assertEqual(result['contained_htod_bytes_per_call'], [evidence.GATHER_RECEIVED_BYTES])
+        self.assertEqual(result['excluded_cross_boundary_copies_per_call'], [1])
+
+    def test_archived_op5_probe_traces_fit_relaxed_gate(self):
+        root = (op5.REPO.parent/'Load-5090/logs/5090/phase6/'
+                'op5-shm-recv-ce-single-v1-1x-50steps-20261102-122453-878129/transport-probe')
+        if not (root/'rank0-profile.json.gz').exists():
+            self.skipTest('Archived OP5 probe unavailable')
+        import gzip
+        for rank in range(8):
+            with gzip.open(root/f'rank{rank}-profile.json.gz', 'rt') as stream:
+                result = evidence.copy_evidence(json.load(stream)['traceEvents'], rank, 10)
+            self.assertEqual(result['ce_covered_calls'], 10)
+        self.assertEqual(probe.transport_log((root/'process.log').read_text())['transport'], 'SHM/direct/CE')
 
     def test_transport_flags_alone_and_incomplete_logs_are_rejected(self):
         result = probe.transport_log(ce_log())

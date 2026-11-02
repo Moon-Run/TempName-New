@@ -138,6 +138,8 @@ def report(samples, trials, blocks, operator_batches=None, historical_reference_
             'The read-only reference is historical and any difference is observational, '
             'not a causal performance gain. Full-model smoke gradient hashes may differ from '
             'the historical reference; hash differences do not measure their numerical magnitude. '
+            'HtoD attribution uses temporal containment and bounded byte counts; it does not '
+            'prove copy ownership or complete payload coverage. '
             'Operator timing does not measure a complete training step.')
 
 
