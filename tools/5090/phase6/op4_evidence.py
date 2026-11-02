@@ -91,7 +91,7 @@ def profile_evidence(events, rank, channels):
         other_nccl_payloads=_histogram(other, geometry=False))
 
 
-def compare_rows(reference, candidate, mode):
+def compare_rows(reference, candidate, mode, *, communication_check=None):
     require(mode in ('smoke', 'profile', 'timing') and len(reference) == len(candidate) == 8,
             'OP4 requires eight historical and candidate rank records')
     for rows in (reference, candidate):
@@ -99,7 +99,7 @@ def compare_rows(reference, candidate, mode):
     identity = load('validation').identity
     left, right = identity(reference), identity(candidate)
     for a, b in zip(left, right):
-        compare_communication(a.pop('communication'), b.pop('communication'))
+        (communication_check or compare_communication)(a.pop('communication'), b.pop('communication'))
     require(left == right, 'OP4 historical/candidate hardware/software/model/weights/RNG/input changed')
     gradient_differences = []
     compared = candidate
@@ -219,7 +219,8 @@ def _operator_evidence(root, label, files, expected_report=None):
     return report, diagnostics, rows
 
 
-def audit_candidate(child_root, reference_root):
+def audit_candidate(child_root, reference_root, *, communication_check=None,
+                    reference_channels=4, intervention=None):
     """Validate a new candidate; never execute or mutate the historical batch."""
     child, reference = Path(child_root), Path(reference_root)
     files = {}
@@ -232,7 +233,7 @@ def audit_candidate(child_root, reference_root):
         plans.append(plan)
     reference_plan, plan = plans
     operator_only = bool(plan.get('operator_only'))
-    compare_communication(reference_plan['communication'], plan['communication'])
+    (communication_check or compare_communication)(reference_plan['communication'], plan['communication'])
     for key in ('model', 'environment', 'cuda_visible_devices'):
         require(reference_plan[key] == plan[key], 'OP4 historical/candidate plan changed: '+key)
 
@@ -267,7 +268,7 @@ def audit_candidate(child_root, reference_root):
             require(historical['roles'][role]['shape'] == current['roles'][role]['shape']
                     and historical['roles'][role]['gradient_checks'] == current['roles'][role]['gradient_checks'],
                     'Historical/candidate operator output, gradients or diagnostic updates changed')
-    result = dict(passed=True, sole_intervention=dict(CHANNEL_ENV), operator_only=operator_only,
+    result = dict(passed=True, sole_intervention=dict(CHANNEL_ENV if intervention is None else intervention), operator_only=operator_only,
         full_step_completed=not operator_only, historical_reference=True,
         concurrent_control_measured=False, historical_numerical_regression_checked=not operator_only,
         reference_binary_revalidated=False, candidate_correctness_replayed_by_controller=True,
@@ -307,12 +308,12 @@ def audit_candidate(child_root, reference_root):
         for label, root in (('reference', reference), ('candidate', child)):
             records.append([p.read(_bind(root, f"results/{job['directory']}/rank{rank}.json", label, files))
                             for rank in range(8)])
-        check = compare_rows(*records, job['mode'])
+        check = compare_rows(*records, job['mode'], communication_check=communication_check)
         check.update(comparison='historical_numerical_regression', concurrent=False)
         result['numerical_checks'].append(check)
     for rank in range(8):
         record = {}
-        for label, root, channels in (('reference', reference, 4), ('candidate', child, 16)):
+        for label, root, channels in (('reference', reference, reference_channels), ('candidate', child, 16)):
             name = f'results/profile-{p.COMBINED}/rank{rank}-profile.json.gz'
             with gzip.open(_bind(root, name, label, files), 'rt') as handle:
                 record[label] = profile_evidence(json.load(handle)['traceEvents'], rank, channels)
