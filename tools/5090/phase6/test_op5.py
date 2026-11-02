@@ -93,6 +93,25 @@ class LaunchAndReporting(unittest.TestCase):
         with patch.object(op5, 'default_build_jobs', return_value=37):
             self.assertEqual(op5.arguments(['--execute']).jobs, 37)
 
+    def test_place_reference_selection_and_explicit_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root/'Load-5090/logs/5090/phase6'/op5.DEFAULT_REFERENCE.name
+            placed = root/'Load-5090/SL3060'/op5.DEFAULT_REFERENCE.name
+            with patch.object(op5, 'REPO', root/'TempName-New'), patch.object(op5, 'DEFAULT_REFERENCE', legacy):
+                self.assertEqual(op5.arguments(['--place', '60']).reference_batch, placed)
+                legacy.mkdir(parents=True)
+                self.assertEqual(op5.arguments(['--place', '60']).reference_batch, legacy)
+                placed.mkdir(parents=True)
+                args = op5.arguments(['--place', '60', '--execute', '--trials', '1', '--blocks', '2',
+                                      '--build', str(root/'op3/build')])
+                self.assertEqual(args.reference_batch, placed)
+                command = op5.supervisor_command(args)
+                self.assertEqual(command[command.index('--reference-batch')+1], str(placed))
+                self.assertEqual(op5.arguments(['--place', '60', '--reference-batch', str(root/'other')]).reference_batch,
+                                 root/'other')
+                self.assertEqual(op5.arguments([]).reference_batch, legacy)
+
     def test_generic_build_detects_op3_and_abc_and_rejects_other_builds(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -132,6 +151,19 @@ class LaunchAndReporting(unittest.TestCase):
             self.assertEqual(events[1][2][-1], 13)
             self.assertEqual(events[3][2][-1], 13)
             self.assertEqual(args.abc_build, root/'dependencies/abc')
+
+    def test_missing_reference_fails_before_probe_with_actionable_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = op5.arguments(['--out', str(root), '--execute', '--op3-build', str(root/'build'),
+                                  '--reference-batch', str(root/'missing')])
+            p.write(root/'batch-state.json', {'status': 'launching'})
+            with patch.object(op5, 'REPO', root), patch.object(op5, 'check_overrides'), \
+                 patch.object(op5.op3.base, 'verify_controllers'), patch.object(op5, 'run_child') as child:
+                with self.assertRaisesRegex(ValueError, '--reference-batch'):
+                    op5.supervise(args)
+                child.assert_not_called()
+            self.assertEqual(p.read(root/'batch-state.json')['status'], 'failed')
 
     def test_hidden_channel_or_shm_configuration_cannot_leak(self):
         env = op5.child_environment('candidate', {})
@@ -202,9 +234,10 @@ class NumericalEvidence(unittest.TestCase):
         self.assertTrue(result['historical_gradient_hash_differences'])
 
     def test_real_op4_uses_both_windows_without_old_binary_replay(self):
-        if not (op5.DEFAULT_REFERENCE/'report.json').exists():
+        root = op5.arguments(['--place', '60']).reference_batch
+        if not (root/'report.json').exists():
             self.skipTest('Archived OP4 batch unavailable')
-        result = evidence.reference_record(op5.DEFAULT_REFERENCE)
+        result = evidence.reference_record(root)
         self.assertEqual(result['timing_windows'], 2)
         self.assertEqual(result['all_ms'], [833.4861183352768, 831.0114610381424])
         self.assertEqual(result['historical_mean_ms'], HISTORY_MS)
@@ -333,6 +366,9 @@ class Supervision(unittest.TestCase):
         build_args = ['--abc-build', str(root/'abc')] if from_abc else ['--op3-build', str(root/'build')]
         args = op5.arguments(['--out', str(root), '--execute', *build_args, '--blocks', str(blocks)])
         (root/'handoff').mkdir()
+        args.reference_batch = root/'historical'
+        p.write(args.reference_batch/'report.json', {})
+        p.write(args.reference_batch/'plan.json', {})
         p.write(root/'batch-state.json', dict(status='launching'))
         calls = []
         def run(command, env, log):

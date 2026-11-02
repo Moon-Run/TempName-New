@@ -118,15 +118,18 @@ bash tools/5090/phase6/run_op5.sh \
 
 `--build` 识别 OP3 或 OP1 ABC 构建清单：OP3 直接复用，ABC 则用于编译新的 OP3；原有 `--op3-build`、`--abc-build` 参数仍可使用。open-compress 的 build 不属于这条构建链，不能传给 OP5。若不传构建参数，脚本会在新批次下依次构建 baseline、ABC 和 OP3。首次候选窗口运行成功后，批次根目录的 `build` 是指向实际 OP3 构建的符号链接，可供后续运行复用；完整构建及其依赖必须保留。需要编译时默认并行数为 `nproc`，可用 `--jobs N` 覆盖。
 
+OP4 参考目录的自动定位不等于 OP3 构建可任意搬迁：OP3/ABC 清单保存构建及其依赖的绝对路径，仍须通过各自校验。如果构建目录已从原位置搬走，不能仅修改 `--build` 路径就假定可复用；可使用原位置的完整构建及其依赖，或不传 `--build` 重新构建。
+
 **一条命令自动完成：硬件/NCCL 预检 → 真实大小 All-to-All 探针 → 同尺寸 AllGather 探针 → 原 native 与算子检查/计时 → 全模型 smoke/profile → 10 步预热＋50 步正式训练 → OP5 审计和报告。** 默认后台运行；加 `--foreground` 可前台观察。不带 `--execute` 只预览，不访问 GPU、不创建结果目录、不编译。
 
-这条命令自动创建新的 v2 批次；重新测试时不传此前失败批次的 `--out`。默认参考仍为用户指定的 OP4 父批次：
+这条命令自动创建新的 v2 批次；重新测试时不传此前失败批次的 `--out`。默认参考是以下 OP4 父批次：
 
 ```text
-../Load-5090/logs/5090/phase6/op4-nccl-channels-single-v1-1x-50steps-20261102-105103-438654/
+../Load-5090/SL3060/op4-nccl-channels-single-v1-1x-50steps-20261102-105103-438654/   # --place 60
+../Load-5090/SL3061/op4-nccl-channels-single-v1-1x-50steps-20261102-105103-438654/   # --place 61
 ```
 
-若它存放在其他位置，加 `--reference-batch /path/to/completed-op4-parent-batch`，应传父目录，不能传其中 `block00-candidate`。入口校验该批次所有正式窗口和文件哈希，从原始 rank elapsed 重算均值；数值轨迹及 trace 对照固定使用第一个历史子窗口。没有重新运行历史 GPU 工作，也不声称重新验证了归档中缺失的历史二进制。
+指定 `--place` 时优先查找对应目录；若对应目录不存在且旧的 `../Load-5090/logs/5090/phase6/` 下该批次仍存在，则回退旧位置。不传 `--place` 时默认使用旧位置。若它存放在其他位置，加 `--reference-batch /path/to/completed-op4-parent-batch`，显式路径优先，应传父目录，不能传其中 `block00-candidate`。入口校验该批次所有正式窗口和文件哈希，从原始 rank elapsed 重算均值；数值轨迹及 trace 对照固定使用第一个历史子窗口。没有重新运行历史 GPU 工作，也不声称重新验证了归档中缺失的历史二进制。
 
 本次修复后的首次测试建议保持上面的 `--trials 1 --blocks 1`；需要观察重复性时可使用 `--blocks 2`，它表示两个候选正式窗口，共 100 步。`--operator-only --foreground --execute` 会运行同尺寸通信探针和投影算子后结束，不运行完整模型，也不产生整步达标结论。
 

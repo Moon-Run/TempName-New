@@ -45,8 +45,8 @@ def arguments(argv=None):
     parser.add_argument('--out', type=Path)
     parser.add_argument('--place', type=int, choices=(60, 61),
                         help='Put new batches under Load-5090/SL3060 or SL3061; --out overrides this')
-    parser.add_argument('--reference-batch', type=Path, default=DEFAULT_REFERENCE,
-                        help='Read-only completed OP4 parent batch; all historical windows retained')
+    parser.add_argument('--reference-batch', type=Path,
+                        help='Read-only completed OP4 parent batch; overrides --place reference lookup')
     parser.add_argument('--python', type=Path, default=Path(sys.executable))
     parser.add_argument('--megatron', type=Path, default=REPO.parent/'Megatron-LM')
     parser.add_argument('--cuda-home', type=Path, default=Path('/usr/local/cuda'))
@@ -69,6 +69,11 @@ def arguments(argv=None):
     require(args.jobs > 0 and args.worker_timeout > 300, 'Positive jobs and worker timeout > 300 required')
     require(not args.report or (args.out and not args.execute and not args.operator_only), '--report requires --out without --execute/--operator-only')
     require(not args.inside or (args.execute and args.out and not args.report), 'Invalid supervisor invocation')
+    if args.reference_batch is None:
+        placed = (REPO.parent/'Load-5090'/f'SL30{args.place}'/DEFAULT_REFERENCE.name
+                  if args.place is not None else None)
+        args.reference_batch = (placed if placed is not None and (placed.is_dir() or not DEFAULT_REFERENCE.is_dir())
+                                else DEFAULT_REFERENCE)
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
         output_root = REPO.parent/'Load-5090'
@@ -282,6 +287,9 @@ def supervise(args):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         op3.base.verify_controllers(root)
         resolve_reused_build(args)
+        require((args.reference_batch/'report.json').is_file() and (args.reference_batch/'plan.json').is_file(),
+                'OP4 reference batch is missing report.json or plan.json: '+str(args.reference_batch)
+                + '; pass --reference-batch /path/to/completed-op4-batch')
         reference = reference_record(args.reference_batch)
         plan = dict(protocol=PROTOCOL, run_id=uuid.uuid4().hex, trials=args.trials, blocks=args.blocks,
             model=p.MODEL, target_ms=TARGET_MS, nccl_overrides=OVERRIDES,
