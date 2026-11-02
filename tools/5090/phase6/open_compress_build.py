@@ -43,6 +43,10 @@ PRIOR_V2_INPUTS = dict(LEGACY_INPUTS, **{
     'open_compress_remote_first.hpp': 'f96eb0f4ff6f0eca85a1b52612e46cc67fefa738e8a120dff54dc14ad3f24498',
     'open_compress_remote_first_probe.cuh': '8acd7ac26839d22085b59af1bd279e6d31b19ad48345887d667b0eca1331edc8',
 })
+# Exact builder before NCCL path relocation support; all other inputs must
+# still match the current recipe before an existing build may be reused.
+PRE_NCCL_RELOCATION_BUILDER_SHA256 = '7aa8fbab895a12980719a5aedfa8ef91627ea5849bec096a300e2ed8cbe2aaab'
+NCCL_BUILD_FILES = ('nccl-source/build/include/nccl.h', 'nccl-source/build/lib/libnccl_static.a')
 
 
 def native_root(root, arm):
@@ -93,7 +97,30 @@ def verify_inputs(record):
                     if name != 'open_compress_build.py'),
                 'Prior v2 native/codec inputs changed; cannot reuse compiled build')
     else:
-        require(record['inputs'] == current, 'Open compression build inputs changed')
+        previous = dict(current)
+        previous['open_compress_build.py'] = PRE_NCCL_RELOCATION_BUILDER_SHA256
+        require(record['inputs'] in (current, previous), 'Open compression build inputs changed')
+
+
+def verify_nccl_files(root, records):
+    """Verify build-owned NCCL files at their current location, not old paths."""
+    require(isinstance(records, dict) and len(records) == len(NCCL_BUILD_FILES),
+            'Missing NCCL dependency records')
+    normalized = {}
+    for name, expected in records.items():
+        path = Path(name)
+        require('..' not in path.parts, 'Invalid NCCL dependency path: '+name)
+        matches = [relative for relative in NCCL_BUILD_FILES
+                   if path == Path(relative) or (path.is_absolute()
+                       and path.parts[-len(Path(relative).parts):] == Path(relative).parts)]
+        require(len(matches) == 1 and matches[0] not in normalized,
+                'Unexpected or duplicate NCCL dependency path: '+name)
+        normalized[matches[0]] = expected
+    require(set(normalized) == set(NCCL_BUILD_FILES), 'Missing NCCL dependency records')
+    for relative, expected in normalized.items():
+        path = Path(root)/relative
+        require(path.is_file(), 'Missing NCCL dependency in current build: '+str(path))
+        require(sha(path) == expected, 'NCCL dependency changed: '+str(path))
 
 
 def dependency_identity():
@@ -266,8 +293,8 @@ def verify(root, built=False):
                     'Missing Flux Python extension')
         require('codec/libopen_compress.so' in record['files']
                 and any(name.startswith('megatron/') for name in record['files']), 'Missing codec/Megatron build')
-        for name, expected in record.get('nccl_files', {}).items():
-            require(sha(name) == expected, 'NCCL dependency changed')
+        nccl_root = Path(record['reference']['root']) if record.get('reference') else root
+        verify_nccl_files(nccl_root, record.get('nccl_files'))
         from native_exports import verify_native_exports
         verify_native_exports(root/'flux-interleaved/libflux_cuda.so', op1_a_swizzle.EXPORTS)
         if not legacy:
@@ -364,7 +391,11 @@ def compile_build(root, megatron, cuda_home, jobs=None):
             nccl = reference/'nccl-source/build'
         require((nccl/'lib/libnccl_static.a').is_file(), 'NCCL static build missing')
         env['NCCL_ROOT'] = str(nccl)
-        record['nccl_files'] = {str(nccl/name): sha(nccl/name) for name in ('include/nccl.h', 'lib/libnccl_static.a')}
+        if reference is None:
+            record['nccl_files'] = {name: sha(root/name) for name in NCCL_BUILD_FILES}
+        else:
+            # Preserve the immutable parent's records, including legacy paths.
+            record['nccl_files'] = parent['nccl_files']
         for name in (('flux-remote-first',) if reference else VARIANTS):
             source = root/name
             run(['cmake', '-S', source, '-B', source/'build', '-DCUDAARCHS=120', '-DGPU_SM_CORES=170',

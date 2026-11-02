@@ -127,6 +127,8 @@ decoded[i] = round_bf16(float(q[i]) * scale)
 
 本阶段不需要同步 `qutlass`、`COCCL_TACO` 或已有 TACO `.so`。不把开发机或 H100 的 Flux/CUDA 二进制搬到 5090 复用；入口会在目标环境构建原顺序、交替顺序和远端优先 Flux 以及独立 INT8 codec。`--build` 可复用身份验证通过的完整 v2 构建；传入已完成的 v1 三组构建时，在新批次建立只读引用，并仅增量构建远端优先 Flux，不改写旧 manifest、二进制或实验数据。原 v1 构建、固定依赖与 ABI 环境必须仍可访问且通过校验；未知版本拒绝复用。
 
+完整构建在同一兼容环境内搬迁后，旧清单中的 NCCL 绝对路径按当前构建目录内的 `nccl-source/build/include/nccl.h` 和 `nccl-source/build/lib/libnccl_static.a` 解析，并继续逐文件检查原 SHA256；新构建使用相对路径记录。旧清单不会被修改。搬迁时需保留这两个文件、全部二进制和正确的依赖链接，Python/CUDA ABI 和依赖身份仍必须匹配。引用 v1 父构建的 overlay 仍要求其清单所记录的父构建路径和只读链接可访问，此修复不自动搬迁父构建或重写链接。
+
 构建依赖为支持 SM120 的 CUDA Toolkit（至少 12.8，现有目标为 12.9）、C++ 编译器、CMake/构建工具、PyTorch CUDA 和 C++ 扩展开发环境，以及固定 Megatron 所需的 Apex、Transformer Engine 和 Python 依赖。推荐复用现有 `nvcr.io/nvidia/pytorch:25.06-py3` 环境；所有原生扩展应与当前 PyTorch/CUDA 匹配。需要八卡可见、足够主机共享内存以及无其他训练任务占用 GPU。详见 [5090 环境说明](../../../env/README_5090.md)。
 
 ```bash

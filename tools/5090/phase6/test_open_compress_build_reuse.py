@@ -2,6 +2,7 @@
 import copy
 import hashlib
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -59,11 +60,47 @@ def legacy_fixture(root):
     return record
 
 
+def v2_fixture(root):
+    record = legacy_fixture(root)
+    record.update(protocol=b.PROTOCOL, arms=list(b.FLUX_ARMS), inputs=b.inputs())
+    name = 'flux-remote-first'
+    source = root/name
+    source_hashes = {}
+    for relative in (remote.KERNEL, 'src/cuda/version.ld'):
+        path = put(source/relative, (b.REPO/relative).read_text())
+        source_hashes[relative] = b.sha(path)
+    record['variants'][name] = dict(source_sha256=source_hashes, modified_files=[])
+    (source/'3rdparty').mkdir()
+    (source/'3rdparty/cutlass').symlink_to(b.REPO/'3rdparty/cutlass', target_is_directory=True)
+    registration = put(source/'build/src/comm_none/registers/fixture_sm89.cu',
+                       remote.registration_source(ORIGINAL_REGISTRATION))
+    record['registrations'][name] = dict(path=str(registration.relative_to(root)), sha256=b.sha(registration),
+        generated_sha256=hashlib.sha256(ORIGINAL_REGISTRATION.encode()).hexdigest())
+    paths = [registration, put(source/'python/flux_ths_pybind.fixture.so', b'CPU fixture pybind')]
+    for library in ('libflux_cuda.so', 'libflux_cuda_ths_op.so'):
+        paths.append(put(source/'python/flux/lib'/library, b'CPU fixture native'))
+        (source/library).symlink_to(Path('python/flux/lib')/library)
+        paths.append(source/library)
+    record['files'].update({str(path.relative_to(root)): b.sha(path) for path in paths})
+    b.write(root/b.MANIFEST, record)
+    return record
+
+
 def file_hashes(root):
     return {str(path.relative_to(root)): b.sha(path) for path in root.rglob('*') if path.is_file() and not path.is_symlink()}
 
 
 class RemoteFirst(unittest.TestCase):
+    def test_pre_relocation_builder_remains_reusable_only_with_matching_inputs(self):
+        prior = dict(b.inputs())
+        prior['open_compress_build.py'] = b.PRE_NCCL_RELOCATION_BUILDER_SHA256
+        record = dict(protocol=b.PROTOCOL, inputs=prior)
+        b.verify_inputs(record)
+        for name in ('open_compress_build.py', 'open_compress_codec.cu', 'rtx5090_defaults.py'):
+            bad = copy.deepcopy(record)
+            bad['inputs'][name] = '0'*64
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                b.verify_inputs(bad)
     def test_exact_prior_v2_inputs_remain_reusable_after_jobs_default_change(self):
         record = dict(protocol=b.PROTOCOL,inputs=dict(b.PRIOR_V2_INPUTS))
         b.verify_inputs(record)
@@ -199,6 +236,32 @@ class LegacyOverlay(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'same Python/CUDA ABI'):
                 b.compile_build(new, self.root/'missing', self.root/'cuda')
         self.assertEqual(b.read(new/b.MANIFEST)['status'], 'prepared')
+
+    def test_moved_v2_verifies_current_nccl_files_without_mutating_manifest(self):
+        original = self.root/'old-v2'
+        record = v2_fixture(original)
+        moved = self.root/'moved-v2'
+        shutil.copytree(original, moved, symlinks=True)
+        manifest_before = (moved/b.MANIFEST).read_bytes()
+        self.assertEqual(b.verify(moved, True), record)
+        self.assertEqual((moved/b.MANIFEST).read_bytes(), manifest_before)
+        moved_header = moved/'nccl-source/build/include/nccl.h'
+        moved_header.write_text('changed, while original remains intact')
+        with self.assertRaisesRegex(ValueError, 'NCCL dependency changed'):
+            b.verify(moved, True)
+        moved_header.unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing NCCL dependency in current build'):
+            b.verify(moved, True)
+
+    def test_nccl_relative_records_and_invalid_paths(self):
+        nccl_files = {name: b.sha(self.old/name) for name in b.NCCL_BUILD_FILES}
+        b.verify_nccl_files(self.old, nccl_files)
+        bad = dict(nccl_files)
+        bad['../nccl-source/build/include/nccl.h'] = bad.pop(b.NCCL_BUILD_FILES[0])
+        with self.assertRaisesRegex(ValueError, 'Invalid NCCL dependency path'):
+            b.verify_nccl_files(self.old, bad)
+        with self.assertRaisesRegex(ValueError, 'Missing NCCL dependency records'):
+            b.verify_nccl_files(self.old, {})
 
 
 if __name__ == '__main__':
