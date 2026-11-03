@@ -90,12 +90,12 @@ class Launch(unittest.TestCase):
                                       '--build', '/CPU/reusable build'])
             self.assertEqual(args.out.parent.name, f'SL30{place}')
             self.assertEqual(args.jobs, 37)
-            self.assertEqual(args.reserve_mib, 31846)
+            self.assertEqual(args.reserve_mib, 30000)
             rebuilt = op6.arguments(op6.supervisor_command(args)[2:])
             self.assertEqual(rebuilt.build, args.build)
             self.assertEqual(rebuilt.trials, 3)
             self.assertEqual(rebuilt.blocks, 2)
-            self.assertEqual(rebuilt.reserve_mib, 31846)
+            self.assertEqual(rebuilt.reserve_mib, 30000)
         args = op6.arguments(['--place', '60', '--out', '/CPU/explicit'])
         self.assertEqual(args.out, Path('/CPU/explicit'))
 
@@ -108,7 +108,7 @@ class Launch(unittest.TestCase):
             self.assertEqual(command[command.index('--trials')+1], '1')
             self.assertIn('--foreground', command)
             self.assertEqual(command[command.index('--op3-build')+1], '/CPU/build with spaces')
-            self.assertEqual(command[command.index('--reserve-mib')+1], '31846')
+            self.assertEqual(command[command.index('--reserve-mib')+1], '30000')
 
     def test_channel_and_op5_override_guards(self):
         with patch.object(op6, 'check_overrides'):
@@ -135,7 +135,7 @@ class Launch(unittest.TestCase):
             plan = json.loads(process.stdout[process.stdout.index('{'):])
             self.assertEqual(plan['arms'], ['op4', 'op6'])
             self.assertEqual(plan['formal_optimizer_steps'], 200)
-            self.assertEqual(plan['memory_reservation']['mib_per_gpu'], 31846)
+            self.assertEqual(plan['memory_reservation']['mib_per_gpu'], 30000)
             self.assertFalse(plan['memory_reservation']['held_during_gpu_work'])
             self.assertFalse(out.exists())
 

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-DEFAULT_MIB = 31846
+DEFAULT_MIB = 30000
 MIB = 1024**2
 GPU_COUNT = 8
 

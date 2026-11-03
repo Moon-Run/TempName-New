@@ -21,7 +21,7 @@ import op6_memory as memory
 class DriverLifecycle(unittest.TestCase):
     def allocation(self, fail_device=None):
         allocation = memory.CudaAllocation.__new__(memory.CudaAllocation)
-        allocation.size, allocation.allocations = 31846*memory.MIB, []
+        allocation.size, allocation.allocations = 30000*memory.MIB, []
         allocation.release_name = 'cuDevicePrimaryCtxRelease_v2'
         calls, current = [], [None]
 
@@ -43,7 +43,7 @@ class DriverLifecycle(unittest.TestCase):
                 args[0]._obj.value = (10 if current[0] == fail_device else 32000)*memory.MIB
                 args[1]._obj.value = 32768*memory.MIB
             elif name == 'cuMemAlloc_v2':
-                self.assertEqual(args[1], 31846*memory.MIB)
+                self.assertEqual(args[1], 30000*memory.MIB)
                 args[0]._obj.value = 100+current[0]
         allocation.call = call
         return allocation, calls
@@ -51,10 +51,10 @@ class DriverLifecycle(unittest.TestCase):
     def test_exact_allocation_on_all_eight_and_eof_releases_every_device(self):
         allocation, calls = self.allocation()
         output = io.StringIO()
-        memory.holder(31846, io.BytesIO(b''), output, lambda _mib: allocation)
+        memory.holder(30000, io.BytesIO(b''), output, lambda _mib: allocation)
         ready = json.loads(output.getvalue())
         self.assertEqual([r['device'] for r in ready['devices']], list(range(8)))
-        self.assertEqual({r['allocated_bytes'] for r in ready['devices']}, {31846*memory.MIB})
+        self.assertEqual({r['allocated_bytes'] for r in ready['devices']}, {30000*memory.MIB})
         self.assertEqual([device for name, device in calls if name == 'cuMemFree_v2'], list(range(7, -1, -1)))
         self.assertEqual(allocation.allocations, [])
 
@@ -62,7 +62,7 @@ class DriverLifecycle(unittest.TestCase):
         allocation, calls = self.allocation(fail_device=2)
         output = io.StringIO()
         with self.assertRaisesRegex(RuntimeError, 'GPU 2'):
-            memory.holder(31846, io.BytesIO(b''), output, lambda _mib: allocation)
+            memory.holder(30000, io.BytesIO(b''), output, lambda _mib: allocation)
         self.assertEqual(output.getvalue(), '')
         self.assertEqual([device for name, device in calls if name == 'cuMemFree_v2'], [1, 0])
         self.assertEqual(sum(name == allocation.release_name for name, _ in calls), 3)
@@ -73,7 +73,7 @@ class DriverLifecycle(unittest.TestCase):
         stream = Mock()
         stream.read.side_effect = KeyboardInterrupt
         with self.assertRaises(KeyboardInterrupt):
-            memory.holder(31846, stream, io.StringIO(), lambda _mib: allocation)
+            memory.holder(30000, stream, io.StringIO(), lambda _mib: allocation)
         self.assertEqual(sum(name == 'cuMemFree_v2' for name, _ in calls), 8)
 
     def test_one_free_failure_does_not_skip_other_contexts(self):
@@ -105,7 +105,7 @@ try:
     if {early_exit!r}: raise RuntimeError('allocation failed')
     if {ready!r}:
         print(json.dumps(dict(status='ready', pid=os.getpid(), devices=[
-            dict(device=i, allocated_bytes=31846*1024**2, pci_bus_id=str(i)) for i in range(8)])), flush=True)
+            dict(device=i, allocated_bytes=30000*1024**2, pci_bus_id=str(i)) for i in range(8)])), flush=True)
     sys.stdin.buffer.read(1)
 finally:
     Path({str(marker)!r}).write_text('released')
@@ -121,7 +121,7 @@ finally:
             root = Path(tmp)
             with self.fake_gpu_process(root) as marker:
                 idle = Mock()
-                reserve = memory.Reservation(sys.executable, root, 31846, idle)
+                reserve = memory.Reservation(sys.executable, root, 30000, idle)
                 reserve.acquire()
                 process = reserve.process
                 self.assertIsNone(process.poll())
@@ -138,7 +138,7 @@ finally:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 with self.fake_gpu_process(root, **options) as marker:
-                    reserve = memory.Reservation(sys.executable, root, 31846, lambda: None, ready_timeout=.2)
+                    reserve = memory.Reservation(sys.executable, root, 30000, lambda: None, ready_timeout=.2)
                     with self.assertRaises(RuntimeError):
                         reserve.acquire()
                     self.assertIsNone(reserve.process)
@@ -148,7 +148,7 @@ finally:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with self.fake_gpu_process(root):
-                reserve = memory.Reservation(sys.executable, root, 31846, lambda: None)
+                reserve = memory.Reservation(sys.executable, root, 30000, lambda: None)
                 reserve.acquire()
                 reserve.process.kill()
                 reserve.process.wait()
@@ -172,7 +172,7 @@ finally:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 with self.fake_gpu_process(root) as marker, patch.object(op6.op3.base, 'gpu_idle'):
-                    calls, error = Supervision().run_fixture(root, failure, reserve_mib=31846)
+                    calls, error = Supervision().run_fixture(root, failure, reserve_mib=30000)
                 self.assertEqual(error is None, failure is None)
                 self.assertEqual(marker.read_text(), 'released')
                 events = [json.loads(line) for line in (root/'handoff/memory-reservation.jsonl').read_text().splitlines()]
@@ -237,7 +237,7 @@ class StageHandoff(unittest.TestCase):
             kill.assert_called_once_with(123456, signal.SIGTERM)
 
     def test_reservation_option_is_propagated_and_can_be_disabled(self):
-        for mib in (0, 31846):
+        for mib in (0, 30000):
             args = op6.arguments(['--reserve-mib', str(mib)])
             rebuilt = op6.arguments(op6.supervisor_command(args)[2:])
             self.assertEqual(rebuilt.reserve_mib, mib)
@@ -254,7 +254,7 @@ class StageHandoff(unittest.TestCase):
                 self.assertFalse(root.exists())
             with patch.object(op6_child.op3, 'main', side_effect=main), \
                     patch.object(memory, 'session', side_effect=AssertionError('reserved too early')):
-                op6_child.main(['--variant', 'op6', '--reserve-mib', '31846', '--execute',
+                op6_child.main(['--variant', 'op6', '--reserve-mib', '30000', '--execute',
                                 '--foreground', '--out', str(root), '--op3-build', '/build'])
 
 

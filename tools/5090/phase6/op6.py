@@ -68,7 +68,7 @@ def arguments(argv=None):
     parser.add_argument('--jobs', type=int, default=default_build_jobs(), help='Build workers; default nproc')
     parser.add_argument('--worker-timeout', type=int, default=3600)
     parser.add_argument('--reserve-mib', type=int, default=op6_memory.DEFAULT_MIB,
-                        help='Idle-only allocation per GPU; default 31846 MiB; 0 disables')
+                        help=f'Idle-only allocation per GPU; default {op6_memory.DEFAULT_MIB} MiB; 0 disables')
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true')
     parser.add_argument('--report', action='store_true', help='Read-only verification of a completed --out')
