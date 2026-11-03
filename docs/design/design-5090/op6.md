@@ -284,3 +284,30 @@ bash tools/5090/phase6/run_op6.sh \
 ### 9.1 默认占位下调为30000 MiB（2026-11-03）
 
 [222704 批次的占位日志](../../../../Load-5090/SL3061/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-222704-193075/handoff/memory-holder.log) 显示：GPU0 在初始化上下文后只有31599 MiB空闲，无法满足原31846 MiB申请。本次按用户要求将默认值下调为 **30000 MiB/卡**；空档占位、GPU任务前交接和结束自动释放的逻辑保持不变。同步 `op6_memory.py` 和 `op6.py` 后，原启动命令即使用新默认值，也可显式加 `--reserve-mib 30000`。原失败批次及日志不修改，重新运行创建新批次。
+
+## 10. SL3061 根盘满导致 profile 导出失败的修复（2026-11-03）
+
+[223559 批次的 profile 日志](../../../../Load-5090/SL3061/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-223559-519420/compare1/block00-op4/results/profile-op3-combined/process.log) 在八个 rank 上先报 `Failed to write to log file!`，随后读取 `/tmp/flux-e2e-scale-trace-.../trace.json` 时抛出 `FileNotFoundError`。八个最终 `.gz` 文件解压后均为0字节。该批次在 OP4 全模型 smoke 之后、正式计时之前停止，OP6 尚未开始。
+
+用户在目标机确认：`/tmp` 位于891G的容器根盘 overlay，已用100%、仅余238 MiB；新的 `/workspace` 挂载盘仍有174 GiB可用。inode未耗尽，`/tmp` 权限为1777。结合八 rank 导出错误，问题在根盘的临时 trace 存储空间，不是30000 MiB显存占位或模型GPU OOM。父批次1次、子批次7次占位均正常释放；最后一次释放在北京时间22:39:58，profile写文件失败在22:40:34。
+
+修复只作用于 OP6 的两个生成 worker：
+
+- [op6_profile_io.py](../../../tools/5090/phase6/op6_profile_io.py) 在当前 `OUT` 目录下创建每 rank 独立的隐藏临时目录，例如 `compare1/block00-op4/results/profile-op3-combined/.op6-profile-rank0-.../`。未压缩 trace 和待完成 gzip 均落在结果目录所在文件系统；默认SL3061路径对应 `/workspace` 新挂载盘，不再经过系统 `/tmp`，无需设置 `TMPDIR`。
+- 先用Python创建目标临时文件，保留可用的 `ENOSPC`、权限或配额错误信息；导出后核对非空、JSON完整且有非空 `traceEvents`。Kineto仅打印错误而未抛Python异常时，也会明确失败。
+- 校验通过后分块压缩；gzip完整关闭后，才通过同文件系统的原子重命名发布 `rankN-profile.json.gz`。导出、JSON校验或压缩中途失败时不会留下空的最终文件。函数不覆盖已有结果，临时目录正常清理。
+- 错误信息包含实际输出目录、可用字节和可用inode。输出盘若也不足仍会失败，不跳过profile验证或伪造通过记录。
+
+[op6_sources.py](../../../tools/5090/phase6/op6_sources.py) 仅替换原 profile 捕获结束之后的文件导出块，并将新helper与源码哈希一同打包；[op6_validation.py](../../../tools/5090/phase6/op6_validation.py) 检查其身份。原训练函数、profiler捕获区间、正式计时循环和数值检查继续接受原精确AST校验；校验时只还原这一处已注册的I/O替换，不修改共享OP3/H100验证器。OP3算子profile原本已写入批次输出目录，无需迁移。30000 MiB空档占位规则保留。
+
+同步以下三个运行文件，再使用原命令创建新批次：
+
+```text
+tools/5090/phase6/op6_sources.py
+tools/5090/phase6/op6_validation.py
+tools/5090/phase6/op6_profile_io.py
+```
+
+现有OP3/ABC native build仍可复用。本次没有清空 `/tmp`、删除其他任务文件或修改旧失败批次。根盘的通用清理不由本次脚本执行；此修复迁移的是OP6大体积模型trace的临时文件。
+
+验证：79项OP6回归测试全部通过；随后新增的真实CPU profiler导出测试也通过（导出专项共9项通过）。覆盖系统临时目录不可用、空/缺失/截断JSON、导出或压缩期间磁盘满、八rank并发、已有文件保护，以及只允许profile导出I/O替换、仍拒绝训练/计时/capture改动。新文档链接和 `git diff --check` 通过。尚未在SL3061重新执行完整GPU实验。

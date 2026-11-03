@@ -13,7 +13,8 @@ def validate_graph_rows(rows, job, plan, worker, variant):
     cfg = worker['config']
     p.require(cfg.get('op6_protocol') == sources.PROTOCOL and cfg.get('op6_variant') == variant
               and cfg.get('op6_implementation') == expected
-              and worker['files'].get('op6_adapter.py') == p.sha(HERE/'op6_adapter.py'),
+              and worker['files'].get('op6_adapter.py') == p.sha(HERE/'op6_adapter.py')
+              and worker['files'].get('op6_profile_io.py') == p.sha(HERE/'op6_profile_io.py'),
               'OP6 worker graph implementation changed')
     mode = job['mode']
     warmup, count = (2, 3) if mode == 'smoke' else (10, 1 if mode == 'profile' else 50)

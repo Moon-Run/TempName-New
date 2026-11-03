@@ -22,6 +22,7 @@ def fixture(variant, mode='smoke'):
     worker['config'].update(op6_protocol=sources.PROTOCOL, op6_variant=variant,
                             op6_implementation=sources.implementation(variant))
     worker['files']['op6_adapter.py'] = p.sha(sources.ADAPTER)
+    worker['files']['op6_profile_io.py'] = p.sha(sources.PROFILE_IO)
     for row in rows:
         row.update(op6_variant=variant, op6_implementation=sources.implementation(variant),
                    op6_attention_graph_state=(completed_state(row['warmup_steps']+len(row['losses']), mode)
@@ -30,9 +31,12 @@ def fixture(variant, mode='smoke'):
 
 
 class SourceGeneration(unittest.TestCase):
-    def test_only_setup_and_reporting_change_training_functions_and_timing_stay_original(self):
+    def test_only_setup_reporting_and_export_change_training_and_capture_stay_original(self):
         before = ast.parse(sources._worker_source(p.COMBINED))
-        after = ast.parse(sources.worker_source(p.COMBINED))
+        generated = sources.worker_source(p.COMBINED)
+        after = ast.parse(generated.replace(sources.PROFILE_EXPORT, sources.LEGACY_PROFILE_EXPORT))
+        self.assertNotIn("dir='/tmp'", generated)
+        self.assertEqual(generated.count('export_profile(profiler, OUT, rank)'), 1)
         functions = lambda tree: {n.name: ast.dump(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
         self.assertEqual(functions(before), functions(after))
         timing = lambda tree: [ast.dump(n) for n in tree.body if isinstance(n, (ast.For, ast.With))
@@ -71,9 +75,18 @@ class SourceGeneration(unittest.TestCase):
                     scripts = Path(worker['root'])
                     self.assertEqual(worker['config']['op6_implementation'], sources.implementation(variant))
                     self.assertEqual((scripts/'op6_adapter.py').read_bytes(), sources.ADAPTER.read_bytes())
+                    self.assertEqual((scripts/'op6_profile_io.py').read_bytes(), sources.PROFILE_IO.read_bytes())
                     self.assertEqual((scripts/'worker.py').read_text(), sources.worker_source(p.COMBINED))
                     self.assertEqual(worker['files'], {path.name: p.sha(path) for path in scripts.iterdir() if path.is_file()})
             self.assertEqual((original_sources.worker_source, original_sources.prepare_workers), original)
+
+    def test_export_exception_does_not_admit_training_or_capture_changes(self):
+        source = sources.worker_source(p.COMBINED)
+        for old, new in (('losses,success,grad_norm=step()', 'losses,success,grad_norm=other_step()'),
+                         ('range(count)', 'range(count+1)'),
+                         ('export_profile(profiler, OUT, rank)', 'export_profile(profiler, OUT, 0)')):
+            with self.subTest(change=old), self.assertRaises(ValueError):
+                sources.validate_worker(source.replace(old, new))
 
 
 class EvidenceAdmission(unittest.TestCase):
@@ -119,6 +132,17 @@ class EvidenceAdmission(unittest.TestCase):
             restore = validation.install(variant)
             try:
                 with self.assertRaises(ValueError):
+                    original_validation.validate_rows(rows, job, plan, worker)
+            finally:
+                restore()
+
+    def test_both_variants_require_the_frozen_profile_exporter(self):
+        for variant in sources.VARIANTS:
+            rows, job, plan, worker = fixture(variant)
+            worker['files'].pop('op6_profile_io.py')
+            restore = validation.install(variant)
+            try:
+                with self.subTest(variant=variant), self.assertRaises(ValueError):
                     original_validation.validate_rows(rows, job, plan, worker)
             finally:
                 restore()

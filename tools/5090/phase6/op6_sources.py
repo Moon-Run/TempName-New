@@ -1,4 +1,4 @@
-"""Add a local attention graph boundary to the unchanged OP4 worker.
+"""OP4/OP6 worker overlays for local graphs and output-filesystem trace export.
 
 Both variants use identical generated training code and original OP3 native
 artifacts. The explicit configuration selects candidate-only graph setup.
@@ -13,6 +13,15 @@ import op3_sources as original
 PROTOCOL = 'rtx5090-phase6-op6-local-attention-graph-paired-v1'
 VARIANTS = ('op4', 'op6')
 ADAPTER = HERE/'op6_adapter.py'
+PROFILE_IO = HERE/'op6_profile_io.py'
+LEGACY_PROFILE_EXPORT = """    with tempfile.TemporaryDirectory(prefix='flux-e2e-scale-trace-',dir='/tmp') as temp:
+        path=Path(temp)/'trace.json'
+        profiler.export_chrome_trace(str(path))
+        with gzip.open(OUT/f'rank{rank}-profile.json.gz','wb') as target:target.write(path.read_bytes())
+"""
+PROFILE_EXPORT = """    from op6_profile_io import export_profile
+    export_profile(profiler, OUT, rank)
+"""
 _worker_source = original.worker_source
 _prepare_workers = original.prepare_workers
 
@@ -22,6 +31,7 @@ def implementation(variant):
     return dict(protocol=PROTOCOL, variant=variant,
                 attention_graphs=variant == 'op6',
                 adapter_sha256=p.sha(ADAPTER),
+                profile_exporter_sha256=p.sha(PROFILE_IO),
                 scope='local_attention_only', communication_captured=False,
                 optimizer_captured=False, original_op3_native=True)
 
@@ -29,6 +39,15 @@ def implementation(variant):
 def replace_once(source, old, new):
     p.require(source.count(old) == 1, 'OP6 worker source anchor changed: '+old)
     return source.replace(old, new)
+
+
+def validate_worker(source):
+    # Normalize only the registered post-capture file I/O replacement. The
+    # original training functions, capture region and timed loop remain under
+    # their original exact AST fingerprints; no global validator is relaxed.
+    normalized = replace_once(source, PROFILE_EXPORT, LEGACY_PROFILE_EXPORT)
+    original.base.validate_worker(normalized)
+    original.previous.validate_installation(source)
 
 
 def worker_source(arm):
@@ -49,8 +68,8 @@ report['op6_implementation'] = PLAN['op6_implementation']
 report['op6_attention_graph_state'] = (op6_attention_graph_tracker.state()
     if op6_attention_graph_tracker is not None else {'installed': False})
 ''')
-    original.base.validate_worker(source)
-    original.previous.validate_installation(source)
+    source = replace_once(source, LEGACY_PROFILE_EXPORT, PROFILE_EXPORT)
+    validate_worker(source)
     return source
 
 
@@ -61,6 +80,7 @@ def prepare_workers(build, out, plan, variant):
     for worker in workers.values():
         scripts = Path(worker['root'])
         shutil.copy2(ADAPTER, scripts/ADAPTER.name)
+        shutil.copy2(PROFILE_IO, scripts/PROFILE_IO.name)
         cfg = worker['config']
         cfg.update(op6_protocol=PROTOCOL, op6_variant=variant,
                    op6_implementation=implementation(variant))
