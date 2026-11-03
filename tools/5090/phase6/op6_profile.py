@@ -13,6 +13,13 @@ from ma9_profile import contains, require
 
 PROTOCOL = 'rtx5090-op6-local-attention-graph-v1'
 VARIANTS = ('op4', 'op6')
+# Local empirical admission bounds for the pinned SM120/CUPTI workload. These
+# are not a hardware clock-accuracy guarantee. The first eight-rank capture
+# showed <=0.896 us end-timestamp overlap (<=23.91% of the shorter kernel).
+# Retain a hard absolute AND relative cap, unique graph-launch correlation,
+# device/context/stream equality, ordered starts, and strict staging boundaries.
+GRAPH_KERNEL_TIMESTAMP_TOLERANCE_US = 1.0
+GRAPH_KERNEL_TIMESTAMP_MAX_FRACTION = .25
 RNG_SOURCE = ('https://github.com/pytorch/pytorch/blob/5228986c39/'
               'aten/src/ATen/cuda/CUDAGeneratorImpl.cpp#L198-L208')
 GEMM_PREFIXES = (
@@ -80,6 +87,8 @@ def _graph_auditor():
     exec(compile(source, str(source_path), 'exec'), module.__dict__)
     module._family = _family
     module._rng_replay_prologue = _rng_replay_prologue
+    module.GRAPH_KERNEL_TIMESTAMP_TOLERANCE_US = GRAPH_KERNEL_TIMESTAMP_TOLERANCE_US
+    module.GRAPH_KERNEL_TIMESTAMP_MAX_FRACTION = GRAPH_KERNEL_TIMESTAMP_MAX_FRACTION
     return module
 
 
@@ -114,6 +123,13 @@ def attention_graph_records(events, variant, rank=None):
     result['kernel_signatures'] = {
         phase: [list(item) for item in signature]
         for phase, signature in result['kernel_signatures'].items()}
+    result['timestamp_order_check'].update(
+        policy='op6-sm120-correlated-graph-kernel-timestamps-v1',
+        note='Empirical OP6 trace-admission bounds, not guaranteed timestamp accuracy. '
+             'Only kernels within the same uniquely correlated graph launch and '
+             'device/context/stream may have bounded endpoint overlap. Starts, '
+             'staging copies, replay boundaries and compute dependency sequence '
+             'remain checked; raw timestamps are never rewritten.')
     if rank is not None:
         require(type(rank) is int and 0 <= rank < 8, 'Wrong OP6 graph rank')
         launches = {e['args']['correlation'] for e in events if graph_auditor._is_graph_launch(e)}

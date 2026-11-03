@@ -1,6 +1,6 @@
 # OP6：在 OP4 上重放局部 Attention CUDA Graph
 
-更新：2026-11-03。**本轮选择减少本地 attention 的重复主机提交，在 OP4 上只增加每层 attention core 的前向／反向 CUDA Graph。已实现方案和同期 OP4／OP6 对比脚本，目标为完整 optimizer step ≤800 ms；尚无 OP6 的 5090 GPU 正确性或性能实测，不能声称已达到目标。**
+更新：2026-11-03。**本轮选择减少本地 attention 的重复主机提交，在 OP4 上只增加每层 attention core 的前向／反向 CUDA Graph。已实现方案和同期 OP4／OP6 对比脚本，目标为完整 optimizer step ≤800 ms；首轮 OP4 已实测830.484 ms，OP6 已通过 GPU smoke，但在 profile 容差检查处中止，尚无正式 OP6 步时，不能声称已达到目标。最新结果与修复见第8节。**
 
 [OP4](op4-improve.md) 两个已完成窗口为 833.486、831.011 ms，均值 **832.249 ms/step**。到 800 ms 需要净省约 **32.249 ms，即 3.875%**。本次重新测量 OP4 对照组，历史 832.249 ms 只说明选题背景，不混入配对统计。[baseline.md](baseline.md) 的慢卡替换情景也不是本次可直接兑现的收益。
 
@@ -185,3 +185,57 @@ bash tools/5090/phase6/run_op6.sh \
 新增回归测试覆盖：编译期间修改独立 OP5 文件不再中止新 OP6 批次；修改 OP6/OP3、CUDA 源码、H100 helper 或冻结副本仍失败；旧清单仍严格验证；父批次、两个子组及预检均采用正确入口，退出后恢复原收集器。
 
 本次在已有 PyTorch 环境运行全部 **53项 OP6 CPU 测试，全部通过、无跳过**；shell 语法、复用 ABC 构建的命令预览、文档链接及 `git diff --check` 通过。尚未在目标机重跑 GPU 实验，此次修复不构成800ms或图捕获通过的实测结论。
+
+## 8. 首个 OP4 窗口完成，OP6 profile 时间戳门禁中止（2026-11-03）
+
+[011706 批次总日志](../../../../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-011706-043929/handoff/supervisor.log) **没有完成一对 block**。`compare1` 是第一个 trial；其中 `block00-op4` 与 `block00-op6` 都完成正式计时并通过配对审计，才算一个完整 block。本次计划4块、8窗口、400个正式 step，实际只完成 OP4 的一个50步正式窗口：
+
+| 组别 | 阶段／状态 | 正式 ms/step | tokens/s |
+| --- | --- | ---: | ---: |
+| OP4 | `completed`，10步预热＋50步计时 | **830.4842508397996** | **9864.12** |
+| OP6 | native、投影算子、全模型 smoke 已通过；profile 审计失败 | 尚无 | 尚无 |
+
+OP4 数值来自 [子批报告](../../../../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-011706-043929/compare1/block00-op4/report.md)，并按八 rank 最大 `elapsed_seconds / 50` 重算核对。OP6 profile 的单步记录有 profiler 开销，不作为正式步时；因此本批不能计算配对收益，也不能判断是否达到800ms。
+
+### 8.1 失败点与原始 trace
+
+[OP6 子批日志](../../../../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-011706-043929/compare1/block00-op6-supervisor.log) 表明八 rank 的 profile worker 已返回，控制器解析 rank0 trace 时在复用的 `_same_stream_order` 中报：
+
+```text
+ValueError: MA15 attention graph and staging copies: GPU dependency order changed
+```
+
+这次不是上一节的 OP5 源码冻结错误，也没有 CUDA runtime 错误或 smoke 数值不一致记录。只读对照八 rank 的 OP4/OP6 smoke 和 profile JSON，初始模型／输入／RNG／通信、loss、grad norm、最终参数一致；smoke 的全部梯度／参数轨迹与投影输出哈希也一致。OP6 smoke 内部逐次 graph 输出及 dQ/dK/dV 与 eager oracle 的位串检查已通过。
+
+直接检查全部8份 OP6 trace：每 rank 有128次前向＋128次反向 graph launch；同一 graph correlation 内共1465处相邻 kernel 的结束/开始时间戳存在大于0.01μs的表面重叠，其中238处超过原门限。各处 device/context/stream 相同，主要是 backward softmax→GEMM 和 GEMM→短 scale kernel：
+
+- rank0 首个被拒绝的 GEMM→scale：重叠 **0.09619140625μs**，scale 时长1.44μs；原门限 `min(0.5μs, 5%×1.44μs)=0.072μs`。
+- 全八 rank 最大绝对重叠 **0.89599609375μs**；相对较短 kernel 的最大比例约 **23.90%**。
+
+[NVIDIA 对 CUPTI 时间戳的解释](https://forums.developer.nvidia.com/t/concurrent-execution-of-cuda-kernels-from-different-contexts/73333/2) 指出同一 stream 也可能显示由 kernel 结束时间戳采集造成的微小重叠，500ns并不是保证上限。结合此次同一图、相同执行身份和逐位 smoke 证据，现象与时间戳采集误差相容；**不能据 trace 表面重叠直接断言发生了数据依赖违规，也不能把它当作可兑现的计算重叠收益。**
+
+### 8.2 有限范围的检查器修正
+
+只修改 [op6_profile.py](../../../tools/5090/phase6/op6_profile.py) 的局部图检查规则：允许范围为 `min(1.0μs, 较短kernel时长的25%)`。这是针对当前 SM120/CUPTI 工作负载的明确经验验收界限，**不是 NVIDIA 保证的时钟精度**，不自动随某次结果增大。
+
+该容差仅作用于同一次唯一 graph launch correlation 下、同 device/context/stream 的两个 kernel；开始时间仍须递增，节点种类、数量、顺序、原 GEMM 分派和 softmax 几何仍严格核验。输入复制、输出 clone、不同 graph launch、不同 stream，以及通信／投影路径均不获得该例外。原始时间戳不修改；所有允许的表面重叠记录在报告中。没有修改图计算、数值容差或正式计时循环，H100 检查器原文件也保持不变。
+
+新增真实 trace 边界回归样本，覆盖原先误拒绝的短 scale 与 softmax 边界；超出1μs或25%、不同 correlation/device/context/stream、涉及 staging/memcpy 或相同开始时间的案例继续拒绝。
+
+只读复算命令（包含完整 OP3 路径检查及 OP6 图检查，不改旧批次状态、不验证未回传的二进制、不续跑）：
+
+```bash
+python3 tools/5090/phase6/reanalyze_op6_profile.py \
+  --batch ../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-011706-043929 \
+  --out /tmp/op6-first-pair-profile-analysis.json --jobs 4
+```
+
+复算记录见 [op6-first-pair-profile-analysis.json](op6-first-pair-profile-analysis.json)。修复后需要启动**新批次**才能取得正式 OP6 步时；原失败状态和原始证据保留。同步当前 `op6_profile.py` 及完整 OP6 脚本后，可复用此次已经成功用于 OP4 的构建：
+
+```bash
+bash tools/5090/phase6/run_op6.sh \
+  --place 60 --trials 1 --blocks 4 --execute \
+  --build /workspace/Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-011706-043929/build
+```
+
+本次修正后，**8份原始 OP6 trace 的完整 OP3 路径＋图检查均通过；55项 OP6 CPU 测试全部通过、无跳过**。这是原始证据的只读重审和检查器回归验证；未新增任何正式 GPU 计时窗口，也未将旧失败批次改为完成。

@@ -1,5 +1,7 @@
 """CPU corruption tests for the 5090 graph trace acceptance boundary."""
 import json
+import copy
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -47,6 +49,45 @@ class GraphProfileTests(unittest.TestCase):
         self.assertAlmostEqual(result['total_attention_device_work_ms'],
                                result['graph_gpu_work_ms'] + result['staging_gpu_work_ms'])
         self.assertEqual(result, json.loads(json.dumps(result)))
+
+    def test_real_sm120_graph_timestamp_edges_are_bounded_and_unmodified(self):
+        saved = json.loads((Path(__file__).parent/'fixtures/op6_graph_timestamp_edges.json').read_text())
+        for example in saved['examples']:
+            events = example['events']
+            original = copy.deepcopy(events)
+            with self.subTest(rank=example['rank']):
+                stream, overlaps = profile.graph_auditor._same_stream_order(events, events)
+                self.assertEqual(stream, events[0]['args']['stream'])
+                self.assertEqual(len(overlaps), 1)
+                self.assertGreater(overlaps[0]['observed_overlap_us'], example['old_limit_us'])
+                self.assertLessEqual(overlaps[0]['observed_overlap_us'], overlaps[0]['allowed_overlap_us'])
+                self.assertEqual(events, original)
+
+    def test_timestamp_exception_still_rejects_large_overlap_and_wrong_ownership(self):
+        def pair(overlap=.1, duration=10):
+            return [dict(cat='kernel', name='gemm', ts=10., dur=10.,
+                         args=dict(stream=7, device=0, context=1, correlation=31)),
+                    dict(cat='kernel', name='scale', ts=20.-overlap, dur=duration,
+                         args=dict(stream=7, device=0, context=1, correlation=31))]
+        for events in (pair(1.01), pair(.3, 1.0)):
+            with self.assertRaisesRegex(ValueError, 'dependency order'):
+                profile.graph_auditor._same_stream_order(events, events)
+        for key in ('stream', 'device', 'context', 'correlation'):
+            events = pair()
+            events[1]['args'][key] += 1
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                profile.graph_auditor._same_stream_order(events, events)
+        for kind in ('staging', 'memcpy', 'same_start'):
+            events = pair()
+            graph = events
+            if kind == 'staging':
+                graph = [events[0]]
+            elif kind == 'memcpy':
+                events[1]['cat'] = 'gpu_memcpy'
+            else:
+                events[1]['ts'] = events[0]['ts']
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'dependency order'):
+                profile.graph_auditor._same_stream_order(events, graph)
 
     def test_missing_graph_association_fails(self):
         events = fixture()

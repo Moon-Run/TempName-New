@@ -1,0 +1,222 @@
+{
+  "source_batch": "op6-local-attention-graph-paired-v1-1x-4blocks-20261103-011706-043929",
+  "purpose": "Real trace edge regressions; not standalone full graph correctness evidence",
+  "examples": [
+    {
+      "rank": 0,
+      "trace_sha256": "4eebc303d57a8ea77ef05297e1dd5502c9f06985598e1cec7952c368dc63e4c5",
+      "old_limit_us": 0.072,
+      "observed_overlap_us": 0.09619140625,
+      "events": [
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8::Params)",
+          "pid": 0,
+          "tid": 7,
+          "ts": 2783431572696.902,
+          "dur": 52.992,
+          "args": {
+            "External id": 4897,
+            "queued": 0,
+            "device": 0,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1474013,
+            "registers per thread": 242,
+            "shared memory": 81920,
+            "blocks per SM": 0.376471,
+            "warps per SM": 1.505882,
+            "grid": [
+              16,
+              1,
+              4
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 0
+          }
+        },
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul> >(int, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul>)",
+          "pid": 0,
+          "tid": 7,
+          "ts": 2783431572749.798,
+          "dur": 1.44,
+          "args": {
+            "External id": 4897,
+            "queued": 0,
+            "device": 0,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1474013,
+            "registers per thread": 40,
+            "shared memory": 0,
+            "blocks per SM": 6.02353,
+            "warps per SM": 24.094118,
+            "grid": [
+              1024,
+              1,
+              1
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 50
+          }
+        }
+      ]
+    },
+    {
+      "rank": 1,
+      "trace_sha256": "ce3b925b1d3d9e8fdba31a901b959bb44634d304645e6f5f7a488d4ef0abdf9a",
+      "old_limit_us": 0.07365000000000001,
+      "observed_overlap_us": 0.35205078125,
+      "events": [
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8::Params)",
+          "pid": 1,
+          "tid": 7,
+          "ts": 2783431627854.854,
+          "dur": 52.735,
+          "args": {
+            "External id": 7174,
+            "queued": 0,
+            "device": 1,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1475775,
+            "registers per thread": 242,
+            "shared memory": 81920,
+            "blocks per SM": 0.376471,
+            "warps per SM": 1.505882,
+            "grid": [
+              16,
+              1,
+              4
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 0
+          }
+        },
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul> >(int, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul>)",
+          "pid": 1,
+          "tid": 7,
+          "ts": 2783431627907.237,
+          "dur": 1.473,
+          "args": {
+            "External id": 7174,
+            "queued": 0,
+            "device": 1,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1475775,
+            "registers per thread": 40,
+            "shared memory": 0,
+            "blocks per SM": 6.02353,
+            "warps per SM": 24.094118,
+            "grid": [
+              1024,
+              1,
+              1
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 50
+          }
+        }
+      ]
+    },
+    {
+      "rank": 5,
+      "trace_sha256": "2729ca96fc468a96b41b196aeaaa2a4d69efa85624bba047ff4fa74b6957ae3b",
+      "old_limit_us": 0.5,
+      "observed_overlap_us": 0.89599609375,
+      "events": [
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "rtx5090_ma11_softmax::ma11_softmax_backward_kernel(__nv_bfloat16 const*, __nv_bfloat16 const*, bool const*, __nv_bfloat16*)",
+          "pid": 5,
+          "tid": 7,
+          "ts": 2783432235012.918,
+          "dur": 22.912,
+          "args": {
+            "External id": 31993,
+            "queued": 0,
+            "device": 5,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1557191,
+            "registers per thread": 46,
+            "shared memory": 16,
+            "blocks per SM": 48.188236,
+            "warps per SM": 192.752945,
+            "grid": [
+              8192,
+              1,
+              1
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 83
+          }
+        },
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8::Params)",
+          "pid": 5,
+          "tid": 7,
+          "ts": 2783432235034.934,
+          "dur": 75.104,
+          "args": {
+            "External id": 31993,
+            "queued": 0,
+            "device": 5,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1557191,
+            "registers per thread": 242,
+            "shared memory": 81920,
+            "blocks per SM": 0.376471,
+            "warps per SM": 1.505882,
+            "grid": [
+              16,
+              1,
+              4
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 0
+          }
+        }
+      ]
+    }
+  ]
+}
