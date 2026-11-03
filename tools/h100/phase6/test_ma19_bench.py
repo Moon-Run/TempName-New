@@ -35,12 +35,13 @@ def fake_slot(candidate=False):
 
 class BenchTests(unittest.TestCase):
     def test_balanced_complete_blocks(self):
-        jobs = bench.schedule(8)
-        self.assertEqual(len(jobs), 16)
-        for half in (range(4), range(4, 8)):
-            orders = Counter(tuple(j['arm'] for j in jobs if j['block'] == block) for block in half)
-            self.assertEqual(orders, {bench.ARMS: 2, bench.ARMS[::-1]: 2})
-        for blocks in (0, 4, 9, True):
+        for count in (4, 8):
+            jobs = bench.schedule(count)
+            self.assertEqual(len(jobs), count * 2)
+            for half in (range(count//2), range(count//2, count)):
+                orders = Counter(tuple(j['arm'] for j in jobs if j['block'] == block) for block in half)
+                self.assertEqual(orders, {bench.ARMS: count//4, bench.ARMS[::-1]: count//4})
+        for blocks in (0, 2, 6, 9, True):
             with self.assertRaises(ValueError):
                 bench.schedule(blocks)
 

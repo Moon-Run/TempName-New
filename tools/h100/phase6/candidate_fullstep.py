@@ -59,17 +59,18 @@ def prepare(args):
     require(Path(__file__).name != 'candidate-controller.py', 'Frozen candidate controller is read-only')
     root = args.root.resolve()
     full = backend(args.experiment)
+    blocks = getattr(args, 'blocks', 8)
     root.mkdir(parents=True, exist_ok=False)
     source = root / 'source'
     full.prepare(argparse.Namespace(root=source, build=args.build, megatron=args.megatron,
-                                    trials=args.trials, blocks=8))
+                                    trials=args.trials, blocks=blocks))
     template = full.verify(source)
     candidate = full.bench.ARMS[1]
     shutil.copy2(__file__, root / 'candidate-controller.py')
     plan = dict(protocol=f'h100-{args.experiment}-candidate-only-fullstep-v1',
                 experiment=args.experiment, comparison_mode='candidate_only',
                 run_id=template['run_id'], arms=[candidate], candidate=candidate,
-                trials=args.trials, blocks=8, warmup_steps=10, timed_steps=50,
+                trials=args.trials, blocks=blocks, warmup_steps=10, timed_steps=50,
                 source_plan_sha256=sha(source / 'plan.json'),
                 controller_sha256=sha(__file__),
                 schedule=selected_jobs(full, template, 'timing'),
@@ -93,9 +94,10 @@ def verify(root, offline=False):
     require(sha(source / 'plan.json') == plan['source_plan_sha256'], 'Worker template changed')
     template = full.verify(source, offline=offline)
     require(plan['run_id'] == template['run_id'] and plan['trials'] == template['trials'] and
-            (plan['blocks'], plan['warmup_steps'], plan['timed_steps']) == (8, 10, 50) and
+            plan['blocks'] == template['blocks'] and
+            (plan['warmup_steps'], plan['timed_steps']) == (10, 50) and
             plan['schedule'] == selected_jobs(full, template, 'timing') and
-            len(plan['schedule']) == plan['trials'] * 8 and
+            len(plan['schedule']) == plan['trials'] * plan['blocks'] and
             plan['target_evaluated'] is False and plan['paired_equivalence_evaluated'] is False,
             'Changed single-candidate schedule or measurement contract')
     return plan, template, full
@@ -197,8 +199,11 @@ def report(root, offline=False, save=True):
 def check_complete(root, trials, profile=False):
     root = Path(root).resolve()
     result = report(root, save=False)
-    require(result == read(root / 'report.json') and result['formal_optimizer_steps'] == trials * 400 and
-            result['timing_rank_records'] == trials * 64, 'Incomplete candidate measurement')
+    plan = read(root / 'plan.json')
+    windows = trials * plan['blocks']
+    require(plan['trials'] == trials and result == read(root / 'report.json') and
+            result['formal_optimizer_steps'] == windows * 50 and
+            result['timing_rank_records'] == windows * 8, 'Incomplete candidate measurement')
     if profile:
         require(profile_summary(root) == read(root / 'profile-summary.json'),
                 'Candidate profile differs from execution evidence')
@@ -266,6 +271,7 @@ def main(argv=None):
     p.add_argument('--build', type=Path, required=True)
     p.add_argument('--megatron', type=Path, required=True)
     p.add_argument('--trials', type=int, choices=(1, 2), default=1)
+    p.add_argument('--blocks', type=int, choices=(4, 8), default=8)
     p = sub.add_parser('run')
     p.add_argument('root', type=Path)
     p.add_argument('--stage', choices=('all', 'preflight', 'timing', 'profile'), default='all')

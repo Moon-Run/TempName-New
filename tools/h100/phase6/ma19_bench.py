@@ -41,6 +41,11 @@ _driver = _replace(_driver,
     "          'F4-zcount':'Identical native projection; optimizer zero-count fusion is evaluated only in fullstep'}",
     "LABELS = {'F4-cache-zcount-csoftmax':'Unchanged complete MA11 baseline',\n"
     "          'F4-cache-zcount-csoftmax-pcopy':'MA11 plus fixed-descriptor master-to-model parameter publication, evaluated only in fullstep'}")
+# Four blocks retain AB/BA balance in each half; other MA9 users keep their contract.
+_driver = _replace(_driver, 'blocks >= 8 and blocks % 8 == 0',
+                   'blocks >= 4 and blocks % 4 == 0')
+_driver = _replace(_driver, 'Use complete multiples of eight paired blocks',
+                   'Use complete multiples of four paired blocks')
 exec(compile(_driver, str(DRIVER), 'exec'), globals())
 
 _driver_freeze, _driver_verify = freeze_helpers, verify

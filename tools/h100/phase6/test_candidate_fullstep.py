@@ -16,14 +16,14 @@ from test_ma2_cr2 import fixture_plan
 
 
 class CandidateTests(unittest.TestCase):
-    def prepare(self, parent, experiment, trials=1):
+    def prepare(self, parent, experiment, trials=1, blocks=8):
         full = single.backend(experiment)
         build = parent / 'build'
         build.mkdir()
         full.write(build / 'selection-plan.json', fixture_plan()['selection'])
         root = parent / 'fullstep'
         args = argparse.Namespace(root=root, experiment=experiment, build=build,
-                                  megatron=parent / 'megatron', trials=trials)
+                                  megatron=parent / 'megatron', trials=trials, blocks=blocks)
         libraries = {arm: dict(root='/CPU-FIXTURE/' + arm, files={}) for arm in full.bench.ARMS}
         real_verify = full.verify
         with patch.object(full.bench, 'build_identity', return_value={'tuning': full.bench.validate_tuning(None)}), \
@@ -37,12 +37,14 @@ class CandidateTests(unittest.TestCase):
     def test_all_four_experiments_freeze_only_candidate_measurements(self):
         for experiment in single.EXPERIMENTS:
             with self.subTest(experiment=experiment), tempfile.TemporaryDirectory() as temp:
-                root, full = self.prepare(Path(temp), experiment, trials=2)
+                blocks = 8 if experiment == 'ma16' else 4
+                root, full = self.prepare(Path(temp), experiment, trials=2, blocks=blocks)
                 plan, template, _ = single.verify(root, offline=True)
                 candidate = full.bench.ARMS[1]
                 self.assertEqual(plan['arms'], [candidate])
-                self.assertEqual(len(plan['schedule']), 16)
-                for stage, count in [('preflight', 1), ('profile', 1), ('timing', 16), ('all', 17)]:
+                self.assertEqual(plan['blocks'], blocks)
+                self.assertEqual(len(plan['schedule']), blocks*2)
+                for stage, count in [('preflight', 1), ('profile', 1), ('timing', blocks*2), ('all', blocks*2+1)]:
                     jobs = single.selected_jobs(full, template, stage)
                     self.assertEqual(len(jobs), count)
                     self.assertEqual({job['arm'] for job in jobs}, {candidate})
@@ -51,10 +53,10 @@ class CandidateTests(unittest.TestCase):
 from pathlib import Path
 root=Path(sys.argv[1]);m=runpy.run_path(str(root/'candidate-controller.py'))
 p,t,f=m['verify'](root,offline=True)
-assert p['comparison_mode']=='candidate_only' and len(p['schedule'])==16
+assert p['comparison_mode']=='candidate_only' and len(p['schedule'])==int(sys.argv[2])
 assert 'torch' not in sys.modules
 '''
-                done = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(root)], capture_output=True, text=True)
+                done = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(root), str(blocks*2)], capture_output=True, text=True)
                 self.assertEqual(done.returncode, 0, done.stderr)
                 plan['schedule'].append(next(full.jobs(template, 'preflight')))
                 single.write(root/'plan.json', plan)
@@ -73,10 +75,14 @@ assert 'torch' not in sys.modules
                 self.assertIn('all', tasks['fullstep-run'])
                 self.assertIn('profile', tasks['fullstep-profile'])
                 self.assertIn(experiment, tasks['fullstep-prepare'])
+                if experiment != 'ma16':
+                    command = tasks['fullstep-prepare']
+                    self.assertEqual(command[command.index('--blocks')+1], '4')
                 with contextlib.redirect_stdout(io.StringIO()) as output:
                     launch.main(['--candidate-only', '--out', str(root), '--trials', '2'])
                 self.assertFalse(root.exists())
-                self.assertIn('16 windows, 800 formal optimizer steps', output.getvalue())
+                expected = '16 windows, 800' if experiment == 'ma16' else '8 windows, 400'
+                self.assertIn(expected+' formal optimizer steps', output.getvalue())
                 self.assertIn('No MA11 control', output.getvalue())
 
     def test_runner_launches_only_candidate_and_preserves_original_rank_validator(self):
@@ -136,9 +142,10 @@ assert 'torch' not in sys.modules
                 args = launch.arguments(['--candidate-only', '--out', temp])
                 (args.out/'handoff').mkdir()
                 single.write(args.out/'handoff/controllers.json', {})
+                windows = 8 if experiment == 'ma16' else 4
                 result = dict(acceptance_status={launch.ARMS[1]: 'candidate_measured_without_MA11_comparison'},
                               increment_over_MA11_validated={launch.ARMS[1]: False},
-                              formal_optimizer_steps=400, all_samples=[{}]*8,
+                              formal_optimizer_steps=windows*50, all_samples=[{}]*windows,
                               target_evaluated=False, target_validated=False, target_point_observed=False)
                 with patch.object(launch.launcher, 'invoke') as invoke, \
                      patch.object(single, 'check_complete', return_value=result) as check, \
@@ -150,7 +157,8 @@ assert 'torch' not in sys.modules
                 self.assertTrue(check.call_args.kwargs['profile'])
                 self.assertEqual(state['status'], 'completed')
                 self.assertEqual(state['arms'], [launch.ARMS[1]])
-                self.assertEqual(state['formal_optimizer_steps'], 400)
+                self.assertEqual(state['formal_optimizer_steps'], windows*50)
+                self.assertEqual(state['expected_timing_windows'], windows)
                 self.assertTrue(state['fullstep_execution_path_validated'])
                 self.assertFalse(state['target_evaluated'])
                 self.assertIsNone(state['target_percent'])

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare complete MA11 and MA11 plus same-stream native column AllGather in complete, balanced training blocks.
 
-Preview does not create directories or query GPUs. Each trial measures eight
+Preview does not create directories or query GPUs. Each trial measures four
 two-arm blocks, with ten warmup and fifty measured optimizer steps per window.
 """
 import argparse
@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 from zoneinfo import ZoneInfo
 
@@ -18,7 +19,7 @@ from common import HERE, REPO, read, write, require, sha, verify_files
 
 PROTOCOL = 'h100-ma17-direct-allgather-detached-v1'
 ARMS = ('F4-cache-zcount-csoftmax', 'F4-cache-zcount-csoftmax-directag')
-BLOCKS = 8
+BLOCKS = 4
 STEPS = 50
 
 
@@ -39,11 +40,13 @@ def arguments(argv=None):
     parser.add_argument('--cuda-home', type=Path, default=Path('/usr/local/cuda-12.4'))
     parser.add_argument('--nccl-root', type=Path)
     parser.add_argument('--ma17-build', type=Path, help='Reuse a verified MA17-v1 two-arm build; older MA8/MA9/MA11 builds are not accepted')
-    parser.add_argument('--jobs', type=int, default=2)
+    parser.add_argument('--jobs', type=int, help='Compilation parallelism (default: nproc)')
     parser.add_argument('--worker-timeout', type=int, default=1800)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true')
     args = parser.parse_args(argv)
+    if args.jobs is None:
+        args.jobs = int(subprocess.check_output(['nproc'], text=True).strip())
     require(args.jobs > 0 and args.worker_timeout > 0, 'Positive jobs and worker timeout required')
     tuning(args)
     if args.out is None:
@@ -97,7 +100,7 @@ def commands(args):
         tasks += [
             ('fullstep-prepare', cli('candidate_fullstep.py') + ['prepare', str(train),
                 '--experiment', 'ma17', '--build', str(build), '--megatron', str(args.megatron),
-                '--trials', str(args.trials)]),
+                '--trials', str(args.trials), '--blocks', str(BLOCKS)]),
             ('fullstep-run', cli('candidate_fullstep.py') + ['run', str(train),
                 '--stage', 'all', *runtime, '--execute']),
             ('fullstep-profile', cli('candidate_fullstep.py') + ['run', str(train),
@@ -226,14 +229,14 @@ def main(argv=None):
         for _, command in commands(args):
             print(shlex.join(command))
         if getattr(args, 'candidate_only', False):
-            print(f'{ARMS[1]} only; {args.trials*8} windows, {args.trials*400} formal optimizer steps. '
+            print(f'{ARMS[1]} only; {args.trials*BLOCKS} windows, {args.trials*BLOCKS*STEPS} formal optimizer steps. '
                   '10 warmup + 50 measured steps/window; candidate full-model smoke and profile retained. '
                   'No MA11 control, paired-equivalence claim, speedup CI or 2% target.')
             return
         print(f'F4-cache-zcount-csoftmax / F4-cache-zcount-csoftmax-directag only; MA11 in both arms; '
               f'original MA11 softmax in both arms; same-stream native AllGather only in candidate; '
-              f'{args.trials} trial(s), {args.trials*16} windows, '
-              f'{args.trials*800} formal optimizer steps. Each window: 10 warmup + 50 measured steps. '
+              f'{args.trials} trial(s), {args.trials*BLOCKS*len(ARMS)} windows, '
+              f'{args.trials*BLOCKS*len(ARMS)*STEPS} formal optimizer steps. Each window: 10 warmup + 50 measured steps. '
               'Negative and slow windows are retained. The 2% target is incremental over MA11 and requires '
               'CI95 lower >=2% in each trial plus successful profile checks.')
         return

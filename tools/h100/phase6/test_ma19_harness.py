@@ -54,10 +54,10 @@ class HarnessTests(unittest.TestCase):
 
     def test_balanced_schedule_and_two_percent_lower_bound(self):
         for trials in (1, 2):
-            rows = full.expected_schedule(trials, 8)
-            self.assertEqual(len(rows), trials*16)
+            rows = full.expected_schedule(trials, 4)
+            self.assertEqual(len(rows), trials*8)
             for trial in range(1,trials+1):
-                self.assertEqual(Counter(r['arm'] for r in rows if r['trial']==trial),dict.fromkeys(bench.ARMS,8))
+                self.assertEqual(Counter(r['arm'] for r in rows if r['trial']==trial),dict.fromkeys(bench.ARMS,4))
         key = bench.ARMS[1]+'/'+bench.ARMS[0]
         means = dict(zip(bench.ARMS,(460,450)))
         result = full.comparison_acceptance({key:dict(percent=2.1,ci95=[1.9,2.3])},means)
@@ -92,7 +92,7 @@ class HarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             parent=Path(temp); build=parent/'build'; build.mkdir(); root=parent/'fullstep'
             bench.write(build/'selection-plan.json',fixture_plan()['selection'])
-            args=argparse.Namespace(root=root,build=build,megatron=parent/'megatron',trials=2,blocks=8)
+            args=argparse.Namespace(root=root,build=build,megatron=parent/'megatron',trials=2,blocks=4)
             libs={arm:dict(root='/synthetic/'+arm,files={}) for arm in bench.ARMS}
             with patch.object(bench,'build_identity',return_value={'tuning':bench.validate_tuning(None)}), \
                  patch.object(bench,'libraries',return_value=libs), \
@@ -105,7 +105,7 @@ root=Path(sys.argv[1]);sys.path.insert(0,str(root/'scripts'))
 c=runpy.run_path(str(root/'scripts/fullstep-controller.py'))
 p=c['verify'](root,offline=True)
 assert p['arms']==['F4-cache-zcount-csoftmax','F4-cache-zcount-csoftmax-pcopy']
-assert len(p['schedule'])==32
+assert p['blocks']==4 and len(p['schedule'])==16
 ast.parse(c['worker_source']())
 assert 'ma19_softmax_state' in c['worker_source']()
 """

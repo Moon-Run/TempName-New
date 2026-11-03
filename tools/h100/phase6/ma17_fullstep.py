@@ -38,6 +38,13 @@ _source=registered_replace(_source,'                trial_ids={str(i+1): uuid.uu
     '                trial_ids={str(i+1): uuid.uuid4().hex for i in range(args.trials)},')
 _source=registered_replace(_source,'    plan = dict(protocol=PROTOCOL, run_id=uuid.uuid4().hex,',
                         '    freeze_helpers(scripts)\n    plan = dict(protocol=PROTOCOL, run_id=uuid.uuid4().hex,')
+# Keep the shared MA5 template intact; this experiment accepts four balanced blocks.
+_source=registered_replace(_source, 'args.blocks >= 8 and args.blocks % 8 == 0',
+    'type(args.blocks) is int and args.blocks >= 4 and args.blocks % 4 == 0')
+_source=registered_replace(_source, 'Use at least eight complete blocks, divisible by eight',
+    'Use at least four complete blocks, divisible by four')
+_source=registered_replace(_source, 'plan["blocks"] >= 8 and plan["blocks"] % 8 == 0',
+    'type(plan["blocks"]) is int and plan["blocks"] >= 4 and plan["blocks"] % 4 == 0')
 exec(compile(_source,str(_BASE_PATH),'exec'),globals())
 __doc__ = 'MA11 versus MA17; same-stream native column AllGather; complete optimizer steps.'
 

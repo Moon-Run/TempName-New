@@ -37,7 +37,7 @@ class MA17LaunchTests(unittest.TestCase):
     def test_preview_does_not_create_output_or_start_workers(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'absent'
-            for trials, windows, steps in ((1, 16, 800), (2, 32, 1600)):
+            for trials, windows, steps in ((1, 8, 400), (2, 16, 800)):
                 with contextlib.redirect_stdout(io.StringIO()) as output, \
                      patch.object(launch.launcher, 'invoke') as invoke, \
                      patch.object(launch.launcher, 'detach') as detach, \
@@ -61,7 +61,9 @@ class MA17LaunchTests(unittest.TestCase):
         self.assertEqual(len(tasks), 6)
         self.assertIn(str(args.ma17_build), tasks['operator-prepare'])
         self.assertIn(str(args.ma17_build), tasks['fullstep-prepare'])
-        self.assertEqual(launch.BLOCKS, 8)
+        self.assertEqual(launch.BLOCKS, 4)
+        for name in ('operator-prepare', 'fullstep-prepare'):
+            self.assertEqual(tasks[name][tasks[name].index('--blocks') + 1], '4')
         self.assertEqual(launch.ARMS, ('F4-cache-zcount-csoftmax', 'F4-cache-zcount-csoftmax-directag'))
 
     def test_invalid_sizes_and_stale_experiment_flags_are_rejected(self):
@@ -72,6 +74,18 @@ class MA17LaunchTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 launch.arguments([flag, '128'])
 
+    def test_build_jobs_default_to_nproc_and_allow_explicit_override(self):
+        with patch.object(launch.subprocess, 'check_output', return_value='24\n') as nproc:
+            args = launch.arguments(['--candidate-only'])
+        nproc.assert_called_once_with(['nproc'], text=True)
+        self.assertEqual(args.jobs, 24)
+        compile_command = dict(launch.commands(args))['compile']
+        self.assertEqual(compile_command[compile_command.index('--jobs')+1], '24')
+        with patch.object(launch.subprocess, 'check_output', side_effect=AssertionError('unexpected nproc')):
+            explicit = launch.arguments(['--jobs', '8'])
+        compile_command = dict(launch.commands(explicit))['compile']
+        self.assertEqual(compile_command[compile_command.index('--jobs')+1], '8')
+
     def test_negative_performance_still_completes_every_stage(self):
         with tempfile.TemporaryDirectory() as temp:
             args = launch.arguments(['--out', temp, '--trials', '2'])
@@ -79,7 +93,7 @@ class MA17LaunchTests(unittest.TestCase):
             (args.out / 'handoff/controllers.json').write_text('{}')
             result = dict(acceptance_status={'F4-cache-zcount-csoftmax-directag': 'F4_cache_increment_not_validated'},
                           increment_over_MA11_validated={'F4-cache-zcount-csoftmax-directag': False},
-                          formal_optimizer_steps=1600, all_samples=[None] * 32,
+                          formal_optimizer_steps=800, all_samples=[None] * 16,
                           target_evaluated=True,target_validated=False,target_point_observed=False)
             with patch.object(launch.launcher, 'invoke') as invoke, \
                  patch.object(launch, 'check_operator', return_value={}), \
@@ -90,7 +104,7 @@ class MA17LaunchTests(unittest.TestCase):
             self.assertEqual(check.call_count, 2)
             self.assertEqual(state['status'], 'completed')
             self.assertEqual(state['stage'], 'done')
-            self.assertEqual(state['timing_windows'], 32)
+            self.assertEqual(state['timing_windows'], 16)
             self.assertEqual(state['increment_over_MA11_validated'], {'F4-cache-zcount-csoftmax-directag': False})
             self.assertEqual(json.loads((args.out / 'batch-state.json').read_text()), state)
 
@@ -115,7 +129,7 @@ class MA17LaunchTests(unittest.TestCase):
             (args.out / 'handoff/controllers.json').write_text('{}')
             result = dict(acceptance_status={'F4-cache-zcount-csoftmax-directag': 'positive_F4_cache_increment'},
                 increment_over_MA11_validated={'F4-cache-zcount-csoftmax-directag': True},
-                formal_optimizer_steps=800, all_samples=[None] * 16,
+                formal_optimizer_steps=400, all_samples=[None] * 8,
                 target_evaluated=True, target_validated=True, target_point_observed=True)
             observed = []
 
@@ -149,7 +163,7 @@ class MA17LaunchTests(unittest.TestCase):
                 (args.out / 'handoff/controllers.json').write_text('{}')
                 result = dict(acceptance_status={'F4-cache-zcount-csoftmax-directag': 'positive_F4_cache_increment'},
                     increment_over_MA11_validated={'F4-cache-zcount-csoftmax-directag': True},
-                    formal_optimizer_steps=800, all_samples=[None] * 16,
+                    formal_optimizer_steps=400, all_samples=[None] * 8,
                     target_evaluated=True, target_validated=True, target_point_observed=True)
 
                 def invoke(command, log, env):
