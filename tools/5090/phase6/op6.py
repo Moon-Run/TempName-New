@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Paired OP4 versus local-attention CUDA Graph replay on eight RTX 5090 GPUs."""
 import argparse
+from contextlib import ExitStack
 from datetime import datetime
 import fcntl
 import json
@@ -21,6 +22,7 @@ import op3
 import op4
 import op3_protocol as p
 import op6_controllers
+import op6_memory
 from op6_child import PROTOCOL
 
 ARMS = ('op4', 'op6')
@@ -65,6 +67,8 @@ def arguments(argv=None):
                         help='Complete paired blocks per trial; each arm has 50 formal steps per block')
     parser.add_argument('--jobs', type=int, default=default_build_jobs(), help='Build workers; default nproc')
     parser.add_argument('--worker-timeout', type=int, default=3600)
+    parser.add_argument('--reserve-mib', type=int, default=op6_memory.DEFAULT_MIB,
+                        help='Idle-only allocation per GPU; default 31846 MiB; 0 disables')
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--foreground', action='store_true')
     parser.add_argument('--report', action='store_true', help='Read-only verification of a completed --out')
@@ -72,6 +76,7 @@ def arguments(argv=None):
     args = parser.parse_args(argv)
     schedule(args.trials, args.blocks)
     require(args.jobs > 0 and args.worker_timeout > 300, 'Positive jobs and worker timeout >300 required')
+    require(0 <= args.reserve_mib < 32768, 'Use --reserve-mib 0..32767')
     require(not args.report or (args.out and not args.execute), '--report requires --out without --execute')
     require(not args.inside or (args.execute and args.out and not args.report), 'Invalid supervisor invocation')
     if args.out is None:
@@ -124,7 +129,7 @@ def child_environment(environment=None):
 def child_command(args, job, build=None):
     command = [str(args.python), str(HERE/'op6_child.py'), '--variant', job['arm'],
                '--execute', '--foreground', '--out', str(args.out/job['directory']),
-               '--trials', '1', '--blocks', '1']
+               '--trials', '1', '--blocks', '1', '--reserve-mib', str(args.reserve_mib)]
     for key in ('python', 'megatron', 'cuda_home', 'build_cuda_home', 'jobs', 'worker_timeout'):
         command += ['--'+key.replace('_', '-'), str(getattr(args, key))]
     if build is not None:
@@ -135,22 +140,26 @@ def child_command(args, job, build=None):
     return command
 
 
-run_child = op4.run_child
+run_child = op6_memory.run_child
 
 
-def prepare_initial_build(args, root, state):
+def prepare_initial_build(args, root, state, reservation=None):
     if args.op3_build or args.abc_build:
         return
     import op1_abc_build as abc_builder
     baseline_builder = load('build')
     # Preserve the GPU/environment check before an expensive first build.
     command = [str(args.python), str(HERE/'op6_child.py'), '--variant', 'op4', '--execute', '--foreground',
-               '--preflight-only', '--out', str(root/'initial-preflight')]
+               '--preflight-only', '--out', str(root/'initial-preflight'),
+               '--reserve-mib', str(args.reserve_mib)]
     for key in ('python', 'megatron', 'cuda_home', 'build_cuda_home', 'jobs', 'worker_timeout'):
         command += ['--'+key.replace('_', '-'), str(getattr(args, key))]
     state.update(status='running', stage='initial-hardware-preflight')
     write(root/'batch-state.json', state)
-    run_child(command, child_environment(), root/'initial-preflight-supervisor.log')
+    if reservation is None:
+        run_child(command, child_environment(), root/'initial-preflight-supervisor.log')
+    else:
+        reservation.run(run_child, command, child_environment(), root/'initial-preflight-supervisor.log')
     require(read(root/'initial-preflight/batch-state.json')['status'] == 'preflight_completed',
             'Initial hardware preflight did not complete')
     baseline, abc = root/'dependencies/baseline', root/'dependencies/abc'
@@ -251,6 +260,10 @@ def markdown(result):
     lines += ['', 'Torch 显存统计保留图私有池及暂存张量的可见占用，但不覆盖 NCCL、CUDA context 等全部显存；reserved 不与 allocated 相加。',
         '原始窗口、每块差值、显存和数值证据保存在 report.json、pair-evidence.json 及各子批目录。',
         'completed 表示验证完成，不等于达到 800ms；达线结果是本批观察值。', '', result['limitation'], '']
+    reservation = result.get('memory_reservation')
+    if reservation and reservation['mib_per_gpu']:
+        lines += [f"空档每卡预留 {reservation['mib_per_gpu']} MiB，GPU 子任务前释放、退出后重占；"
+                  '预留不与正式训练并存，不保证交接期间的系统级独占。', '']
     return '\n'.join(lines)
 
 
@@ -271,6 +284,8 @@ def replay(root, recompute_profiles=True):
         require(saved['job'] == job and saved['nccl_overrides'] == CHANNEL_ENV, 'Changed OP6 child launch')
         result = child_result(child, job['arm'], recompute_profiles)
         child_plan = read(child/'plan.json')
+        require(child_plan.get('op6_reserve_mib', 0) == plan.get('reserve_mib', 0),
+                'Memory reservation differs between parent and child')
         build = child_plan['build']
         require(initial_build is None or build == initial_build, 'OP6 children used different builds')
         initial_build = build
@@ -297,12 +312,15 @@ def replay(root, recompute_profiles=True):
     result = report(samples, plan['trials'], plan['blocks'])
     result.update(run_id=plan['run_id'], plan_sha256=sha(root/'plan.json'), child_reports=records,
                   pair_evidence_sha256=sha(root/'pair-evidence.json'), build=initial_build)
+    if 'reserve_mib' in plan:
+        result['memory_reservation'] = op6_memory.policy(plan['reserve_mib'])
     return result
 
 
 def supervise(args):
     from op6_evidence import audit_pair
     root, lock = args.out, None
+    resources = ExitStack()
     state = read(root/'batch-state.json')
     try:
         check_overrides()
@@ -314,9 +332,13 @@ def supervise(args):
         resolve_reused_build(args)
         plan = dict(protocol=PROTOCOL, run_id=uuid.uuid4().hex, trials=args.trials, blocks=args.blocks,
             model=p.MODEL, target_ms=TARGET_MS, nccl_overrides=CHANNEL_ENV,
-            schedule=schedule(args.trials, args.blocks))
+            schedule=schedule(args.trials, args.blocks), reserve_mib=args.reserve_mib)
         write(root/'plan.json', plan)
-        prepare_initial_build(args, root, state)
+        state.update(status='running', stage='reserve-idle-gpu-memory')
+        write(root/'batch-state.json', state)
+        reservation = resources.enter_context(op6_memory.session(
+            args.python, root, args.reserve_mib, op3.base.gpu_idle))
+        prepare_initial_build(args, root, state, reservation)
         build, evidence = args.op3_build, {}
         for job in plan['schedule']:
             op3.base.verify_controllers(root)
@@ -328,7 +350,7 @@ def supervise(args):
             state.update(status='running', stage=job['directory'])
             write(root/'batch-state.json', state)
             print('STAGE', job['directory'], flush=True)
-            run_child(command, child_environment(), child.with_name(child.name+'-supervisor.log'))
+            reservation.run(run_child, command, child_environment(), child.with_name(child.name+'-supervisor.log'))
             child_result(child, job['arm'], recompute_profiles=False)
             actual = Path(read(child/'plan.json')['build']['root']).resolve()
             require(build is None or actual == build.resolve(), 'OP6 child changed its requested build')
@@ -344,6 +366,7 @@ def supervise(args):
         state.update(stage='replay-report')
         write(root/'batch-state.json', state)
         result = replay(root, recompute_profiles=False)
+        reservation.release()  # Do not publish completed while memory is held.
         write(root/'report.json', result)
         (root/'report.md').write_text(markdown(result))
         state.update(status='completed', stage='done', timing_windows=result['timing_windows'],
@@ -356,13 +379,16 @@ def supervise(args):
         write(root/'batch-state.json', state)
         raise
     finally:
-        if lock is not None:
-            lock.close()
+        try:
+            resources.__exit__(*sys.exc_info())
+        finally:
+            if lock is not None:
+                lock.close()
 
 
 def supervisor_command(args):
     command = [str(args.python), str(Path(__file__).resolve()), '--execute', '--inside', '--out', str(args.out)]
-    for key in ('python', 'megatron', 'cuda_home', 'build_cuda_home', 'trials', 'blocks', 'jobs', 'worker_timeout'):
+    for key in ('python', 'megatron', 'cuda_home', 'build_cuda_home', 'trials', 'blocks', 'jobs', 'worker_timeout', 'reserve_mib'):
         command += ['--'+key.replace('_', '-'), str(getattr(args, key))]
     for key in ('build', 'op3_build', 'abc_build'):
         if getattr(args, key) is not None:
@@ -383,6 +409,7 @@ def main(argv=None):
         print(json.dumps(dict(protocol=PROTOCOL, out=str(args.out), arms=list(ARMS),
             nccl_overrides=CHANNEL_ENV, target_ms=TARGET_MS, trials=args.trials, blocks=args.blocks,
             jobs=args.jobs, warmup_steps=10, timed_steps=50,
+            memory_reservation=op6_memory.policy(args.reserve_mib),
             timing_windows=2*args.trials*args.blocks, formal_optimizer_steps=100*args.trials*args.blocks,
             schedule=schedule(args.trials, args.blocks),
             build=str(args.build or args.op3_build or args.abc_build) if (args.build or args.op3_build or args.abc_build) else None,
