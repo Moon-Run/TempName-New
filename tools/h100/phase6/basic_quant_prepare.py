@@ -84,12 +84,16 @@ def controller_paths():
     return sorted(seen)
 
 
-def prepare(out, flux_root, codec_root, megatron, blocks=6, rounds=2,
-            nvls='0', source_only=False, scope='both'):
+def prepare(out, flux_root, codec_root, megatron, blocks=None, rounds=2,
+            nvls='0', source_only=False, scope='both', basic_only=False):
     require(scope == 'both', 'Both arms must cover Attention and MLP together')
     flux_root, codec_root, megatron = map(lambda p: Path(p).resolve(),
                                         (flux_root, codec_root, megatron))
-    jobs = routing.schedule(blocks, rounds=rounds)
+    mode = 'basic_only' if basic_only else 'paired'
+    if blocks is None:
+        blocks = 2 if basic_only else 6
+    policies = routing.measurement_policies(mode)
+    jobs = routing.schedule(blocks, rounds=rounds, mode=mode)
     g = flux_build.verify(flux_root, built=not source_only)
     c = codec_build.verify(codec_root, built=not source_only)
     require(g['source_only'] == c['source_only'] == source_only,
@@ -127,23 +131,24 @@ def prepare(out, flux_root, codec_root, megatron, blocks=6, rounds=2,
     codec = sources.codec_identity()
     run_id = uuid.uuid4().hex
     cfg = read(REPO/'tools/a800/phase5/e2e/config.json')
-    cfg.update(protocol=routing.PROTOCOL, policies=list(routing.POLICIES), orders=[], repetitions=rounds,
+    cfg.update(protocol=routing.PROTOCOL, policies=list(policies), comparison_mode=mode, orders=[], repetitions=rounds,
                **routing.TIMING, graph_forward=False, double_buffered=False, ring_reduction=True,
                cases=[dict(name='h100-phase6', **{k: m[k] for k in ('hidden', 'ffn', 'heads', 'sequence', 'tp')})],
                common={k: m[k] for k in ('layers', 'micro_batch', 'global_batch', 'seed', 'token_seed', 'vocab')},
-               role_plan_sha256={p: {r: None for r in routing.SHAPES} for p in routing.POLICIES},
+               role_plan_sha256={p: {r: None for r in routing.SHAPES} for p in policies},
                communication=comm, codec_identity=codec, codec_library=c['library'],
-               scope='Two arms sharing GemmOnly, upstream encoder and NCCL; only receiver decode/reduction fusion differs.')
+               scope=('Basic receiver fusion only; no full-model comparison arm.' if basic_only else
+                      'Two arms sharing GemmOnly, upstream encoder and NCCL; only receiver decode/reduction fusion differs.'))
     write(scripts/'config.json', cfg)
     variants = {}
-    for p in routing.POLICIES:
+    for p in policies:
         lib = runtime_root(flux_root, p)
         (out/'build'/p).symlink_to(lib, target_is_directory=True)
         variants[p] = dict(routing.definition(p), root=str(lib), sampling=False,
             libraries={} if source_only else {n: dict(path=str((lib/n).resolve()), sha256=sha(lib/n))
                                               for n in ('libflux_cuda.so', 'libflux_cuda_ths_op.so')})
     info = dict(protocol=routing.PROTOCOL, run_id=run_id, config=m,
-                execution_timing=dict(routing.TIMING), comparison_scope='both',
+                execution_timing=dict(routing.TIMING), comparison_scope='both', comparison_mode=mode,
                 source_only=source_only, executable=not source_only, gpu_validated=False,
                 rounds=rounds, blocks_per_round=blocks, schedule_seed=routing.SCHEDULE_SEED,
                 schedule=jobs, timing_windows=len(jobs), variants=variants,
@@ -155,7 +160,7 @@ def prepare(out, flux_root, codec_root, megatron, blocks=6, rounds=2,
                 flux_build_manifest=dict(path=str(flux_root/'manifest.json'), sha256=sha(flux_root/'manifest.json')),
                 codec_build_manifest=dict(path=str(codec_root/'manifest.json'), sha256=sha(codec_root/'manifest.json')))
     write(provenance/'preparation.json', {k: info[k] for k in
-          ('protocol', 'run_id', 'source_only', 'executable', 'rounds', 'execution_timing', 'comparison_scope',
+          ('protocol', 'run_id', 'source_only', 'executable', 'rounds', 'execution_timing', 'comparison_scope', 'comparison_mode',
            'communication', 'shared_environment', 'hardware', 'codec_identity', 'codec_library')})
     write(out/'schedule.json', jobs)
     info['files'] = {str(p.relative_to(out)): sha(p) for folder in (scripts, provenance)

@@ -26,13 +26,15 @@ PROTOCOL, POLICIES = routing.PROTOCOL, routing.POLICIES
 def verify_inputs(root, offline=False):
     root = Path(root)
     info = read(root/'submission.json')
+    mode = info.get('comparison_mode', 'paired')
+    policies = routing.measurement_policies(mode)
     require(info['protocol'] == PROTOCOL and info['config'] == model() and
             info['comparison_scope'] == 'both' and info['megatron_commit'] == MEGATRON_COMMIT,
             'Wrong two-baseline protocol/model/scope')
     require(type(info['source_only']) is bool and info['executable'] == (not info['source_only']),
             'Rehearsal identity changed')
     verify_files(root, info['files'])
-    expected = routing.schedule(info['blocks_per_round'], info['schedule_seed'], info['rounds'])
+    expected = routing.schedule(info['blocks_per_round'], info['schedule_seed'], info['rounds'], mode=mode)
     require(info['schedule'] == read(root/'schedule.json') == expected and
             info['timing_windows'] == len(expected), 'Incomplete or altered two-arm schedule')
     cfg = read(root/'scripts/config.json')
@@ -40,7 +42,8 @@ def verify_inputs(root, offline=False):
     require(all(seal[k] == info[k] for k in seal), 'Preparation identity changed')
     require(info['execution_timing'] == routing.TIMING and all(type(cfg[k]) is int and cfg[k] == v for k, v in routing.TIMING.items()) and
             cfg['smoke_warmup_steps'] == 2 and cfg['smoke_steps'] == 3, 'Timing/smoke steps changed')
-    require(cfg['protocol'] == PROTOCOL and cfg['policies'] == list(POLICIES) and cfg['repetitions'] == 2 and
+    require(cfg['protocol'] == PROTOCOL and cfg['policies'] == list(policies) and cfg['repetitions'] == 2 and
+            cfg.get('comparison_mode', 'paired') == mode and
             cfg['graph_forward'] is False and cfg['double_buffered'] is False and cfg['ring_reduction'] is True,
             'Fusion policy/lifecycle changed')
     m = model()
@@ -48,7 +51,7 @@ def verify_inputs(root, offline=False):
             cfg['cases'] == [dict(name='h100-phase6', **{k: m[k] for k in ('hidden', 'ffn', 'heads', 'sequence', 'tp')})],
             'Worker model changed')
     require(read(root/'scripts/selection-plan.json') == shape_metadata() and
-            cfg['role_plan_sha256'] == {p: {r: None for r in routing.SHAPES} for p in POLICIES},
+            cfg['role_plan_sha256'] == {p: {r: None for r in routing.SHAPES} for p in policies},
             'Arrival/selection plans are forbidden')
     require(info['shared_environment'] == SHARED_ENVIRONMENT and
             info['communication'] == cfg['communication'] == communication.validate(info['communication']),
@@ -76,8 +79,8 @@ def verify_inputs(root, offline=False):
     require(gemm['source_only'] == codec['source_only'] == info['source_only'] and
             info['codec_library'] == cfg['codec_library'] == codec['library'], 'Build/codec rehearsal mode changed')
     flux_root = Path(info['flux_build_manifest']['path']).parent
-    require(set(info['variants']) == set(POLICIES), 'Missing/extra arms')
-    for p in POLICIES:
+    require(set(info['variants']) == set(policies), 'Missing/extra arms')
+    for p in policies:
         v = info['variants'][p]
         require(all(v.get(k) == value for k, value in routing.definition(p).items()) and v['sampling'] is False and
                 Path(v['root']) == runtime_root(flux_root, p), 'Policy implementation/runtime root changed')
@@ -92,8 +95,8 @@ def verify_inputs(root, offline=False):
                             'Loaded runtime binary changed')
         else:
             require(v['libraries'] == {}, 'CPU rehearsal cannot register executable libraries')
-    require(info['variants']['basic']['root'] == info['variants']['cuda']['root'] and
-            info['variants']['basic']['libraries'] == info['variants']['cuda']['libraries'],
+    require(mode == 'basic_only' or (info['variants']['basic']['root'] == info['variants']['cuda']['root'] and
+            info['variants']['basic']['libraries'] == info['variants']['cuda']['libraries']),
             'Both arms must share the exact GemmOnly build')
     for src, dest in (('ablation6_flux_tensor.py', 'flux_tensor_taco.py'),
                       ('basic_quant_validation.py', 'basic_quant_validation.py'),
@@ -226,11 +229,14 @@ def profile_roles(events, policy):
 def preflight(root, offline=False):
     root = Path(root)
     info = verify_inputs(root, offline)
+    mode = info.get('comparison_mode', 'paired')
+    policies = routing.measurement_policies(mode)
+    paired = mode == 'paired'
     require(info['executable'] and not info['source_only'], 'CPU rehearsals cannot certify GPU execution')
     start = read(root/'start-gpu-check.json')
     require(start['passed'] is True and start['run_id'] == info['run_id'], 'Missing fresh startup check')
     files, reference, profiles, records = [root/'start-gpu-check.json'], None, {}, {}
-    for p in POLICIES:
+    for p in policies:
         for mode in ('smoke', 'profile'):
             folder = root/'results'/f'{mode}-{p}'
             rows = window(root, folder, p, mode)
@@ -243,10 +249,13 @@ def preflight(root, offline=False):
         for rank in range(8):
             with gzip.open(root/'results'/f'profile-{p}'/f'rank{rank}-profile.json.gz', 'rt') as handle:
                 profiles[f'{p}/rank{rank}'] = profile_roles(json.load(handle)['traceEvents'], p)
-    for mode in ('smoke', 'profile'):
-        equivalent_pair(records[('basic', mode)], records[('cuda', mode)], smoke=mode == 'smoke')
+    if paired:
+        for stage in ('smoke', 'profile'):
+            equivalent_pair(records[('basic', stage)], records[('cuda', stage)], smoke=stage == 'smoke')
     gate = dict(protocol=PROTOCOL, completed=True, correctness_passed=True, execution_path_validated=True,
-                bitwise_equal_within_pairs=True, equivalence_pairs=routing.EQUIVALENCE_PAIRS,
+                comparison_mode=info.get('comparison_mode', 'paired'), executed_policies=list(policies),
+                bitwise_equal_within_pairs=True if paired else None,
+                equivalence_pairs=routing.EQUIVALENCE_PAIRS if paired else [],
                 submission_sha256=sha(root/'submission.json'), communication=info['communication'],
                 codec_identity=info['codec_identity'], codec_library=info['codec_library'], fingerprints=reference,
                 role_profiles=profiles, files={str(p.relative_to(root)): sha(p) for p in files})
@@ -254,16 +263,31 @@ def preflight(root, offline=False):
     return gate
 
 
-def summarize(values, blocks, samples):
-    result = ablation3_report.summarize(values, blocks, POLICIES, routing.COMPARISONS)
+def summarize(values, blocks, samples, policies=POLICIES):
+    comparisons = routing.COMPARISONS if len(policies) == 2 else []
+    result = ablation3_report.summarize(values, blocks, policies, comparisons)
     result['mean_ms'] = {p: statistics.mean(v) for p, v in values.items()}
     result['tokens_per_second'] = {p: 8192000/ms for p, ms in result['mean_ms'].items()}
-    result['mean_loss'] = {p: statistics.mean(s['mean_loss'] for s in samples if s['policy'] == p) for p in POLICIES}
-    result['mean_final_loss'] = {p: statistics.mean(s['final_loss'] for s in samples if s['policy'] == p) for p in POLICIES}
+    result['mean_loss'] = {p: statistics.mean(s['mean_loss'] for s in samples if s['policy'] == p) for p in policies}
+    result['mean_final_loss'] = {p: statistics.mean(s['final_loss'] for s in samples if s['policy'] == p) for p in policies}
     return result
 
 
 def markdown(result):
+    if result.get('comparison_mode') == 'basic_only':
+        lines = ['# Flux＋基础量化：单组完整训练', '',
+                 f'{result["timing_windows"]} 个正式窗口、{result["formal_optimizer_steps"]} 个正式 optimizer step；每窗口预热 10 步＋计时 50 步。',
+                 '接收端融合 v2，Attention＋MLP，全远端 H128/E4M3；保留 codec 数值检查和独立执行路径 profile。',
+                 '仅执行 basic，没有同期对照，不计算配对加速比或性能达标结论。', '',
+                 '| 轮次 | 平均 ms/step | 中位 ms/step | tokens/s | 平均 loss | 末步 loss 平均 |',
+                 '| --- | ---: | ---: | ---: | ---: | ---: |']
+        for rep, row in result['rounds'].items():
+            lines.append(f'| {rep} | {row["mean_ms"]["basic"]:.3f} | {row["median_ms"]["basic"]:.3f} | '
+                         f'{row["tokens_per_second"]["basic"]:.2f} | {row["mean_loss"]["basic"]:.6f} | '
+                         f'{row["mean_final_loss"]["basic"]:.6e} |')
+        lines += ['', '每窗口取八 rank 最大墙钟／50，保留全部窗口。两轮是同一 trial 的内部重复，非独立 trial。',
+                  '未执行 basic/CUDA 完整模型逐位或轨迹配对检查；correctness_passed 只表示已运行的单组检查通过。']
+        return '\n'.join(lines)+'\n'
     lines = ['# Flux 基础接收端融合与 CUDA 量化：同场完整训练', '',
              f'本次 {result["timing_windows"]} 个正式窗口、{result["formal_optimizer_steps"]} 个正式 optimizer step；每窗口 10 步预热＋50 步计时。',
              '两组均覆盖 Attention＋MLP、全远端 H128/E4M3；没有新排序、预取、Graph 或提交缓存。',
@@ -287,32 +311,39 @@ def markdown(result):
 def report(root, offline=False, save=True):
     root = Path(root)
     info = verify_inputs(root, offline)
+    mode = info.get('comparison_mode', 'paired')
+    policies = routing.measurement_policies(mode)
+    paired = mode == 'paired'
+    equivalence_pairs = routing.EQUIVALENCE_PAIRS if paired else []
     gate = read(root/'preflight.json')
     require(info['executable'] and not info['source_only'] and gate['completed'] and gate['correctness_passed'] and
-            gate['execution_path_validated'] and gate['bitwise_equal_within_pairs'] and
-            gate['equivalence_pairs'] == routing.EQUIVALENCE_PAIRS and gate['protocol'] == PROTOCOL and
+            gate['execution_path_validated'] and gate['bitwise_equal_within_pairs'] is (True if paired else None) and
+            gate.get('comparison_mode', 'paired') == mode and
+            gate['equivalence_pairs'] == equivalence_pairs and gate['protocol'] == PROTOCOL and
             gate['submission_sha256'] == sha(root/'submission.json') and
             all(gate[k] == info[k] for k in ('communication', 'codec_identity', 'codec_library')),
-            'Fresh complete two-arm preflight is required')
+            'Fresh complete preflight for the selected measurement mode is required')
     verify_files(root, gate['files'])
     require({str(p.relative_to(root/'results')) for p in (root/'results').glob('round*/window-*') if p.is_dir()} ==
             {j['directory'] for j in info['schedule']}, 'Missing/extra formal windows')
     result = dict(protocol=PROTOCOL, run_id=info['run_id'], completed=False, correctness_passed=True,
                   execution_path_validated=True, offline=offline, comparison_scope='both',
-                  bitwise_equal_within_pairs=True, identical_trajectories_within_pairs=True,
-                  equivalence_pairs=routing.EQUIVALENCE_PAIRS, full_optimizer_steps_measured=True,
+                  comparison_mode=mode, executed_policies=list(policies),
+                  bitwise_equal_within_pairs=True if paired else None,
+                  identical_trajectories_within_pairs=True if paired else None,
+                  equivalence_pairs=equivalence_pairs, full_optimizer_steps_measured=True,
                   round_count=2, blocks_per_round=info['blocks_per_round'], config=info['config'],
                   execution_timing=dict(routing.TIMING), communication=info['communication'],
                   codec_identity=info['codec_identity'], codec_library=info['codec_library'],
                   measurement_identity=measurement_identity(info, gate), rounds={}, all_samples=[],
                   sample_policy='all complete blocks; no post-hoc exclusions', acceptance_threshold=None)
-    combined, all_blocks, files = {p: [] for p in POLICIES}, [], {}
+    combined, all_blocks, files = {p: [] for p in policies}, [], {}
     for rep in (1, 2):
-        values, samples = {p: [] for p in POLICIES}, []
+        values, samples = {p: [] for p in policies}, []
         blocks = [dict(round=rep, block=b) for b in range(info['blocks_per_round'])]
         for block in blocks:
             jobs = [j for j in info['schedule'] if j['round'] == rep and j['block'] == block['block']]
-            require(len(jobs) == 2 and {j['policy'] for j in jobs} == set(POLICIES), 'Incomplete two-arm pairing block')
+            require(len(jobs) == len(policies) and {j['policy'] for j in jobs} == set(policies), 'Incomplete measurement block')
             paired_rows = {}
             for job in jobs:
                 folder = root/'results'/job['directory']
@@ -325,21 +356,22 @@ def report(root, offline=False, save=True):
                 samples.append(dict(job, rank_elapsed_seconds=elapsed, ms_per_step=ms, tokens_per_second=8192000/ms,
                                     mean_loss=statistics.mean(rows[0]['losses']), final_loss=rows[0]['losses'][-1]))
                 files.update({str(p.relative_to(root)): sha(p) for p in folder.rglob('*') if p.is_file()})
-            equivalent_pair(paired_rows['basic'], paired_rows['cuda'])
-        result['rounds'][str(rep)] = summarize(values, blocks, samples)
-        for p in POLICIES:
+            if paired:
+                equivalent_pair(paired_rows['basic'], paired_rows['cuda'])
+        result['rounds'][str(rep)] = summarize(values, blocks, samples, policies)
+        for p in policies:
             combined[p] += values[p]
         all_blocks += blocks
         result['all_samples'] += samples
-    result['rounds']['combined'] = summarize(combined, all_blocks, result['all_samples'])
+    result['rounds']['combined'] = summarize(combined, all_blocks, result['all_samples'], policies)
     estimates = result['rounds']['combined']['comparisons']
-    adjacent = [estimates[k] for k in ('basic/cuda',)]
+    adjacent = [estimates['basic/cuda']] if paired else []
     result.update(completed=True, timing_windows=info['timing_windows'],
                   formal_optimizer_steps=routing.TIMING['timed_steps']*info['timing_windows'],
-                  timing_rank_records=8*info['timing_windows'], preflight_rank_records=32,
-                  profile_traces=16, candidate_shape_mappings=0,
-                  expected_order_point_estimate=all(s['percent'] > 0 for s in adjacent),
-                  expected_order_confirmed=all(s['percent'] > 0 and s['ci95'][0] > 0 for s in adjacent),
+                  timing_rank_records=8*info['timing_windows'], preflight_rank_records=16*len(policies),
+                  profile_traces=8*len(policies), candidate_shape_mappings=0,
+                  expected_order_point_estimate=all(s['percent'] > 0 for s in adjacent) if paired else None,
+                  expected_order_confirmed=all(s['percent'] > 0 and s['ci95'][0] > 0 for s in adjacent) if paired else None,
                   evidence=dict(preflight_sha256=sha(root/'preflight.json'), timing_files=files))
     if save:
         write(root/'report.json', result)

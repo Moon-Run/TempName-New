@@ -15,7 +15,7 @@ import detach_basic_quant as launch
 from common import read, sha, write
 
 
-def submission(trial):
+def submission(trial, basic_only=False):
     info = dict(protocol=routing.PROTOCOL, run_id=trial, execution_timing=routing.TIMING,
                 executable=True, source_only=False, rounds=2, blocks_per_round=6,
                 timing_windows=24, schedule=routing.schedule(),
@@ -27,6 +27,9 @@ def submission(trial):
                 'codec_identity', 'codec_library', 'fused_identity',
                 'shared_environment', 'hardware', 'controllers'):
         info[key] = {'fixture': key}
+    if basic_only:
+        info.update(comparison_mode='basic_only', blocks_per_round=2, timing_windows=4,
+                    schedule=routing.schedule(mode='basic_only'), variants={'basic': routing.definition('basic')})
     return info
 
 
@@ -48,6 +51,12 @@ def report_fixture(root, info):
                   evidence={'preflight_sha256': sha(root/'preflight.json')},
                   measurement_identity={'synthetic': True}, expected_order_validated=False)
     result.update({k: info[k] for k in ('communication', 'codec_identity', 'codec_library')})
+    if info.get('comparison_mode') == 'basic_only':
+        result.update(comparison_mode='basic_only', executed_policies=['basic'], blocks_per_round=2,
+                      timing_windows=4, all_samples=[{'synthetic': True} for _ in range(4)],
+                      formal_optimizer_steps=200, timing_rank_records=32, preflight_rank_records=16,
+                      profile_traces=8, bitwise_equal_within_pairs=None,
+                      identical_trajectories_within_pairs=None, equivalence_pairs=[])
     write(root/'report.json', result)
     return result
 
@@ -59,6 +68,7 @@ class LauncherTests(unittest.TestCase):
             phase = root/'tools/h100/phase6'
             phase.mkdir(parents=True)
             (phase/'run_basic_quant.sh').write_text((launch.HERE/'run_basic_quant.sh').read_text())
+            (phase/'run_basic_quant_only.sh').write_text((launch.HERE/'run_basic_quant_only.sh').read_text())
             recovery = root/'outputs/h100/container-recovery'
             recovery.mkdir(parents=True)
             import sys
@@ -75,6 +85,10 @@ class LauncherTests(unittest.TestCase):
                 '/recovered/build-cuda', '--trials', '1', '--execute', '--out', 'path with spaces'])
             self.assertEqual(record['cc'], '/recovered/gcc')
             self.assertEqual(record['cwd'], str(root))
+            only = subprocess.run(['bash', str(phase/'run_basic_quant_only.sh'), '--execute',
+                                   '--out', 'path with spaces'], capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(only.stdout)['args'], ['--cuda-home', '/recovered/runtime-cuda',
+                '--build-cuda-home', '/recovered/build-cuda', '--basic-only', '--execute', '--out', 'path with spaces'])
 
     def test_preview_never_creates_batch_or_starts_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,10 +126,27 @@ class LauncherTests(unittest.TestCase):
     def test_incomplete_first_report_prevents_second_training(self):
         self.exercise(True)
 
-    def exercise(self, broken, trials=1):
+    def test_basic_only_has_four_windows_and_no_extra_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)/'not-created'
+            args = launch.arguments(['--basic-only', '--out', str(out)])
+            prepare = dict(launch.commands(args))['compare1-prepare']
+            self.assertIn('--basic-only', prepare)
+            self.assertEqual(prepare[prepare.index('--blocks')+1], '2')
+            with mock.patch.object(launch.launcher, 'invoke', side_effect=AssertionError('execute')), \
+                 mock.patch.object(launch.launcher, 'detach', side_effect=AssertionError('detach')), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                launch.main(['--basic-only', '--out', str(out)])
+            self.assertIn('4 windows / 200 formal steps', output.getvalue())
+            self.assertFalse(out.exists())
+        self.exercise(False, basic_only=True)
+        self.exercise(True, basic_only=True)
+
+    def exercise(self, broken, trials=1, basic_only=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = launch.arguments(['--out', str(root), '--trials', str(trials), '--flux-build', '/CPU/flux', '--codec-build', '/CPU/codec'])
+            args = launch.arguments(['--out', str(root), '--trials', str(trials), '--flux-build', '/CPU/flux',
+                                     '--codec-build', '/CPU/codec'] + (['--basic-only'] if basic_only else []))
             seen = []
 
             def invoke(command, log, env):
@@ -127,7 +158,7 @@ class LauncherTests(unittest.TestCase):
                 folder = root/trial
                 if label.endswith('-prepare'):
                     folder.mkdir()
-                    write(folder/'submission.json', submission(trial))
+                    write(folder/'submission.json', submission(trial, basic_only))
                 if label.endswith('-report'):
                     result = report_fixture(folder, read(folder/'submission.json'))
                     if broken and trial == 'compare1':
@@ -145,9 +176,10 @@ class LauncherTests(unittest.TestCase):
                     result = launch.supervise(args)
                     self.assertEqual(result['status'], 'completed')
                     self.assertEqual(result['trials'], trials)
-                    self.assertEqual(result['formal_optimizer_steps'], 1200 * trials)
-                    self.assertEqual(result['timing_windows'], 24 * trials)
-                    self.assertEqual(result['timing_rank_records'], 192 * trials)
+                    windows = 4 if basic_only else 24
+                    self.assertEqual(result['formal_optimizer_steps'], windows * 50 * trials)
+                    self.assertEqual(result['timing_windows'], windows * trials)
+                    self.assertEqual(result['timing_rank_records'], windows * 8 * trials)
                     self.assertEqual(seen[-1], f'compare{trials}-report')
                     self.assertEqual(set(result['comparisons']), set(launch.TRIALS[:trials]))
                     if trials == 1:

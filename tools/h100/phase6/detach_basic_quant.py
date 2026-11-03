@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""One basic receiver-fusion versus standalone CUDA comparison on H100 TP8.
+"""Basic receiver fusion on H100 TP8, optionally compared with standalone CUDA.
 
 Default is a read-only preview. --execute builds isolated implementations,
 double-forks under container PID 1; each comparison measures 24 windows / 1200
 formal steps. Only compare1 is run; no improved arm is built or measured.
 Performance ordering is an experimental outcome, never a gate for continuing.
+--basic-only runs only basic: 4 timing windows / 200 formal steps, with smoke/profile.
 """
 import argparse
 from datetime import datetime
@@ -27,6 +28,10 @@ WINDOWS_PER_COMPARE = 24
 STEPS_PER_COMPARE = 1200
 
 
+def blocks_per_round(basic_only):
+    return 2 if basic_only else BLOCKS
+
+
 def arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--flux-build', type=Path, help='Reuse a verified native GemmOnly build')
@@ -43,12 +48,15 @@ def arguments(argv=None):
     p.add_argument('--worker-timeout', type=int, default=1800)
     p.add_argument('--execute', action='store_true')
     p.add_argument('--foreground', action='store_true')
+    p.add_argument('--basic-only', action='store_true',
+                   help='Only Flux + basic receiver fusion: 4 windows / 200 steps; no full-model control')
     args = p.parse_args(argv)
     require(args.jobs > 0, 'jobs must be positive')
     require(args.worker_timeout > 0, 'worker-timeout must be positive')
     if args.out is None:
         stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO / 'logs/h100/phase6' / (f'basic-quant-receiver-{args.trials}x-50steps-' + stamp)
+        prefix = 'basic-quant-only' if args.basic_only else 'basic-quant-receiver'
+        args.out = REPO / 'logs/h100/phase6' / (f'{prefix}-{args.trials}x-50steps-' + stamp)
     for key, value in vars(args).items():
         if isinstance(value, Path):
             # Keep the selected environment's interpreter spelling intact.
@@ -78,29 +86,36 @@ def commands(args):
         run = cli + ['run', root, '--python', str(args.python), '--cuda-home', str(args.cuda_home),
                      '--worker-timeout', str(args.worker_timeout)]
         steps += [(trial + '-prepare', cli + ['prepare', root, '--flux-build', str(flux), '--codec-build', str(codec),
-                    '--megatron', str(args.megatron), '--blocks', str(BLOCKS),
-                    '--rounds', str(ROUNDS), '--nvls-enable', '0']),
+                    '--megatron', str(args.megatron), '--blocks', str(blocks_per_round(args.basic_only)),
+                    '--rounds', str(ROUNDS), '--nvls-enable', '0',
+                    *(['--basic-only'] if args.basic_only else [])]),
                   (trial + '-dry-run', run),
                   (trial + '-controller', run + ['--stage', 'all', '--execute']),
                   (trial + '-report', cli + ['report', root])]
     return steps
 
 
-def check_inputs(root):
+def check_inputs(root, basic_only=False):
     info = read(root / 'submission.json')
+    mode = 'basic_only' if basic_only else 'paired'
+    policies = routing.measurement_policies(mode)
+    blocks = blocks_per_round(basic_only)
     require(info['protocol'] == routing.PROTOCOL and info['execution_timing'] == routing.TIMING
             and info['executable'] is True and info['source_only'] is False
-            and info['rounds'] == ROUNDS and info['blocks_per_round'] == BLOCKS
-            and info['timing_windows'] == WINDOWS_PER_COMPARE
-            and set(info['variants']) == set(routing.POLICIES)
-            and info['schedule'] == routing.schedule(BLOCKS, rounds=ROUNDS)
+            and info['rounds'] == ROUNDS and info['blocks_per_round'] == blocks
+            and info.get('comparison_mode', 'paired') == mode
+            and info['timing_windows'] == blocks * ROUNDS * len(policies)
+            and set(info['variants']) == set(policies)
+            and info['schedule'] == routing.schedule(blocks, rounds=ROUNDS, mode=mode)
             and info['communication']['environment'].get('NCCL_NVLS_ENABLE') == '0',
-            'Expected a fresh two-arm, both-role, 24-window receiver fusion comparison')
+            'Expected a fresh receiver fusion measurement with the requested policies and schedule')
     return info
 
 
 def same_inputs(first, second):
     require(first['run_id'] != second['run_id'], 'Comparisons must have independent run IDs')
+    require(first.get('comparison_mode', 'paired') == second.get('comparison_mode', 'paired'),
+            'Measurement mode changed')
     for key in ('config', 'execution_timing', 'schedule', 'variants', 'communication',
                 'calibration_hardware', 'megatron', 'megatron_commit',
                 'flux_build_manifest', 'codec_build_manifest', 'codec_identity',
@@ -112,21 +127,29 @@ def same_inputs(first, second):
 
 def check_report(root, info):
     result, gate = read(root / 'report.json'), read(root / 'preflight.json')
+    mode = info.get('comparison_mode', 'paired')
+    policies = routing.measurement_policies(mode)
+    paired = mode == 'paired'
+    blocks = blocks_per_round(not paired)
+    windows = blocks * ROUNDS * len(policies)
     require(read(root / 'all-state.json')['status'] == 'completed'
             and result['completed'] is True and result['correctness_passed'] is True
             and result['execution_path_validated'] is True
-            and result['bitwise_equal_within_pairs'] is True
-            and result['identical_trajectories_within_pairs'] is True
-            and result['equivalence_pairs'] == routing.EQUIVALENCE_PAIRS
+            and result.get('comparison_mode', 'paired') == mode
+            and result.get('executed_policies', list(routing.POLICIES)) == list(policies)
+            and result['bitwise_equal_within_pairs'] is (True if paired else None)
+            and result['identical_trajectories_within_pairs'] is (True if paired else None)
+            and result['equivalence_pairs'] == (routing.EQUIVALENCE_PAIRS if paired else [])
             and result['protocol'] == routing.PROTOCOL and result['run_id'] == info['run_id']
             and result['execution_timing'] == routing.TIMING
-            and result['round_count'] == ROUNDS and result['blocks_per_round'] == BLOCKS
-            and result['timing_windows'] == len(result['all_samples']) == WINDOWS_PER_COMPARE
-            and result['formal_optimizer_steps'] == STEPS_PER_COMPARE
-            and result['timing_rank_records'] == WINDOWS_PER_COMPARE * 8
-            and result['preflight_rank_records'] == 32 and result['profile_traces'] == 16
+            and result['round_count'] == ROUNDS and result['blocks_per_round'] == blocks
+            and result['timing_windows'] == len(result['all_samples']) == windows
+            and result['formal_optimizer_steps'] == windows * routing.TIMING['timed_steps']
+            and result['timing_rank_records'] == windows * 8
+            and result['preflight_rank_records'] == 16 * len(policies)
+            and result['profile_traces'] == 8 * len(policies)
             and result['candidate_shape_mappings'] == 0,
-            'Incomplete two-arm fusion comparison; preserve the failed evidence')
+            'Incomplete receiver fusion measurement; preserve the failed evidence')
     require(gate['completed'] is True and gate['protocol'] == routing.PROTOCOL
             and gate['submission_sha256'] == sha(root / 'submission.json')
             and result['evidence']['preflight_sha256'] == sha(root / 'preflight.json')
@@ -139,13 +162,16 @@ def check_report(root, info):
 
 def supervise(args):
     state_path = args.out / 'batch-state.json'
-    windows = args.trials * WINDOWS_PER_COMPARE
-    formal_steps = args.trials * STEPS_PER_COMPARE
+    mode = 'basic_only' if args.basic_only else 'paired'
+    policies = routing.measurement_policies(mode)
+    windows = args.trials * blocks_per_round(args.basic_only) * ROUNDS * len(policies)
+    formal_steps = windows * routing.TIMING['timed_steps']
     state = dict(status='preparing', protocol=routing.PROTOCOL,
+                 comparison_mode=mode, executed_policies=list(policies),
                  trials=args.trials, expected_timing_windows=windows,
                  expected_formal_optimizer_steps=formal_steps,
                  execution_timing=routing.TIMING, comparisons={},
-                 expected_order='basic < cuda (hypothesis, not execution gate)')
+                 expected_order=None if args.basic_only else 'basic < cuda (hypothesis, not execution gate)')
     env = dict(os.environ, PYTHONNOUSERSITE='1', NCCL_NVLS_ENABLE='0',
                CUDA_DEVICE_MAX_CONNECTIONS='1')
     env.setdefault('CUDA_VISIBLE_DEVICES', '0,1,2,3,4,5,6,7')
@@ -157,7 +183,7 @@ def supervise(args):
             launcher.invoke(cmd, args.out / (label + '.log'), env)
             if label.endswith('-dry-run'):
                 trial = label.removesuffix('-dry-run')
-                info = check_inputs(args.out / trial)
+                info = check_inputs(args.out / trial, args.basic_only)
                 if inputs:
                     same_inputs(next(iter(inputs.values())), info)
                 inputs[trial] = info
@@ -169,8 +195,8 @@ def supervise(args):
                     require(result['measurement_identity'] == reports[0]['measurement_identity'],
                             'Hardware/software identity changed between comparisons')
                 reports.append(result)
-                state['comparisons'][trial].update(status='completed', timing_windows=24,
-                    formal_optimizer_steps=1200, report=str(args.out / trial / 'report.json'),
+                state['comparisons'][trial].update(status='completed', timing_windows=result['timing_windows'],
+                    formal_optimizer_steps=result['formal_optimizer_steps'], report=str(args.out / trial / 'report.json'),
                     report_sha256=sha(args.out / trial / 'report.json'))
             write(state_path, state)
         require(len(reports) == args.trials, 'All requested complete comparison reports are required')
@@ -188,15 +214,20 @@ def supervise(args):
 
 def main(argv=None):
     args = arguments(argv)
+    mode = 'basic_only' if args.basic_only else 'paired'
+    windows = args.trials * blocks_per_round(args.basic_only) * ROUNDS * len(routing.measurement_policies(mode))
+    formal_steps = windows * routing.TIMING['timed_steps']
     print('Batch:', args.out, flush=True)
-    print('Basic receiver-only fusion / standalone CUDA codec; shared GemmOnly + encoder + NCCL; Attention + MLP.', flush=True)
+    print('Flux + basic receiver fusion ONLY; Attention + MLP; no full-model comparison arm.' if args.basic_only else
+          'Basic receiver-only fusion / standalone CUDA codec; shared GemmOnly + encoder + NCCL; Attention + MLP.', flush=True)
     if not args.execute:
         print('PLAN ONLY: no directories, subprocesses, compilation, forks or GPU queries.')
         for _, command in commands(args):
             print(shlex.join(command))
-        print(f'{args.trials} comparison(s), {args.trials * WINDOWS_PER_COMPARE} windows / '
-              f'{args.trials * STEPS_PER_COMPARE} formal steps; each window 10 warmup + 50 timed steps.')
-        print('All performance outcomes are retained; the proposed speed ordering is not guaranteed.')
+        print(f'{args.trials} trial(s), {windows} windows / '
+              f'{formal_steps} formal steps; each window 10 warmup + 50 timed steps.')
+        print('Basic smoke and independent profile retained; no paired speedup.' if args.basic_only else
+              'All performance outcomes are retained; the proposed speed ordering is not guaranteed.')
         return
     require(args.python.is_file() and args.megatron.is_dir(), 'Training Python / Megatron source missing')
     require((args.cuda_home / 'lib64').is_dir(), 'Runtime CUDA Toolkit missing; pass --cuda-home')
@@ -211,8 +242,8 @@ def main(argv=None):
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'handoff').mkdir()
     write(args.out / 'batch-state.json', dict(status='launching', protocol=routing.PROTOCOL,
-          trials=args.trials, expected_timing_windows=args.trials * WINDOWS_PER_COMPARE,
-          expected_formal_optimizer_steps=args.trials * STEPS_PER_COMPARE))
+          comparison_mode=mode, trials=args.trials, expected_timing_windows=windows,
+          expected_formal_optimizer_steps=formal_steps))
     write(args.out / 'handoff/launch.json',
           {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()})
     if args.foreground:

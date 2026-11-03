@@ -280,6 +280,60 @@ class IntegrationTests(unittest.TestCase):
                                 env=dict(os.environ, H100_BASIC_QUANT_EXECUTE='1'))
         self.assertIn('Source-only', result.stderr)
 
+    def test_basic_only_source_preview_and_mode_integrity(self):
+        with mock.patch.object(preparation, 'capture_hardware', side_effect=AssertionError('GPU query')):
+            root = preparation.prepare(self.root/'basic-only-source', self.flux, self.codec, Path('/absent'),
+                                       source_only=True, basic_only=True)
+        info = report.verify_inputs(root)
+        self.assertEqual(set(info['variants']), {'basic'})
+        self.assertEqual(info['timing_windows'], 4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            jobs = cli.run(root)
+        self.assertEqual(len(jobs), 6)  # one smoke, one profile, four formal windows
+        self.assertEqual({j['policy'] for j in jobs}, {'basic'})
+        worker = (root/'scripts/worker.py').read_text()
+        self.assertNotIn('os.sched_setaffinity', worker)
+        self.assertIn("cpu_affinity_policy='inherit'", worker)
+        self.assertFalse((root/'build/cuda').exists())
+        write(root/'submission.json', dict(info, comparison_mode='paired'))
+        with self.assertRaises(ValueError): report.verify_inputs(root)
+
+    def test_basic_only_report_has_no_paired_claim_and_keeps_evidence_gates(self):
+        root = preparation.prepare(self.root/'BASIC-ONLY-SYNTHETIC-NO-GPU', self.flux, self.codec, Path('/absent'),
+                                   source_only=True, basic_only=True)
+        info = read(root/'submission.json')
+        info.update(executable=True, source_only=False, hardware=HARDWARE, calibration_hardware=HARDWARE, codec_library=LIBRARY)
+        info['variants']['basic']['libraries'] = {n: dict(path='/CPU-FIXTURE/basic/'+n, sha256='f'*64)
+                                                 for n in ('libflux_cuda.so', 'libflux_cuda_ths_op.so')}
+        write(root/'submission.json', info)
+        write(root/'start-gpu-check.json', dict(passed=True, run_id=info['run_id'], synthetic=True))
+        for job in scope_run.jobs(info, 'all', sp):
+            if job['policy'] == 'basic': make_window(root, info, job)
+        with mock.patch.object(report, 'verify_inputs', return_value=info):
+            gate = report.preflight(root, offline=True)
+            result = report.report(root, offline=True)
+            self.assertEqual(result['executed_policies'], ['basic'])
+            self.assertEqual(result['formal_optimizer_steps'], 200)
+            self.assertEqual(result['timing_rank_records'], 32)
+            self.assertEqual((result['preflight_rank_records'], result['profile_traces']), (16, 8))
+            self.assertEqual(result['rounds']['combined']['comparisons'], {})
+            self.assertEqual(result['rounds']['combined']['mean_ms'], {'basic': 600.})
+            self.assertIsNone(result['bitwise_equal_within_pairs'])
+            self.assertIsNone(result['expected_order_confirmed'])
+            self.assertEqual(result['equivalence_pairs'], [])
+            self.assertEqual(set(gate['role_profiles']), {f'basic/rank{r}' for r in range(8)})
+            self.assertIn('单组完整训练', (root/'report.md').read_text())
+            self.assertFalse((root/'results/smoke-cuda').exists())
+            self.assertFalse((root/'results/profile-cuda').exists())
+            job = info['schedule'][0]
+            path = root/'results'/job['directory']/'rank0.json'
+            original = read(path)
+            write(path, dict(original, timed_steps=20, losses=[1.]*20))
+            with self.assertRaises(ValueError): report.report(root, offline=True)
+            write(path, original)
+            (root/'results/profile-basic/rank0-profile.json.gz').unlink()
+            with self.assertRaises(FileNotFoundError): report.preflight(root, offline=True)
+
     def test_reject_duration_scope_identity_and_code_drift(self):
         path, saved = self.compare/'submission.json', read(self.compare/'submission.json')
         for key, value in [('execution_timing', dict(warmup_steps=10, timed_steps=20)),

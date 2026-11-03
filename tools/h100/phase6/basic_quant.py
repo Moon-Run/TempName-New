@@ -21,7 +21,7 @@ def run(root, stage='all', execute=False, python=Path(sys.executable), cuda_home
     root, python = Path(root).resolve(), Path(python).expanduser().absolute()
     require(stage in ('preflight', 'timing', 'all') and worker_timeout > 0, 'Invalid stage/worker timeout')
     info = reporter.verify_inputs(root)
-    work = list(scope_run.jobs(info, stage, routing))
+    work = [job for job in scope_run.jobs(info, stage, routing) if job['policy'] in info['variants']]
     command = scope_run.command(root, info, python)
     if not execute:
         print('PLAN ONLY: no workers, mappings, CUDA imports or GPU queries')
@@ -101,11 +101,12 @@ def arguments(argv=None):
     p.add_argument('--flux-build', type=Path, required=True)
     p.add_argument('--codec-build', type=Path, required=True)
     p.add_argument('--megatron', type=Path, default=REPO.parent/'Megatron-LM')
-    p.add_argument('--blocks', type=int, default=6)
+    p.add_argument('--blocks', type=int, help='Defaults to 2 in basic-only mode, otherwise 6')
     p.add_argument('--rounds', type=int, choices=(2,), default=2)
     p.add_argument('--nvls-enable', choices=('0',), default='0')
     p.add_argument('--scope', choices=('both',), default='both')
     p.add_argument('--source-only', action='store_true')
+    p.add_argument('--basic-only', action='store_true', help='Measure only Flux + basic receiver fusion')
     p = sub.add_parser('run')
     p.add_argument('root', type=Path)
     p.add_argument('--stage', choices=('preflight', 'timing', 'all'), default='all')
@@ -133,7 +134,8 @@ def main(argv=None):
             builder.compile_build(args.root, args.cuda_home, args.jobs, args.nccl_root)
     elif args.action == 'prepare':
         print(preparation.prepare(args.out, args.flux_build, args.codec_build, args.megatron,
-                                  args.blocks, args.rounds, args.nvls_enable, args.source_only, args.scope))
+                                  args.blocks, args.rounds, args.nvls_enable, args.source_only, args.scope,
+                                  basic_only=args.basic_only))
     elif args.action == 'run':
         return run(args.root, args.stage, args.execute, args.python, args.cuda_home, args.worker_timeout)
     else:

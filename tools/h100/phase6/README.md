@@ -12,6 +12,8 @@ MA14–MA20 串行运行使用 [run_ma14_ma15_ma16_ma17_ma18_ma19_ma20.sh](run_m
 
 2026-10-31 起，新生成的 worker 统一继承启动环境的 CPU affinity，不再按逻辑 CPU 编号强制绑定单核。MA11、MA14、MAV2、基础量化等入口通过共同模板生效；必须新建输出目录并重新 prepare。原因、报告字段与串行复测命令见 [CPU affinity 修复说明](../../../docs/design/design-h100/cpu-affinity.md)。
 
+仅测 Flux＋基础量化（接收端融合 v2、Attention＋MLP）：`bash tools/h100/phase6/run_basic_quant_only.sh --execute`。默认后台运行，4 个正式窗口，每窗口 10 步预热＋50 步计时，共 200 个正式 step；保留 basic smoke/profile，不运行其他策略的完整训练。结果在打印目录的 `compare1/report.md`。不加 `--execute` 只预览；原 `run_basic_quant.sh` 仍默认双组比较。
+
 **默认模型为GPT 6.7B。** 执行端先读[测试与交付说明](../../../docs/design/design-h100/instruction-h100.md)，开发端先读[数据与源码索引](../../../docs/design/design-h100/instruction.md)。截至提交 `e7a0c49`，旧0.64B、6.7B前次续跑及最新完整复测均有报告，具体状态和证据见开发端索引。下文命令用于按任务执行新会话；`calibrate.py run` 和 `run.py` 没有 `--execute` 时只打印命令。
 
 ## 算法与 baseline

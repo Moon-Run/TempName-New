@@ -17,6 +17,11 @@ def require(ok, message):
         raise ValueError(message)
 
 
+def measurement_policies(mode='paired'):
+    require(mode in ('paired', 'basic_only'), 'Unknown basic-quant measurement mode')
+    return ('basic',) if mode == 'basic_only' else POLICIES
+
+
 def definition(policy):
     require(policy in POLICIES, 'Unknown basic-fusion comparison policy')
     return dict(policy=policy, family='flux_tensor', scope='attn_mlp', roles=['attn', 'mlp'],
@@ -100,11 +105,18 @@ def selection_entry(*args):
     raise ValueError('Both baselines must not consume a selective mask')
 
 
-def schedule(blocks=6, seed=SCHEDULE_SEED, rounds=2):
-    require(type(blocks) is int and blocks >= 6 and blocks % 2 == 0,
-            'Use at least six complete paired blocks, divisible by two')
+def schedule(blocks=None, seed=SCHEDULE_SEED, rounds=2, mode='paired'):
+    policies = measurement_policies(mode)
+    if blocks is None:
+        blocks = 2 if mode == 'basic_only' else 6
+    require(type(blocks) is int and (blocks == 2 if mode == 'basic_only' else blocks >= 6 and blocks % 2 == 0),
+            'Basic-only uses two windows per round; paired mode needs at least six even blocks')
     require(type(rounds) is int and rounds == 2 and seed == SCHEDULE_SEED,
             'Two balanced internal rounds and the fixed schedule seed are required')
+    if policies == ('basic',):
+        return [dict(round=rep, block=b, index=b, policy='basic',
+                     directory=f'round{rep}/window-{b:03d}-basic')
+                for rep in range(1, rounds+1) for b in range(blocks)]
     order = list(POLICIES)
     random.Random(seed).shuffle(order)
     first = [order[i % 2:]+order[:i % 2] for i in range(blocks)]

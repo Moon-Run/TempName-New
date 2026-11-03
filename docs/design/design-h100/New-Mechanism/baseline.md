@@ -2,6 +2,20 @@
 
 更新：2026-10-27。按 [base-baseline.md](../base-baseline.md) 的指标整理，列顺序为 **MA11、MA89、MA8、MA9、CR3、R、C、A、Flux＋基础量化、Flux＋CUDA量化、Megatron＋CUDA量化、Megatron+朴素量化、原生Megatron、原始Flux**。MA8 指无新增逐调用包装的 **MA8-v2**（`F4-cache`）；MA9 指 `F4-zcount`；MA89 为两者组合（`F4-cache-zcount`）。**MA11** 在完整 MA89 上加入注意力 mask／softmax 中间态消除，策略 ID 为 `F4-cache-zcount-csoftmax`，作为本表耗时下降行的比较基准；取值对应 [ma-11.md 第 8 节](ma-11.md#8-ma11-v1-八卡实测有正增量但未达到2目标)已复核的首轮批次。CR3 为本表对原 **F4** 的新名称，指 [MA4-F 消费链融合](ma-4.md)，直接基于 CR2；原始脚本与报告中的策略标识仍为 `F4`。R 指 MA2-R；Flux＋基础量化采用 [a-baseline.md](a-baseline.md) 页首的**接收端融合 v2**，不是该文历史部分的生产端融合 v1。最后三列取自 [Attention/MLP 作用范围文档](../base-phase6-mlp-attention.md) 对应的原始数据，Megatron+朴素量化采用 Attention＋MLP 版本。
 
+**仅测 Flux＋基础量化（2026-11-03 新入口，历史表格数值不变）：** 在 `TempName-New` 仓库根目录执行：
+
+```bash
+# 预览；不创建实验目录、不编译、不查询 GPU
+bash tools/h100/phase6/run_basic_quant_only.sh
+
+# 正式运行；默认脱离终端后台执行
+bash tools/h100/phase6/run_basic_quant_only.sh --execute
+```
+
+这个入口只运行下表的 **Flux＋基础量化，接收端融合 v2，策略 `basic`，Attention＋MLP**。不运行 MA11、MA15 或 CUDA 量化对照的完整训练。正式计时固定 **4 个窗口**（两轮各 2 个），每窗口预热 10 步＋计时 50 步，共 **200 个正式 optimizer step、32 份正式 rank 记录**；另保留本组 smoke 数值检查和独立 profile。smoke 内部的 codec／接收端参考检查仍会执行，不属于另一组完整训练。生成的 worker 继承外部 CPU affinity。
+
+默认按原流程准备／构建所需 GemmOnly 与 codec 库；已有构建可通过 `--flux-build` 和 `--codec-build` 传入并验明身份。启动后查看打印目录下的 `batch-state.json` 和 `handoff/container-supervisor.log`；完成结果位于 `compare1/report.md`、`compare1/report.json`，给出全窗口均值、中位数、吞吐和 loss，不生成同期配对加速比。需要前台运行时添加 `--foreground`。原 `run_basic_quant.sh --execute` 仍是 basic／cuda 双组比较；其单组等价命令为 `run_basic_quant.sh --basic-only --execute`。
+
 | **组别** | **策略概括** |
 | --- | --- |
 | **MA11** | **MA89＋注意力中间态消除**：在 softmax 内消费原 bool mask，反向直接生成分数梯度，消除独立 mask、BF16 乘积临时态及原位 view 梯度重建；保留原归约树、BF16 舍入及 QK／PV 算术。 |
