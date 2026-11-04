@@ -1,0 +1,151 @@
+{
+  "purpose": "Real trace regressions for both 2026-11-04 failures; not standalone graph correctness evidence",
+  "examples": [
+    {
+      "batch": "../Load-5090/SL3061/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-103031-413009",
+      "rank": 4,
+      "trace_sha256": "53745f1aa2d965a9d9d77644614b51668e766be680f2d2241d468c47f89e642e",
+      "v1_limit_us": 0.352,
+      "observed_overlap_us": 0.38525390625,
+      "events": [
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8::Params)",
+          "pid": 4,
+          "tid": 7,
+          "ts": 2903115590882.951,
+          "dur": 51.168,
+          "args": {
+            "External id": 29095,
+            "queued": 0,
+            "device": 4,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1554040,
+            "registers per thread": 242,
+            "shared memory": 81920,
+            "blocks per SM": 0.376471,
+            "warps per SM": 1.505882,
+            "grid": [
+              16,
+              1,
+              4
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 0
+          }
+        },
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void at::native::vectorized_elementwise_kernel<8, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul> >(int, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul>)",
+          "pid": 4,
+          "tid": 7,
+          "ts": 2903115590933.734,
+          "dur": 1.408,
+          "args": {
+            "External id": 29095,
+            "queued": 0,
+            "device": 4,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1554040,
+            "registers per thread": 40,
+            "shared memory": 0,
+            "blocks per SM": 6.02353,
+            "warps per SM": 24.094118,
+            "grid": [
+              1024,
+              1,
+              1
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 50
+          }
+        }
+      ]
+    },
+    {
+      "batch": "../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-104108-810625",
+      "rank": 7,
+      "trace_sha256": "35e02d3c9eb25a3f19d496728217d5994b79440702764cf96eacdce95c1ea188",
+      "v1_limit_us": 1.0,
+      "observed_overlap_us": 1.0224609375,
+      "events": [
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "rtx5090_ma11_softmax::ma11_softmax_backward_kernel(__nv_bfloat16 const*, __nv_bfloat16 const*, bool const*, __nv_bfloat16*)",
+          "pid": 7,
+          "tid": 7,
+          "ts": 2903677135080.152,
+          "dur": 17.364,
+          "args": {
+            "External id": 32200,
+            "queued": 0,
+            "device": 7,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1572064,
+            "registers per thread": 46,
+            "shared memory": 16,
+            "blocks per SM": 48.188236,
+            "warps per SM": 192.752945,
+            "grid": [
+              8192,
+              1,
+              1
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 83
+          }
+        },
+        {
+          "ph": "X",
+          "cat": "kernel",
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nn_align8::Params)",
+          "pid": 7,
+          "tid": 7,
+          "ts": 2903677135096.493,
+          "dur": 53.305,
+          "args": {
+            "External id": 32200,
+            "queued": 0,
+            "device": 7,
+            "context": 1,
+            "stream": 7,
+            "correlation": 1572064,
+            "registers per thread": 242,
+            "shared memory": 81920,
+            "blocks per SM": 0.376471,
+            "warps per SM": 1.505882,
+            "grid": [
+              16,
+              1,
+              4
+            ],
+            "block": [
+              128,
+              1,
+              1
+            ],
+            "est. achieved occupancy %": 0
+          }
+        }
+      ]
+    }
+  ]
+}

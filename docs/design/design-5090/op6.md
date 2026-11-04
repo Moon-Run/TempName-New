@@ -216,6 +216,8 @@ ValueError: MA15 attention graph and staging copies: GPU dependency order change
 
 ### 8.2 有限范围的检查器修正
 
+本节记录11月3日的 v1 策略；11月4日两台机器再次触发该经验门限，当前实现已由第11节的 v2 策略替代。
+
 只修改 [op6_profile.py](../../../tools/5090/phase6/op6_profile.py) 的局部图检查规则：允许范围为 `min(1.0μs, 较短kernel时长的25%)`。这是针对当前 SM120/CUPTI 工作负载的明确经验验收界限，**不是 NVIDIA 保证的时钟精度**，不自动随某次结果增大。
 
 该容差仅作用于同一次唯一 graph launch correlation 下、同 device/context/stream 的两个 kernel；开始时间仍须递增，节点种类、数量、顺序、原 GEMM 分派和 softmax 几何仍严格核验。输入复制、输出 clone、不同 graph launch、不同 stream，以及通信／投影路径均不获得该例外。原始时间戳不修改；所有允许的表面重叠记录在报告中。没有修改图计算、数值容差或正式计时循环，H100 检查器原文件也保持不变。
@@ -311,3 +313,43 @@ tools/5090/phase6/op6_profile_io.py
 现有OP3/ABC native build仍可复用。本次没有清空 `/tmp`、删除其他任务文件或修改旧失败批次。根盘的通用清理不由本次脚本执行；此修复迁移的是OP6大体积模型trace的临时文件。
 
 验证：79项OP6回归测试全部通过；随后新增的真实CPU profiler导出测试也通过（导出专项共9项通过）。覆盖系统临时目录不可用、空/缺失/截断JSON、导出或压缩期间磁盘满、八rank并发、已有文件保护，以及只允许profile导出I/O替换、仍拒绝训练/计时/capture改动。新文档链接和 `git diff --check` 通过。尚未在SL3061重新执行完整GPU实验。
+
+## 11. 两台机器的图内时间戳误判修复（2026-11-04）
+
+[SL3061 103031 子批日志](../../../../Load-5090/SL3061/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-103031-413009/compare1/block00-op6-supervisor.log) 和 [SL3060 104108 子批日志](../../../../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-104108-810625/compare1/block00-op6-supervisor.log) 都在 OP6 profile worker 完成后，由控制器报 `GPU dependency order changed`。这次是检查代码将 CUPTI 图内端点重叠判为依赖错误，没有显存不足或 trace 写盘失败记录。SL3061 使用30000 MiB空档占位，SL3060关闭占位；二者的触发点都在同一个时间戳检查函数。
+
+| 机器／批次 | 已完成的 OP4 50步正式窗口 | OP6失败 rank／边界 | trace表面重叠 | v1拒绝原因 |
+| --- | ---: | --- | ---: | --- |
+| SL3061 / 103031-413009 | 809.3031573854387 ms/step | rank4，GEMM → scale | 0.38525390625 μs | scale仅1.408 μs，重叠27.36%超过25%门限 |
+| SL3060 / 104108-810625 | 831.3084928505123 ms/step | rank7，backward softmax → GEMM | 1.0224609375 μs | 超过1.0 μs门限 |
+
+两个 OP6 子批次都没有进入正式计时，均未完成一对 block，不能用表中 OP4 值推断 OP6 收益或800ms目标是否达到。OP4值按原八rank `elapsed_seconds` 重算并核对报告。
+
+### 11.1 依据与修复范围
+
+两次共16份原始 OP6 trace 中有2802处大于0.01 μs的图内相邻kernel端点重叠，只有上述两处超过 v1 门限。它们均有相同且唯一的 graph launch correlation、device/context/stream，kernel种类、顺序和几何没有变化，也没有开始或结束端点倒序。两批保存的 `op6_adapter.py` 哈希均与当前未修改的捕获实现一致；该实现按同一capture stream提交原 attention 计算。八rank的 OP4/OP6 smoke和profile记录通过原严格数值对比，包括smoke全部梯度／参数轨迹、投影输出哈希。
+
+[NVIDIA 对 CUPTI 时间戳的说明](https://forums.developer.nvidia.com/t/concurrent-execution-of-cuda-kernels-from-different-contexts/73333) 解释了同一stream中的表面重叠可以由kernel结束时间戳采集产生。该说明没有给出适用于当前5090环境的固定误差保证。结合上述源码、路径和数值证据，这两处符合时间戳伪影的表现；Chrome trace本身不能证明图内实际重叠或数据竞争。
+
+当前 [op6_profile.py](../../../tools/5090/phase6/op6_profile.py) 使用 `op6-sm120-correlated-graph-structure-v2`：
+
+- 对**同一个已唯一关联的 graph launch 内的两个kernel**，端点重叠作为诊断记录，不再使用1 μs／25%这两个经验值决定正确性。报告将这两个硬门限字段明确设为 `null`，保留原值作为诊断参考，并记录 `exceeds_v1_reference_count`。
+- 所有attention GPU工作必须有一致的device/context/stream；时间戳必须有限、时长为正，相邻工作开始和结束端点均严格递增。端点倒序、相同开始时间、区间包含仍拒绝。每个graph的唯一归属、节点数量、具体kernel顺序、GEMM分派和softmax几何仍由原检查器核对。
+- 输入staging、输出clone、memcpy及跨graph correlation的边界不获得图内kernel例外，仍按原0.01 μs边界检查。源码冻结、graph生命周期、eager逐位oracle、OP3投影／通信检查均保留。
+- 原始trace不改写。报告明确 `physical_serialization_proven_by_timestamps=false`；接受图内端点重叠不构成物理并发或正式加速证据。以后若路径检查失败，错误会带rank、correlation、前后kernel、时长和重叠值。
+
+修改的是OP6局部审计策略；H100的 `ma15_profile.py`、OP4/OP6训练worker、CUDA kernel、正式计时循环、占位量及profile导出目录均未改动。
+
+### 11.2 复核与重新启动
+
+两台机器的**全部16份原始 OP6 trace 已通过完整 OP3 路径＋新版图检查**，数值对比也通过。含原trace SHA256和各rank诊断计数的复核结果分别保存在 [SL3061复核记录](op6-sl3061-1104-profile-analysis.json) 与 [SL3060复核记录](op6-sl3060-1104-profile-analysis.json)。这是只读重审，旧失败状态保持不变，未重验未回传的native二进制，也没有新增GPU计时。
+
+同步目标机的 `tools/5090/phase6/op6_profile.py` 即可应用运行修复；`test_op6_profile.py`、新增 `fixtures/op6_graph_timestamp_nov4.json` 和 `reanalyze_op6_profile.py` 用于回归及离线重审。新启动仍需创建新批次；已完成OP4所用的构建可复用，例如关闭占位的SL3061命令：
+
+```bash
+bash tools/5090/phase6/run_op6.sh \
+  --place 61 --trials 1 --blocks 4 --execute --reserve-mib 0 \
+  --build /workspace/Load-5090/SL3061/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-103031-413009/build
+```
+
+SL3060使用 `--place 60`，并将build换为 `/workspace/Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-104108-810625/build`。需要占位时显式使用 `--reserve-mib 30000`；两组设置必须相同，由原计划校验保证。构建仍由原验证器检查，主要native库无需因为本次Python检查器修改而重编。

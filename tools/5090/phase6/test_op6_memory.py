@@ -112,9 +112,24 @@ finally:
 '''
         original = subprocess.Popen
         def launch(_command, **kwargs):
-            return original([sys.executable, '-u', '-c', code], **kwargs)
+            # Popen belongs to the shared subprocess module. Only replace our
+            # holder; intercepting nproc in argument parsing can wait on the
+            # test runner's stdin indefinitely instead of querying CPU count.
+            if str(Path(memory.__file__).resolve()) not in _command or '--hold' not in _command:
+                return original(_command, **kwargs)
+            # The fake uses only stdlib; exclude unrelated site startup hooks
+            # from the deliberately short readiness/cleanup timeout tests.
+            return original([sys.executable, '-S', '-u', '-c', code], **kwargs)
         with patch.object(memory.subprocess, 'Popen', side_effect=launch):
             yield marker
+
+    def test_holder_fixture_does_not_replace_unrelated_subprocesses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.fake_gpu_process(Path(tmp)) as marker:
+                output = subprocess.check_output([sys.executable, '-S', '-c', "print('unrelated')"],
+                                                 stdin=subprocess.DEVNULL, text=True, timeout=10)
+            self.assertEqual(output, 'unrelated\n')
+            self.assertFalse(marker.exists())
 
     def test_real_pipe_eof_cleanup_and_no_cuda_in_controller(self):
         with tempfile.TemporaryDirectory() as tmp:

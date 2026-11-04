@@ -40,9 +40,12 @@ def profile_rank(task):
         backward_graph_launches=graph['backward_graph_launches'],
         timestamp_overlaps=order['tolerated_overlap_count'],
         old_timestamp_rule_rejections=old_rejected,
+        v1_timestamp_rule_rejections=order['exceeds_v1_reference_count'],
         max_observed_overlap_us=order['max_observed_overlap_us'],
         timestamp_policy={key: order[key] for key in ('policy', 'graph_kernel_tolerance_us',
-            'max_fraction_of_shorter_kernel', 'strict_boundary_tolerance_us')})
+            'max_fraction_of_shorter_kernel', 'strict_boundary_tolerance_us',
+            'strictly_increasing_kernel_endpoints', 'kernel_endpoint_overlap_is_diagnostic',
+            'physical_serialization_proven_by_timestamps', 'v1_reference_us', 'v1_reference_fraction')})
 
 
 def analyze(batch, jobs):
@@ -79,7 +82,7 @@ def analyze(batch, jobs):
         for result in pool.map(profile_rank, [(str(candidate), rank) for rank in range(8)]):
             profiles.append(result)
             print(json.dumps(result), flush=True)
-    return dict(schema='op6-first-pair-profile-reanalysis-v1',
+    return dict(schema='op6-first-pair-profile-reanalysis-v2',
         batch=os.path.relpath(batch, REPO), saved_batch_state=p.read(batch/'batch-state.json'),
         op4_formal_ms=sample['ms_per_step'],
         candidate_formal_report_present=(candidate/'report.json').is_file(),
