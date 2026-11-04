@@ -171,9 +171,9 @@ class ChildScope(unittest.TestCase):
 
 
 class Supervision(unittest.TestCase):
-    def run_fixture(self, root, failure=None, reserve_mib=0):
+    def run_fixture(self, root, failure=None, reserve_mib=0, blocks=2, inspect_child=None):
         args = op6.arguments(['--out', str(root), '--execute', '--op3-build', str(root/'reused'),
-                             '--blocks', '2', '--reserve-mib', str(reserve_mib)])
+                             '--blocks', str(blocks), '--reserve-mib', str(reserve_mib)])
         (root/'reused').mkdir()
         op6.write(root/'batch-state.json', {})
         calls = []
@@ -185,6 +185,8 @@ class Supervision(unittest.TestCase):
         evidence.audit_pair = audit
         def run(command, env, log):
             calls.append(command)
+            if inspect_child is not None:
+                inspect_child(command, env, log)
             if failure == 'child':
                 raise ValueError('child failure')
             child = Path(command[command.index('--out')+1])
@@ -197,7 +199,7 @@ class Supervision(unittest.TestCase):
             stack.enter_context(patch.object(op6.op3.base, 'verify_controllers'))
             stack.enter_context(patch.object(op6, 'run_child', side_effect=run))
             stack.enter_context(patch.object(op6, 'child_result', return_value={}))
-            stack.enter_context(patch.object(op6, 'replay', return_value=op6.report(samples(), 1, 2)))
+            stack.enter_context(patch.object(op6, 'replay', return_value=op6.report(samples(blocks=blocks), 1, blocks)))
             try:
                 with redirect_stdout(io.StringIO()):
                     op6.supervise(args)

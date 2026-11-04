@@ -289,6 +289,8 @@ bash tools/5090/phase6/run_op6.sh \
 
 ## 10. SL3061 根盘满导致 profile 导出失败的修复（2026-11-03）
 
+本节记录profile文件迁移；编译器及其余子进程的统一临时目录管理见第12节。
+
 [223559 批次的 profile 日志](../../../../Load-5090/SL3061/op6-local-attention-graph-paired-v1-1x-4blocks-20261103-223559-519420/compare1/block00-op4/results/profile-op3-combined/process.log) 在八个 rank 上先报 `Failed to write to log file!`，随后读取 `/tmp/flux-e2e-scale-trace-.../trace.json` 时抛出 `FileNotFoundError`。八个最终 `.gz` 文件解压后均为0字节。该批次在 OP4 全模型 smoke 之后、正式计时之前停止，OP6 尚未开始。
 
 用户在目标机确认：`/tmp` 位于891G的容器根盘 overlay，已用100%、仅余238 MiB；新的 `/workspace` 挂载盘仍有174 GiB可用。inode未耗尽，`/tmp` 权限为1777。结合八 rank 导出错误，问题在根盘的临时 trace 存储空间，不是30000 MiB显存占位或模型GPU OOM。父批次1次、子批次7次占位均正常释放；最后一次释放在北京时间22:39:58，profile写文件失败在22:40:34。
@@ -353,3 +355,59 @@ bash tools/5090/phase6/run_op6.sh \
 ```
 
 SL3060使用 `--place 60`，并将build换为 `/workspace/Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-104108-810625/build`。需要占位时显式使用 `--reserve-mib 30000`；两组设置必须相同，由原计划校验保证。构建仍由原验证器检查，主要native库无需因为本次Python检查器修改而重编。
+
+## 12. nvcc构建校验仍使用系统临时目录的修复（2026-11-04）
+
+[SL3060 121434批次总日志](../../../../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-121434-804271/handoff/supervisor.log) 已完成 `block00-op4`、`block00-op6`，且 `pair-evidence.json` 中第一对的审计通过。第二块的 [block01-op6子批日志](../../../../Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-121434-804271/compare1/block01-op6-supervisor.log) 在 `verify-op3-build` 阶段报：
+
+```text
+nvcc fatal : Could not open output file '/tmp/tmpxft_0002decb_0000000a'
+CalledProcessError: ... nvcc --list-gpu-code ... returned non-zero exit status 1
+```
+
+这是构建ABI／CUDA环境核验中的临时文件创建失败，发生在该子批的模型训练之前。日志没有给出具体errno，因此不能仅凭本条日志区分磁盘空间、inode、权限或配额；已知之前根盘 `/tmp` 空间不足，而第10节修复只迁移了profile导出文件。`baseline_build.compile_build` 虽会在正式编译时设置 `TMPDIR`，但 `environment_identity` 的 `nvcc --list-gpu-code` 在该局部设置之外运行；复用构建和MA9/MA11辅助编译也需要统一覆盖。[CUDA 12.9 nvcc文档](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-compiler-driver-nvcc/index.html#keeping-intermediate-phase-files) 明确说明Linux下临时文件使用 `TMPDIR`，未设置时使用 `/tmp`。
+
+本次已完成的第一对正式结果如下，每组50步；已按原八rank耗时重算并核对原记录哈希：
+
+| 组别 | ms/step |
+| --- | ---: |
+| OP4 | 835.4203298315406 |
+| OP6 | 833.083717096597 |
+
+该对减少约2.337 ms（0.280%），尚未达到800ms；仅完成计划四对中的一对，不代表完整批次结果。原失败状态、已完成窗口和证据文件保持不变。诊断及原始文件哈希见 [op6-sl3060-121434-diagnostics.json](op6-sl3060-121434-diagnostics.json)。
+
+### 12.1 全流程临时目录
+
+新增 [op6_temporary.py](../../../tools/5090/phase6/op6_temporary.py)，由 [op6.py](../../../tools/5090/phase6/op6.py) 的父监督器和 [op6_child.py](../../../tools/5090/phase6/op6_child.py) 的两个子组分别启用，作用域覆盖硬件预检、首次依赖构建、复用构建校验、MA9/MA11辅助编译、所有GPU子任务和运行内报告复核。
+
+- 在**输出目录同一文件系统**的最近可写短路径下，创建当前用户专用 `.op6-tmp-<uid>/run-<random>` 私有目录。默认SL3060路径类似 `/workspace/Load-5090/SL3060/.op6-tmp-0/run-xxxxxxxx`，SL3061同理；不硬编码挂载盘名称。
+- 在任何GPU任务前，实际创建、写入并fsync一个64 KiB探测文件。若不可写，明确报告目录、原异常、可用字节和inode；不退回系统 `/tmp`。
+- 统一设置 `TMPDIR`、`TMP`、`TEMP`，并替换当前Python进程已经缓存的 `tempfile.tempdir`。父控制器的直接nvcc查询和所有继承环境的子进程均使用该设置；原baseline编译显式使用的 `build/compiler-tmp` 也位于输出盘。
+- 完整batch路径较长，可能超出多进程Unix socket地址限制。因此临时目录限制为64字节，并验证Python实际生成的 `pymp-.../listener-...` 地址长度；不把整个batch目录直接拼进 `TMPDIR`。
+- 每个父／子作用域独占自己的随机目录，正常退出、异常退出时只清理自己的临时内容，并恢复原环境与Python缓存。不会删除系统 `/tmp`、其他实验的目录或可复用build。强制SIGKILL无法运行Python清理代码；可能遗留的私有路径可按对应记录定位。
+
+每个父／子批次的 `handoff/temporary-storage.json` 记录实际目录、环境变量、PID和文件系统信息；监督日志也打印 `OP6 TMPDIR=...`。预览不会创建目录。子批只在OP3已经创建并冻结输出目录后启用此功能，不破坏 `exist_ok=False` 的新批次保护。
+
+训练计算、图审计、正式计时、NCCL配置、默认nproc并行编译和30000 MiB／0占位选项均保持原逻辑。此次迁移覆盖OP6调用链中遵循这些环境变量的临时文件；没有清理或扩容容器根盘。
+
+### 12.2 部署与验证
+
+同步以下三个运行文件后创建新批次，已有build继续复用：
+
+```text
+tools/5090/phase6/op6.py
+tools/5090/phase6/op6_child.py
+tools/5090/phase6/op6_temporary.py
+```
+
+```bash
+bash tools/5090/phase6/run_op6.sh \
+  --place 60 --trials 1 --blocks 4 --execute --reserve-mib 0 \
+  --build /workspace/Load-5090/SL3060/op6-local-attention-graph-paired-v1-1x-4blocks-20261104-121434-804271/build
+```
+
+本地使用真实CUDA 12.8 `nvcc`：不可用TMPDIR复现相同fatal错误；启用新作用域后 `--list-gpu-code` 成功，且真实SM120 CUDA源文件成功编译为PTX，退出后私有目录已清理。这些验证不需要GPU，目标机CUDA 12.9的完整四块训练仍需重新运行。
+
+新增8项专项回归通过，覆盖坏环境变量与已缓存临时路径、父子作用域隔离、异常清理、输出盘ENOSPC时在占卡前失败、拒绝临时目录符号链接、原构建身份查询、两个子组入口以及四个配对block共8窗口的环境继承。Unix socket测试使用Python实际地址生成器核验路径长度，未在限制socket操作的本地sandbox中监听socket。
+
+最终在已有PyTorch 2.7环境完成 **94项OP6 CPU回归测试，全部通过、无跳过**，包括真实CPU autograd和profiler导出；测试日志为 `/tmp/op6-121434-tests.log`。shell语法、复用本批build的启动预览、新增文档链接和 `git diff --check` 也通过。此次没有在目标5090上新增训练窗口，不能将CPU回归或PTX编译视为完整四block实跑结果。

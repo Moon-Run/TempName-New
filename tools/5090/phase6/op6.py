@@ -23,6 +23,7 @@ import op4
 import op3_protocol as p
 import op6_controllers
 import op6_memory
+import op6_temporary
 from op6_child import PROTOCOL
 
 ARMS = ('op4', 'op6')
@@ -329,6 +330,9 @@ def supervise(args):
         lock = lock_path.open('a')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         op3.base.verify_controllers(root)
+        state.update(status='running', stage='prepare-temporary-storage')
+        write(root/'batch-state.json', state)
+        resources.enter_context(op6_temporary.session(root))
         resolve_reused_build(args)
         plan = dict(protocol=PROTOCOL, run_id=uuid.uuid4().hex, trials=args.trials, blocks=args.blocks,
             model=p.MODEL, target_ms=TARGET_MS, nccl_overrides=CHANNEL_ENV,

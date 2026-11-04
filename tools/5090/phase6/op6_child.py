@@ -10,6 +10,7 @@ import op3
 import op3_protocol as p
 import op6_controllers
 import op6_memory
+import op6_temporary
 
 PROTOCOL = 'rtx5090-phase6-op6-local-attention-graph-paired-v1'
 VARIANTS = ('op4', 'op6')
@@ -69,10 +70,11 @@ def main(argv=None):
     def supervise(child_args):
         # OP3 main has already created/frozen the new output directory. Starting
         # the holder before that would create handoff logs and break exist_ok=False.
-        with op6_memory.session(child_args.python, child_args.out, args.reserve_mib,
-                                op3.base.gpu_idle) as reservation:
-            with op6_memory.child_handoff(reservation, op3.base):
-                return original_supervise(child_args)
+        with op6_temporary.session(child_args.out):
+            with op6_memory.session(child_args.python, child_args.out, args.reserve_mib,
+                                    op3.base.gpu_idle) as reservation:
+                with op6_memory.child_handoff(reservation, op3.base):
+                    return original_supervise(child_args)
 
     try:
         if '--execute' in remaining:
